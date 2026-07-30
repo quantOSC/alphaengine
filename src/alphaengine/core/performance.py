@@ -58,7 +58,7 @@ def performance_report(
     # negative subset (which measures spread around the negatives' own mean).
     # Math-identical to backend/quant/performance.sortino_ratio (M1 fix).
     downside = np.minimum(excess, 0.0)
-    dsd = float(np.sqrt(np.mean(downside ** 2))) if np.count_nonzero(downside) else 0.0
+    dsd = float(np.sqrt(np.mean(downside**2))) if np.count_nonzero(downside) else 0.0
     sortino_ann = (float(excess.mean()) / dsd) * math.sqrt(ppy) if dsd > 0 else 0.0
 
     eq = np.asarray(equity_curve, dtype=float) if equity_curve else np.cumprod(1.0 + arr)
@@ -77,14 +77,14 @@ def performance_report(
 
     out = {
         "n_obs": int(n),
-        "sharpe_ratio": _clean(round(sharpe, 4)),            # per-period
+        "sharpe_ratio": _clean(round(sharpe, 4)),  # per-period
         "sharpe_annualized": _clean(round(sharpe_ann, 4)),
-        "sortino_ratio": _clean(round(sortino_ann, 4)),      # annualized
+        "sortino_ratio": _clean(round(sortino_ann, 4)),  # annualized
         "calmar_ratio": _clean(round(calmar, 4)),
-        "max_drawdown_pct": _clean(round(abs(max_dd) * 100, 2)),   # positive magnitude
+        "max_drawdown_pct": _clean(round(abs(max_dd) * 100, 2)),  # positive magnitude
         "total_return_pct": _clean(round(total_return * 100, 2)),
         "annualized_return_pct": _clean(round(ann_return * 100, 2)),
-        "var_95": _clean(round(var95, 4)),                   # positive daily loss fraction
+        "var_95": _clean(round(var95, 4)),  # positive daily loss fraction
         "cvar_95": _clean(round(cvar95, 4)),
         "volatility_annualized_pct": _clean(round(sd * math.sqrt(ppy) * 100, 2)),
         "risk_free_rate": round(float(risk_free_rate), 4),

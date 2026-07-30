@@ -16,7 +16,6 @@ Pure numpy/scipy/statsmodels. Deterministic given inputs on the pinned stack.
 
 from __future__ import annotations
 
-
 try:  # noqa: SIM105
     import statsmodels  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover
@@ -32,7 +31,6 @@ import math
 from typing import Any
 
 import numpy as np
-
 from statsmodels.tsa.stattools import adfuller
 
 # Pair-trading thresholds (documented so a caller can audit / override).
@@ -59,21 +57,31 @@ ENTRY_ZSCORE = 2.0
 # on mean rolling co-movement (distinct names rarely sustain |corr| >= 0.99).
 MAX_COMOVEMENT_CORR = 0.99
 
-_SAME_ISSUER_TWINS = frozenset({
-    frozenset({"GOOGL", "GOOG"}),
-    frozenset({"BRK.A", "BRK.B"}), frozenset({"BRK-A", "BRK-B"}), frozenset({"BRKA", "BRKB"}),
-    frozenset({"FOX", "FOXA"}),
-    frozenset({"NWS", "NWSA"}),
-    frozenset({"UA", "UAA"}),
-    frozenset({"PARA", "PARAA"}),
-    frozenset({"LEN", "LEN.B"}), frozenset({"LEN", "LEN-B"}),
-    frozenset({"HEI", "HEI.A"}), frozenset({"HEI", "HEI-A"}),
-    frozenset({"LBRDA", "LBRDK"}),
-    frozenset({"CWEN", "CWEN.A"}), frozenset({"CWEN", "CWEN-A"}),
-    frozenset({"MOG.A", "MOG.B"}), frozenset({"MOG-A", "MOG-B"}),
-    frozenset({"GEF", "GEF.B"}), frozenset({"GEF", "GEF-B"}),
-    frozenset({"CRD.A", "CRD.B"}), frozenset({"CRD-A", "CRD-B"}),
-})
+_SAME_ISSUER_TWINS = frozenset(
+    {
+        frozenset({"GOOGL", "GOOG"}),
+        frozenset({"BRK.A", "BRK.B"}),
+        frozenset({"BRK-A", "BRK-B"}),
+        frozenset({"BRKA", "BRKB"}),
+        frozenset({"FOX", "FOXA"}),
+        frozenset({"NWS", "NWSA"}),
+        frozenset({"UA", "UAA"}),
+        frozenset({"PARA", "PARAA"}),
+        frozenset({"LEN", "LEN.B"}),
+        frozenset({"LEN", "LEN-B"}),
+        frozenset({"HEI", "HEI.A"}),
+        frozenset({"HEI", "HEI-A"}),
+        frozenset({"LBRDA", "LBRDK"}),
+        frozenset({"CWEN", "CWEN.A"}),
+        frozenset({"CWEN", "CWEN-A"}),
+        frozenset({"MOG.A", "MOG.B"}),
+        frozenset({"MOG-A", "MOG-B"}),
+        frozenset({"GEF", "GEF.B"}),
+        frozenset({"GEF", "GEF-B"}),
+        frozenset({"CRD.A", "CRD.B"}),
+        frozenset({"CRD-A", "CRD-B"}),
+    }
+)
 
 
 def _redundant_pair_reason(symbol_a, symbol_b, mean_corr) -> str | None:
@@ -85,8 +93,10 @@ def _redundant_pair_reason(symbol_a, symbol_b, mean_corr) -> str | None:
     if a and b and frozenset({a, b}) in _SAME_ISSUER_TWINS:
         return "Same issuer / share-class twin, not a tradeable spread (same economic claim)"
     if mean_corr is not None and abs(mean_corr) >= MAX_COMOVEMENT_CORR:
-        return (f"Near-identical co-movement (|corr|={abs(mean_corr):.3f} >= {MAX_COMOVEMENT_CORR}), "
-                f"legs are effectively the same instrument, no tradeable spread")
+        return (
+            f"Near-identical co-movement (|corr|={abs(mean_corr):.3f} >= {MAX_COMOVEMENT_CORR}), "
+            f"legs are effectively the same instrument, no tradeable spread"
+        )
     return None
 
 
@@ -175,8 +185,8 @@ def _rolling_correlation_stability(
 
     rolling: list[float] = []
     for i in range(window, n):
-        chunk_a = a_returns[i - window:i]
-        chunk_b = b_returns[i - window:i]
+        chunk_a = a_returns[i - window : i]
+        chunk_b = b_returns[i - window : i]
         if np.std(chunk_a) > 0 and np.std(chunk_b) > 0:
             c = float(np.corrcoef(chunk_a, chunk_b)[0, 1])
             if math.isfinite(c):
@@ -204,7 +214,12 @@ def engle_granger_test(spread: np.ndarray) -> dict:
     spread_clean = np.asarray(spread, dtype=float)
     spread_clean = spread_clean[np.isfinite(spread_clean)]
     if len(spread_clean) < 30:
-        return {"p_value": None, "test_statistic": None, "method": "engle_granger", "error": "insufficient_data"}
+        return {
+            "p_value": None,
+            "test_statistic": None,
+            "method": "engle_granger",
+            "error": "insufficient_data",
+        }
     try:
         result = adfuller(spread_clean, regression="c", autolag="AIC")
         return {
@@ -241,31 +256,61 @@ def compute_spread_signal(
     n = len(a_list)
 
     if symbol_a == symbol_b:
-        return {"ticker_a": symbol_a, "ticker_b": symbol_b, "error": "Same ticker for both legs", "cointegrated": False}
+        return {
+            "ticker_a": symbol_a,
+            "ticker_b": symbol_b,
+            "error": "Same ticker for both legs",
+            "cointegrated": False,
+        }
     if n < MIN_OBSERVATIONS:
-        return {"ticker_a": symbol_a, "ticker_b": symbol_b, "n_observations": n,
-                "error": f"Insufficient overlap: {n} obs (need {MIN_OBSERVATIONS}+)", "cointegrated": False}
+        return {
+            "ticker_a": symbol_a,
+            "ticker_b": symbol_b,
+            "n_observations": n,
+            "error": f"Insufficient overlap: {n} obs (need {MIN_OBSERVATIONS}+)",
+            "cointegrated": False,
+        }
 
     a = np.array(a_list, dtype=float)
     b = np.array(b_list, dtype=float)
     if (a <= 0).any() or (b <= 0).any():
-        return {"ticker_a": symbol_a, "ticker_b": symbol_b, "n_observations": n,
-                "error": "Non-positive prices found (cannot take log)", "cointegrated": False}
+        return {
+            "ticker_a": symbol_a,
+            "ticker_b": symbol_b,
+            "n_observations": n,
+            "error": "Non-positive prices found (cannot take log)",
+            "cointegrated": False,
+        }
     if np.std(a) < 1e-9 or np.std(b) < 1e-9:
-        return {"ticker_a": symbol_a, "ticker_b": symbol_b, "n_observations": n,
-                "error": "Degenerate: constant price series", "cointegrated": False}
+        return {
+            "ticker_a": symbol_a,
+            "ticker_b": symbol_b,
+            "n_observations": n,
+            "error": "Degenerate: constant price series",
+            "cointegrated": False,
+        }
 
     log_a = np.log(a)
     log_b = np.log(b)
     hedge_ratio = _tls_hedge_ratio(log_a, log_b)
     if not math.isfinite(hedge_ratio) or abs(hedge_ratio) < 1e-9:
-        return {"ticker_a": symbol_a, "ticker_b": symbol_b, "n_observations": n,
-                "error": "Hedge ratio degenerate", "cointegrated": False}
+        return {
+            "ticker_a": symbol_a,
+            "ticker_b": symbol_b,
+            "n_observations": n,
+            "error": "Hedge ratio degenerate",
+            "cointegrated": False,
+        }
 
     spread = compute_spread(a, b, hedge_ratio)
     if len(spread) < max(zscore_window, 30):
-        return {"ticker_a": symbol_a, "ticker_b": symbol_b, "n_observations": n,
-                "error": "Insufficient spread observations after alignment", "cointegrated": False}
+        return {
+            "ticker_a": symbol_a,
+            "ticker_b": symbol_b,
+            "n_observations": n,
+            "error": "Insufficient spread observations after alignment",
+            "cointegrated": False,
+        }
 
     eg = engle_granger_test(spread)
     p_value = eg.get("p_value")
@@ -291,8 +336,11 @@ def compute_spread_signal(
     stab_ok = stab is not None and stab > MIN_STABILITY
 
     if not p_ok:
-        reasons.append("ADF test unavailable" if p_value is None
-                       else f"Failed cointegration (ADF p={p_value:.3f} ≥ {significance})")
+        reasons.append(
+            "ADF test unavailable"
+            if p_value is None
+            else f"Failed cointegration (ADF p={p_value:.3f} ≥ {significance})"
+        )
     if not hl_ok:
         if half_life is None:
             reasons.append("Spread not mean-reverting (AR(1) coefficient ≥ 0)")
@@ -301,8 +349,11 @@ def compute_spread_signal(
         else:
             reasons.append(f"Half-life too long ({half_life:.1f}d > {max_half_life:.0f}d)")
     if not stab_ok:
-        reasons.append("Stability test insufficient data" if stab is None
-                       else f"Unstable correlation (stability={stab:.2f} ≤ {MIN_STABILITY:.2f})")
+        reasons.append(
+            "Stability test insufficient data"
+            if stab is None
+            else f"Unstable correlation (stability={stab:.2f} ≤ {MIN_STABILITY:.2f})"
+        )
 
     cointegrated = bool(p_ok and hl_ok and stab_ok)
     if cointegrated and not reasons:
@@ -350,11 +401,16 @@ def compute_spread_signal(
         "n_observations": n,
         "hedge_ratio": round(float(hedge_ratio), 4),
         "hedge_ratio_method": "total_least_squares_log_prices",
-        "share_ratio_at_close": _clean(round(share_ratio_at_close, 4)) if share_ratio_at_close is not None else None,
+        "share_ratio_at_close": _clean(round(share_ratio_at_close, 4))
+        if share_ratio_at_close is not None
+        else None,
         "cointegration": {
             "p_value": _clean(round(p_value, 4)) if p_value is not None else None,
-            "test_statistic": (_clean(round(eg.get("test_statistic", float("nan")), 3))
-                               if eg.get("test_statistic") is not None else None),
+            "test_statistic": (
+                _clean(round(eg.get("test_statistic", float("nan")), 3))
+                if eg.get("test_statistic") is not None
+                else None
+            ),
             "critical_values": eg.get("critical_values"),
             "n_lags": eg.get("n_lags"),
             "method": eg.get("method"),
@@ -369,17 +425,23 @@ def compute_spread_signal(
             "window": zscore_window,
         },
         "stability": {
-            "rolling_correlation_mean": (_clean(round(stability_info["mean_corr"], 3))
-                                         if stability_info["mean_corr"] is not None else None),
-            "rolling_correlation_std": (_clean(round(stability_info["std_corr"], 3))
-                                        if stability_info["std_corr"] is not None else None),
+            "rolling_correlation_mean": (
+                _clean(round(stability_info["mean_corr"], 3))
+                if stability_info["mean_corr"] is not None
+                else None
+            ),
+            "rolling_correlation_std": (
+                _clean(round(stability_info["std_corr"], 3))
+                if stability_info["std_corr"] is not None
+                else None
+            ),
             "stability_score": (_clean(round(stab, 3)) if stab is not None else None),
             "n_windows": stability_info["n_windows"],
         },
         "cointegrated": cointegrated,
-        "structural_quality": structural_quality,   # high | low | unknown | redundant
-        "low_comovement": low_comovement,            # True => likely spurious
-        "redundant": redundant,                      # True => share-class twin / same instrument
+        "structural_quality": structural_quality,  # high | low | unknown | redundant
+        "low_comovement": low_comovement,  # True => likely spurious
+        "redundant": redundant,  # True => share-class twin / same instrument
         "trade_signal": trade_signal,
         "reasons": reasons,
     }
@@ -409,9 +471,16 @@ def find_cointegrated_pairs(
     for sa, sb in pairs:
         if sa not in prices or sb not in prices:
             continue
-        res = compute_spread_signal(prices[sa], prices[sb], symbol_a=sa, symbol_b=sb,
-                                    zscore_window=zscore_window, stability_window=stability_window,
-                                    significance=significance, max_half_life=max_half_life)
+        res = compute_spread_signal(
+            prices[sa],
+            prices[sb],
+            symbol_a=sa,
+            symbol_b=sb,
+            zscore_window=zscore_window,
+            stability_window=stability_window,
+            significance=significance,
+            max_half_life=max_half_life,
+        )
         results.append(res)
 
     def _p(r: dict):

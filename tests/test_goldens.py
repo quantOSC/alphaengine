@@ -44,9 +44,9 @@ def rets(seed: int, n: int) -> list[float]:
 # the same series is "marginal" at one trial and "likely_noise" at forty. That
 # is the whole argument for deriving the count rather than asking for it.
 DSR_GOLDEN = {
-    1:   {"deflated_sharpe": 0.7566, "sr0_expected_max": 0.0371, "verdict": "marginal"},
-    5:   {"deflated_sharpe": 0.5090, "sr0_expected_max": 0.0851, "verdict": "marginal"},
-    40:  {"deflated_sharpe": 0.1650, "sr0_expected_max": 0.1561, "verdict": "likely_noise"},
+    1: {"deflated_sharpe": 0.7566, "sr0_expected_max": 0.0371, "verdict": "marginal"},
+    5: {"deflated_sharpe": 0.5090, "sr0_expected_max": 0.0851, "verdict": "marginal"},
+    40: {"deflated_sharpe": 0.1650, "sr0_expected_max": 0.1561, "verdict": "likely_noise"},
     250: {"deflated_sharpe": 0.0524, "sr0_expected_max": 0.2024, "verdict": "likely_noise"},
 }
 

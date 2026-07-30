@@ -41,7 +41,14 @@ def compute_var_cvar(
     `portfolio_returns`: historical daily portfolio returns as decimals. VaR is
     reported as a positive loss fraction (and dollars at `portfolio_value`).
     """
-    arr = np.array([r for r in (portfolio_returns or []) if r is not None and not (isinstance(r, float) and np.isnan(r))], dtype=float)
+    arr = np.array(
+        [
+            r
+            for r in (portfolio_returns or [])
+            if r is not None and not (isinstance(r, float) and np.isnan(r))
+        ],
+        dtype=float,
+    )
     n_obs = arr.size
     if n_obs < 20:
         return {"error": "need >= 20 observations", "n_obs": int(n_obs)}
@@ -70,10 +77,7 @@ def compute_var_cvar(
         skew = float(np.mean(((arr - mean) / std) ** 3))
         kurt = float(np.mean(((arr - mean) / std) ** 4) - 3.0)  # excess
         z_cf = (
-            z
-            + (z ** 2 - 1) * skew / 6.0
-            + (z ** 3 - 3 * z) * kurt / 24.0
-            - (2 * z ** 3 - 5 * z) * (skew ** 2) / 36.0
+            z + (z**2 - 1) * skew / 6.0 + (z**3 - 3 * z) * kurt / 24.0 - (2 * z**3 - 5 * z) * (skew**2) / 36.0
         )
         # The CF expansion is only valid near-normal; extreme skew/kurtosis
         # can drive z_cf <= 0, which would report a NEGATIVE loss (violating

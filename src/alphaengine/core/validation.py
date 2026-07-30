@@ -25,6 +25,7 @@ _EULER = 0.5772156649015329
 
 # ── Sharpe statistics ───────────────────────────────────────────────────
 
+
 def _per_period_sharpe(returns: np.ndarray) -> float:
     sd = returns.std(ddof=1)
     if sd == 0 or not math.isfinite(sd):
@@ -33,7 +34,11 @@ def _per_period_sharpe(returns: np.ndarray) -> float:
 
 
 def probabilistic_sharpe_ratio(
-    sharpe: float, n_obs: int, skew: float, kurtosis: float, sr_benchmark: float = 0.0,
+    sharpe: float,
+    n_obs: int,
+    skew: float,
+    kurtosis: float,
+    sr_benchmark: float = 0.0,
 ) -> float:
     """PSR: P(true per-period Sharpe > sr_benchmark). Bailey & LdP (2014).
 
@@ -41,7 +46,7 @@ def probabilistic_sharpe_ratio(
     """
     if n_obs < 2:
         return 0.0
-    denom = 1.0 - skew * sharpe + ((kurtosis - 1.0) / 4.0) * sharpe ** 2
+    denom = 1.0 - skew * sharpe + ((kurtosis - 1.0) / 4.0) * sharpe**2
     if denom <= 0:
         denom = 1e-9
     z = (sharpe - sr_benchmark) * math.sqrt(n_obs - 1) / math.sqrt(denom)
@@ -87,7 +92,7 @@ def deflated_sharpe(
 
     # Sampling SD of the Sharpe estimator under the null (Lo, 2002), a floor
     # for trial-Sharpe dispersion when the caller doesn't supply one.
-    sr_est_sd = math.sqrt((1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr ** 2) / (n - 1)) if n > 1 else 0.0
+    sr_est_sd = math.sqrt((1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) / (n - 1)) if n > 1 else 0.0
     std_for_max = trials_sharpe_std if (trials_sharpe_std and trials_sharpe_std > 0) else sr_est_sd
     sr0 = expected_max_sharpe(max(2, n_trials), std_for_max)
     dsr = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0)
@@ -109,7 +114,10 @@ def deflated_sharpe(
 
 
 def min_track_record_length(
-    returns: list[float], *, sr_benchmark: float = 0.0, confidence: float = 0.95,
+    returns: list[float],
+    *,
+    sr_benchmark: float = 0.0,
+    confidence: float = 0.95,
 ) -> dict:
     """Minimum Track Record Length (Bailey & López de Prado, 2012): the number of
     observations needed for the observed Sharpe to be statistically greater than
@@ -126,14 +134,16 @@ def min_track_record_length(
     sr = _per_period_sharpe(arr)
     if sr <= sr_benchmark:
         return {
-            "n_obs": int(n), "sharpe_per_period": round(sr, 4),
-            "min_track_record_length": None, "sufficient": False,
+            "n_obs": int(n),
+            "sharpe_per_period": round(sr, 4),
+            "min_track_record_length": None,
+            "sufficient": False,
             "note": "observed Sharpe <= benchmark; not distinguishable at any length",
         }
     skew = float(stats.skew(arr, bias=False)) if n > 2 else 0.0
     kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
     z = float(stats.norm.ppf(confidence))
-    mintrl = 1.0 + (1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr ** 2) * (z / (sr - sr_benchmark)) ** 2
+    mintrl = 1.0 + (1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) * (z / (sr - sr_benchmark)) ** 2
     mintrl = max(1.0, float(mintrl))
     return {
         "n_obs": int(n),
@@ -148,13 +158,14 @@ def min_track_record_length(
 
 # ── PBO via CSCV ────────────────────────────────────────────────────────
 
+
 def _block_sharpe(sums: np.ndarray, sqs: np.ndarray, counts: np.ndarray, blocks: list[int]) -> np.ndarray:
     """Per-config Sharpe over the selected blocks from precomputed moments."""
     s = sums[blocks].sum(axis=0)
     q = sqs[blocks].sum(axis=0)
     c = counts[blocks].sum()
     mean = s / c
-    var = q / c - mean ** 2
+    var = q / c - mean**2
     sd = np.sqrt(np.maximum(var, 0.0))
     with np.errstate(divide="ignore", invalid="ignore"):
         return np.where(sd > 0, mean / sd, 0.0)
@@ -178,9 +189,9 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
 
     blocks = np.array_split(np.arange(T), n_splits)
     # Precompute per-block moments per config.
-    sums = np.vstack([M[b].sum(axis=0) for b in blocks])        # (S, N)
+    sums = np.vstack([M[b].sum(axis=0) for b in blocks])  # (S, N)
     sqs = np.vstack([(M[b] ** 2).sum(axis=0) for b in blocks])  # (S, N)
-    counts = np.array([len(b) for b in blocks], dtype=float)    # (S,)
+    counts = np.array([len(b) for b in blocks], dtype=float)  # (S,)
 
     block_ids = list(range(n_splits))
     half = n_splits // 2
@@ -216,6 +227,7 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
 
 
 # ── CPCV, Combinatorial Purged Cross-Validation (single return stream) ──────
+
 
 def cpcv_score(
     returns: list[float],
@@ -264,7 +276,7 @@ def cpcv_score(
 
     groups = list(np.array_split(np.arange(n), n_groups))
     combos = list(itertools.combinations(range(n_groups), n_test_groups))
-    if len(combos) > max_paths:                     # deterministic subsample to bound cost
+    if len(combos) > max_paths:  # deterministic subsample to bound cost
         step = max(1, len(combos) // max_paths)
         combos = combos[::step][:max_paths]
 
@@ -297,8 +309,11 @@ def cpcv_score(
             n_short += 1
 
     if not sharpes:
-        return {"error": "no evaluable CPCV paths (groups too small after purge/embargo)",
-                "n_obs": int(n), "n_groups": n_groups}
+        return {
+            "error": "no evaluable CPCV paths (groups too small after purge/embargo)",
+            "n_obs": int(n),
+            "n_groups": n_groups,
+        }
 
     sh = np.asarray(sharpes)
     out = {
@@ -334,8 +349,13 @@ def cpcv_score(
             "pct_paths_robust": round(float(np.mean(d >= 0.9)), 4),
         }
         med_dsr = float(np.median(d))
-        out["verdict"] = ("likely_noise" if (med_sr <= 0 or med_dsr < 0.5)
-                          else "robust" if med_dsr >= 0.9 else "inconclusive")
+        out["verdict"] = (
+            "likely_noise"
+            if (med_sr <= 0 or med_dsr < 0.5)
+            else "robust"
+            if med_dsr >= 0.9
+            else "inconclusive"
+        )
     else:
         out["verdict"] = "likely_noise" if med_sr <= 0 else "inconclusive"
     return out

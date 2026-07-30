@@ -83,8 +83,15 @@ class Study:
         return asdict(self)
 
     @classmethod
-    def from_sweep(cls, result: Any, *, label: str = "", data_description: str = "",
-                   notes: str = "", risk_free_rate: float = 0.0) -> Study:
+    def from_sweep(
+        cls,
+        result: Any,
+        *,
+        label: str = "",
+        data_description: str = "",
+        notes: str = "",
+        risk_free_rate: float = 0.0,
+    ) -> Study:
         """Build a study from a SweepResult.
 
         Kept here rather than as a method on SweepResult so the sweep module has

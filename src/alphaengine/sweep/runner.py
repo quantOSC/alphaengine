@@ -19,11 +19,13 @@ import hashlib
 import itertools
 import json
 import math
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
+import numpy.typing as npt
 
 from ..core import deflated_sharpe, min_track_record_length, pbo_cscv, performance_report
 
@@ -50,12 +52,12 @@ def _expand(grid: Mapping[str, Iterable[Any]]) -> list[dict[str, Any]]:
         # to fail rather than pass.
         return []
     values = [list(grid[k]) for k in keys]
-    empty = [k for k, v in zip(keys, values) if not v]
+    empty = [k for k, v in zip(keys, values, strict=True) if not v]
     if empty:
         # One empty axis makes the whole product empty. A caller who wrote
         # {"fast": []} meant to sweep something and should hear about it.
         raise ValueError(f"grid axis has no values: {empty}")
-    return [dict(zip(keys, combo)) for combo in itertools.product(*values)]
+    return [dict(zip(keys, combo, strict=True)) for combo in itertools.product(*values)]
 
 
 def _hash_data(data: Any) -> str:
@@ -80,7 +82,7 @@ def _hash_params(p: Params) -> str:
     return hashlib.sha256(json.dumps(dict(p), sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
-def _sharpe(returns: np.ndarray) -> float:
+def _sharpe(returns: npt.NDArray[np.float64]) -> float:
     sd = float(returns.std(ddof=1)) if returns.size > 1 else 0.0
     return float(returns.mean() / sd) if sd > 0 else 0.0
 
@@ -104,7 +106,7 @@ class SweepResult:
     """Everything the sweep saw. The trial matrix is the irreplaceable part."""
 
     trials: list[Trial]
-    matrix: np.ndarray = field(repr=False)          # (T observations, N configurations)
+    matrix: npt.NDArray[np.float64] = field(repr=False)  # (T observations, N configurations)
     data_hash: str = ""
     grid_keys: list[str] = field(default_factory=list)
     store_params: bool = False
@@ -165,10 +167,12 @@ class SweepResult:
             }
         return out
 
-    def save(self, path: str | Path = "study.json", *, label: str = "",
-             data_description: str = "", notes: str = "") -> Path:
+    def save(
+        self, path: str | Path = "study.json", *, label: str = "", data_description: str = "", notes: str = ""
+    ) -> Path:
         """Write the study to disk. Local file, no account, no upload."""
-        from ..study import Study, save as _save
+        from ..study import Study
+        from ..study import save as _save
 
         study = Study.from_sweep(self, label=label, data_description=data_description, notes=notes)
         return _save(study, path)
@@ -200,8 +204,7 @@ class SweepResult:
                 vals = [t.params.get(k) for t in strong]
                 numeric = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
                 if numeric:
-                    centre[k] = {"median": float(np.median(numeric)),
-                                 "range": [min(numeric), max(numeric)]}
+                    centre[k] = {"median": float(np.median(numeric)), "range": [min(numeric), max(numeric)]}
 
         return {
             "shape": shape,
@@ -214,7 +217,8 @@ class SweepResult:
             "reading": {
                 "plateau": "A broad region performs. The result does not depend on the exact parameters.",
                 "ridge": "A narrow region performs. Sensitive to the parameters; treat with care.",
-                "knife_edge": "One configuration performs and its neighbours do not. Usually a fitted result.",
+                "knife_edge": "One configuration performs and its neighbours do not. "
+                "Usually a fitted result.",
             }[shape],
         }
 
@@ -236,7 +240,8 @@ def sweep(
         grid: parameter name -> values to try. The cartesian product is the
             search, and its length is the trial count.
         data: passed through untouched. Only hashed, never inspected or stored.
-        store_params: keep the parameter values in the result. OFF by default, THE GRID IS OFTEN BIGGER IP THAN THE RETURNS. "It uploads my
+        store_params: keep the parameter values in the result. OFF by default.
+            THE GRID IS OFTEN BIGGER IP THAN THE RETURN SERIES: "it uploads my
             parameter search" ends a conversation faster than "it uploads my
             returns". Hashes are always kept, so runs remain comparable without
             the values leaving.
@@ -254,7 +259,7 @@ def sweep(
 
     data_hash = _hash_data(data) if data is not None else ""
     trials: list[Trial] = []
-    columns: list[np.ndarray] = []
+    columns: list[npt.NDArray[np.float64]] = []
 
     for i, params in enumerate(combos):
         try:
@@ -267,26 +272,37 @@ def sweep(
         except Exception as exc:  # noqa: BLE001
             if on_error == "raise":
                 raise
-            trials.append(Trial(i, dict(params), _hash_params(params), 0, 0.0, 0.0, 0.0,
-                                failed=f"{type(exc).__name__}: {exc}"))
+            trials.append(
+                Trial(
+                    i,
+                    dict(params),
+                    _hash_params(params),
+                    0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    failed=f"{type(exc).__name__}: {exc}",
+                )
+            )
             continue
 
         sr = _sharpe(r)
-        trials.append(Trial(
-            index=i,
-            params=dict(params),
-            params_hash=_hash_params(params),
-            n_obs=int(r.size),
-            sharpe=round(sr, 6),
-            sharpe_annualized=round(sr * math.sqrt(252), 4),
-            total_return_pct=round((float(np.prod(1 + r)) - 1) * 100, 4),
-        ))
+        trials.append(
+            Trial(
+                index=i,
+                params=dict(params),
+                params_hash=_hash_params(params),
+                n_obs=int(r.size),
+                sharpe=round(sr, 6),
+                sharpe_annualized=round(sr * math.sqrt(252), 4),
+                total_return_pct=round((float(np.prod(1 + r)) - 1) * 100, 4),
+            )
+        )
         columns.append(r)
 
     if not columns:
         raise RuntimeError(
-            f"every one of the {len(combos)} combinations failed. "
-            f"First error: {trials[0].failed}"
+            f"every one of the {len(combos)} combinations failed. First error: {trials[0].failed}"
         )
 
     # Ragged output means the configurations are not comparable, and silently

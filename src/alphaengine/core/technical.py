@@ -19,7 +19,7 @@ Math conventions (so a caller can audit):
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -34,7 +34,7 @@ def _unavailable(reason: str, **details) -> dict:
     return {"available": False, "reason": reason, **details}
 
 
-def _extract(series: Any) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+def _extract(series: Any) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | None]:
     """Return (closes, highs, lows). Accepts bare closes, {date: close}, or a list
     of OHLC row dicts. highs/lows are None unless OHLC rows carry them."""
     if isinstance(series, dict):
@@ -54,13 +54,13 @@ def _extract(series: Any) -> tuple[np.ndarray, Optional[np.ndarray], Optional[np
     return closes, None, None
 
 
-def _sma(closes: np.ndarray, window: int) -> Optional[float]:
+def _sma(closes: np.ndarray, window: int) -> float | None:
     if len(closes) < window:
         return None
     return float(closes[-window:].mean())
 
 
-def _ema(closes: np.ndarray, window: int) -> Optional[float]:
+def _ema(closes: np.ndarray, window: int) -> float | None:
     if len(closes) < window:
         return None
     alpha = 2.0 / (window + 1)
@@ -70,7 +70,7 @@ def _ema(closes: np.ndarray, window: int) -> Optional[float]:
     return ema
 
 
-def _wilder_rsi(closes: np.ndarray, window: int) -> Optional[float]:
+def _wilder_rsi(closes: np.ndarray, window: int) -> float | None:
     if len(closes) < window + 1:
         return None
     deltas = np.diff(closes)
@@ -89,7 +89,7 @@ def _wilder_rsi(closes: np.ndarray, window: int) -> Optional[float]:
     return 100.0 - 100.0 / (1.0 + rs)
 
 
-def _atr(highs: Optional[np.ndarray], lows: Optional[np.ndarray], closes: np.ndarray, window: int) -> Optional[float]:
+def _atr(highs: np.ndarray | None, lows: np.ndarray | None, closes: np.ndarray, window: int) -> float | None:
     if highs is None or lows is None or len(closes) < window + 1:
         return None
     n = len(closes)
@@ -102,11 +102,14 @@ def _atr(highs: Optional[np.ndarray], lows: Optional[np.ndarray], closes: np.nda
     return atr
 
 
-def _ma_block(last: float, value: Optional[float]) -> Optional[dict]:
+def _ma_block(last: float, value: float | None) -> dict | None:
     if value is None:
         return None
-    return {"value": round(value, _RND), "above": bool(last > value),
-            "distance_pct": round((last - value) / value * 100.0, 4) if value != 0 else None}
+    return {
+        "value": round(value, _RND),
+        "above": bool(last > value),
+        "distance_pct": round((last - value) / value * 100.0, 4) if value != 0 else None,
+    }
 
 
 def technical_features(
@@ -128,12 +131,23 @@ def technical_features(
         closes, highs, lows = _extract(series)
         n = len(closes)
         if n == 0:
-            features[sym] = {"n_observations": 0, "last_close": None, "insufficient": ["no_data"], "flags": []}
+            features[sym] = {
+                "n_observations": 0,
+                "last_close": None,
+                "insufficient": ["no_data"],
+                "flags": [],
+            }
             continue
         coverage_n += 1
         last = float(closes[-1])
-        res: dict[str, Any] = {"n_observations": n, "last_close": round(last, _RND),
-                               "sma": {}, "ema": {}, "flags": [], "insufficient": []}
+        res: dict[str, Any] = {
+            "n_observations": n,
+            "last_close": round(last, _RND),
+            "sma": {},
+            "ema": {},
+            "flags": [],
+            "insufficient": [],
+        }
 
         for w in sma_windows:
             block = _ma_block(last, _sma(closes, w))
@@ -156,7 +170,12 @@ def technical_features(
             res["insufficient"].append(f"rsi_{rsi_window}")
         else:
             ob, osd = rsi > RSI_OVERBOUGHT, rsi < RSI_OVERSOLD
-            res["rsi"] = {"window": rsi_window, "value": round(rsi, 4), "overbought": bool(ob), "oversold": bool(osd)}
+            res["rsi"] = {
+                "window": rsi_window,
+                "value": round(rsi, 4),
+                "overbought": bool(ob),
+                "oversold": bool(osd),
+            }
             if ob:
                 res["flags"].append("rsi_overbought")
             if osd:
@@ -164,18 +183,28 @@ def technical_features(
 
         atr = _atr(highs, lows, closes, atr_window)
         if atr is None:
-            res["atr"] = (_unavailable("ATR needs high/low; supply OHLC rows", atr_window=atr_window)
-                          if highs is None else _unavailable(f"need >= {atr_window + 1} bars", atr_window=atr_window))
+            res["atr"] = (
+                _unavailable("ATR needs high/low; supply OHLC rows", atr_window=atr_window)
+                if highs is None
+                else _unavailable(f"need >= {atr_window + 1} bars", atr_window=atr_window)
+            )
         else:
-            res["atr"] = {"window": atr_window, "value": round(atr, _RND),
-                          "pct_of_close": round(atr / last * 100.0, 4) if last != 0 else None}
+            res["atr"] = {
+                "window": atr_window,
+                "value": round(atr, _RND),
+                "pct_of_close": round(atr / last * 100.0, 4) if last != 0 else None,
+            }
 
         features[sym] = res
 
     return {
         "features": features,
-        "params": {"sma_windows": sma_windows, "ema_windows": ema_windows,
-                   "rsi_window": rsi_window, "atr_window": atr_window},
+        "params": {
+            "sma_windows": sma_windows,
+            "ema_windows": ema_windows,
+            "rsi_window": rsi_window,
+            "atr_window": atr_window,
+        },
         "universe_size": len(prices),
         "coverage_n": coverage_n,
     }

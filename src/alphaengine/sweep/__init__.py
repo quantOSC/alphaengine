@@ -1,7 +1,8 @@
 """Run the parameter grid, so nobody has to be asked how many things they tried.
 
 The correction that makes a Sharpe ratio honest needs one input: the number of
-variants tested. Ask a person for it and you get the number that flatters them, not through dishonesty, but because nobody counts what they threw away, and the
+variants tested. Ask a person for it and you get the number that flatters
+them. Not through dishonesty: nobody counts what they threw away, and the
 count is genuinely hard to reconstruct after the fact.
 
 Run the grid and the count is `len(grid)`. The question never gets asked.

@@ -12,7 +12,6 @@ Pure numpy/statsmodels. Deterministic given inputs on the pinned stack.
 
 from __future__ import annotations
 
-
 try:  # noqa: SIM105
     import statsmodels  # noqa: F401
 except ModuleNotFoundError as exc:  # pragma: no cover

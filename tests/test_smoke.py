@@ -3,6 +3,7 @@
 The golden marker is registered here from the start so the CI job that guards
 computed values has something to run before there are any values to guard.
 """
+
 import alphaengine
 
 
@@ -20,4 +21,5 @@ def test_import_makes_no_network_call():
     module scope.
     """
     import sys
+
     assert "alphaengine" in sys.modules

@@ -88,7 +88,7 @@ def test_params_are_not_stored_by_default():
     r = sweep(ma_cross, {"fast": [5, 10], "slow": [50, 100]}, data=prices())
     v = r.verdict()
     assert "best_params" not in v
-    assert v["best_params_hash"]           # comparable without being disclosed
+    assert v["best_params_hash"]  # comparable without being disclosed
 
     r2 = sweep(ma_cross, {"fast": [5, 10], "slow": [50, 100]}, data=prices(), store_params=True)
     assert r2.verdict()["best_params"]

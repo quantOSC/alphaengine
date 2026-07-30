@@ -25,20 +25,26 @@ bar i+1's open ('next_open'), never at a price it could not have transacted at.
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 MIN_BARS = 2
 
 # action keyword -> target weight; None means "hold" (carry the prior weight).
 _ACTION_WEIGHTS = {
-    "enter_long": 1.0, "long": 1.0, "buy": 1.0,
-    "enter_short": -1.0, "short": -1.0, "sell_short": -1.0,
-    "exit": 0.0, "flat": 0.0, "close": 0.0, "sell": 0.0,
+    "enter_long": 1.0,
+    "long": 1.0,
+    "buy": 1.0,
+    "enter_short": -1.0,
+    "short": -1.0,
+    "sell_short": -1.0,
+    "exit": 0.0,
+    "flat": 0.0,
+    "close": 0.0,
+    "sell": 0.0,
     "hold": None,
 }
 
 
-def _f(v) -> Optional[float]:
+def _f(v) -> float | None:
     try:
         return float(v)
     except (TypeError, ValueError):
@@ -75,11 +81,11 @@ def _norm_price_series(series) -> dict:
     return out
 
 
-def _norm_signal_series(series) -> list[tuple[str, Optional[float]]]:
+def _norm_signal_series(series) -> list[tuple[str, float | None]]:
     """-> sorted [(date, target_weight or None-for-hold)]; weight from an explicit
     target_weight, else mapped from `action`."""
-    out: list[tuple[str, Optional[float]]] = []
-    for row in (series or []):
+    out: list[tuple[str, float | None]] = []
+    for row in series or []:
         if not isinstance(row, dict):
             continue
         d = str(row.get("date") or row.get("Date") or "")
@@ -90,17 +96,16 @@ def _norm_signal_series(series) -> list[tuple[str, Optional[float]]]:
             if w is not None:
                 out.append((d, w))
         elif row.get("action") is not None:
-            out.append((d, _ACTION_WEIGHTS.get(str(row["action"]).lower().strip(), None)))
+            out.append((d, _ACTION_WEIGHTS.get(str(row["action"]).lower().strip())))
     out.sort(key=lambda x: x[0])
     return out
 
 
-def _apply_fill(p: dict, ticker: str, delta: float, exec_price: float,
-                date: str, trades: list) -> None:
+def _apply_fill(p: dict, ticker: str, delta: float, exec_price: float, date: str, trades: list) -> None:
     """Update a position with a signed share delta at exec_price, emitting a
     closed-trade record on each reduction / close / flip (avg-cost accounting)."""
     cur = p["shares"]
-    if cur == 0.0 or (cur > 0) == (delta > 0):           # opening or adding (same side)
+    if cur == 0.0 or (cur > 0) == (delta > 0):  # opening or adding (same side)
         new = cur + delta
         if cur == 0.0:
             p["avg"] = exec_price
@@ -115,30 +120,45 @@ def _apply_fill(p: dict, ticker: str, delta: float, exec_price: float,
     entry = p["avg"]
     pnl = sign * (exec_price - entry) * closing
     pnl_pct = (sign * (exec_price - entry) / entry * 100.0) if entry else 0.0
-    trades.append({
-        "ticker": ticker, "side": ("long" if cur > 0 else "short"),
-        "entry_date": p["entry_date"], "entry_price": round(entry, 6),
-        "exit_date": date, "exit_price": round(exec_price, 6),
-        "shares": round(closing, 6), "pnl": round(pnl, 2), "pnl_pct": round(pnl_pct, 4),
-    })
+    trades.append(
+        {
+            "ticker": ticker,
+            "side": ("long" if cur > 0 else "short"),
+            "entry_date": p["entry_date"],
+            "entry_price": round(entry, 6),
+            "exit_date": date,
+            "exit_price": round(exec_price, 6),
+            "shares": round(closing, 6),
+            "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl_pct, 4),
+        }
+    )
     remaining = abs(cur) - closing
     if remaining <= 1e-12:
         flip = abs(delta) - abs(cur)
-        if flip > 1e-12:                                  # overshoot -> open the flipped side
+        if flip > 1e-12:  # overshoot -> open the flipped side
             p["shares"] = (1.0 if delta > 0 else -1.0) * flip
             p["avg"] = exec_price
             p["entry_date"] = date
         else:
             p["shares"], p["avg"], p["entry_date"] = 0.0, 0.0, None
     else:
-        p["shares"] = sign * remaining                    # same side, reduced; avg/entry unchanged
+        p["shares"] = sign * remaining  # same side, reduced; avg/entry unchanged
 
 
-def run_backtest(signals: dict, prices: dict, *, slippage_bps: float = 5.0,
-                 commission_bps: float = 1.0, fill_timing: str = "close",
-                 initial_capital: float = 100000.0, max_position_pct: float = 1.0,
-                 adv: Optional[dict] = None, impact_coef: float = 0.1,
-                 max_participation: Optional[float] = None) -> dict:
+def run_backtest(
+    signals: dict,
+    prices: dict,
+    *,
+    slippage_bps: float = 5.0,
+    commission_bps: float = 1.0,
+    fill_timing: str = "close",
+    initial_capital: float = 100000.0,
+    max_position_pct: float = 1.0,
+    adv: dict | None = None,
+    impact_coef: float = 0.1,
+    max_participation: float | None = None,
+) -> dict:
     """See the module docstring for the fill model. Capacity / market-impact are
     OPT-IN and OFF unless `adv` (a {ticker: average daily DOLLAR volume} map) is
     supplied, with adv=None the fill math is byte-identical to the cost-free path
@@ -154,10 +174,9 @@ def run_backtest(signals: dict, prices: dict, *, slippage_bps: float = 5.0,
     prices_n = {str(tk).upper(): _norm_price_series(s) for tk, s in (prices or {}).items()}
     signals_n = {str(tk).upper(): _norm_signal_series(s) for tk, s in (signals or {}).items()}
 
-    all_dates = sorted({d for s in prices_n.values() for d in s.keys()})
+    all_dates = sorted({d for s in prices_n.values() for d in s})
     if len(all_dates) < MIN_BARS:
-        return {"error": f"need >= {MIN_BARS} price bars across the universe",
-                "n_bars": len(all_dates)}
+        return {"error": f"need >= {MIN_BARS} price bars across the universe", "n_bars": len(all_dates)}
 
     slip = float(slippage_bps) / 10000.0
     comm = float(commission_bps) / 10000.0
@@ -186,13 +205,13 @@ def run_backtest(signals: dict, prices: dict, *, slippage_bps: float = 5.0,
 
     cash = float(initial_capital)
     pos = {tk: {"shares": 0.0, "avg": 0.0, "entry_date": None} for tk in prices_n}
-    applied = {tk: 0.0 for tk in prices_n}   # weight currently expressed in the position
+    applied = {tk: 0.0 for tk in prices_n}  # weight currently expressed in the position
     trades: list[dict] = []
     equity_curve: list[float] = []
     dates_out: list[str] = []
-    costs_per_bar: list[float] = []          # total explicit cost charged to equity each bar
+    costs_per_bar: list[float] = []  # total explicit cost charged to equity each bar
     slip_cost_total = comm_cost_total = impact_cost_total = 0.0
-    gross_notional = 0.0                      # |delta|·exec traded, for turnover
+    gross_notional = 0.0  # |delta|·exec traded, for turnover
     n_capacity_limited = 0
 
     def _mark_equity(d: str) -> float:
@@ -211,7 +230,7 @@ def run_backtest(signals: dict, prices: dict, *, slippage_bps: float = 5.0,
                 continue
             if fill_open:
                 fillp = bar["open"] if bar["open"] is not None else bar["close"]
-                ref_date = all_dates[idx - 1] if idx > 0 else d   # act on prior close's signal
+                ref_date = all_dates[idx - 1] if idx > 0 else d  # act on prior close's signal
             else:
                 fillp = bar["close"]
                 ref_date = d
@@ -240,15 +259,15 @@ def run_backtest(signals: dict, prices: dict, *, slippage_bps: float = 5.0,
                     applied[tk] = (achieved * fillp / equity) if equity else tw  # not fully filled
             if abs(delta * fillp) < 1e-9:
                 continue
-            slip_cost = abs(delta) * fillp * slip           # slippage (already inside exec_price)
+            slip_cost = abs(delta) * fillp * slip  # slippage (already inside exec_price)
             comm_cost = abs(delta) * exec_price * comm
             impact_cost = 0.0
-            if adv_tk and _icoef:                            # square-root market impact
+            if adv_tk and _icoef:  # square-root market impact
                 notional = abs(delta) * exec_price
                 impact_cost = notional * _icoef * math.sqrt(notional / adv_tk)
-            cash -= delta * exec_price                      # buy lowers cash; short/sell raises it
-            cash -= comm_cost                                # commission
-            cash -= impact_cost                              # market impact (0 unless adv given)
+            cash -= delta * exec_price  # buy lowers cash; short/sell raises it
+            cash -= comm_cost  # commission
+            cash -= impact_cost  # market impact (0 unless adv given)
             slip_cost_total += slip_cost
             comm_cost_total += comm_cost
             impact_cost_total += impact_cost
@@ -297,14 +316,20 @@ def run_backtest(signals: dict, prices: dict, *, slippage_bps: float = 5.0,
             "total": round(slip_cost_total + comm_cost_total + impact_cost_total, 2),
         },
         "costs_per_bar": costs_per_bar,
-        "capacity": ({"max_participation": _maxpart, "n_capacity_limited_fills": n_capacity_limited}
-                     if _maxpart else None),
-        "config": {"slippage_bps": float(slippage_bps), "commission_bps": float(commission_bps),
-                   "fill_timing": "next_open" if fill_open else "close",
-                   "max_position_pct": cap,
-                   "impact_model": ("sqrt" if _adv else None),
-                   "impact_coef": (_icoef if _adv else None),
-                   "max_participation": _maxpart},
+        "capacity": (
+            {"max_participation": _maxpart, "n_capacity_limited_fills": n_capacity_limited}
+            if _maxpart
+            else None
+        ),
+        "config": {
+            "slippage_bps": float(slippage_bps),
+            "commission_bps": float(commission_bps),
+            "fill_timing": "next_open" if fill_open else "close",
+            "max_position_pct": cap,
+            "impact_model": ("sqrt" if _adv else None),
+            "impact_coef": (_icoef if _adv else None),
+            "max_participation": _maxpart,
+        },
     }
 
 
@@ -316,11 +341,11 @@ def run_backtest(signals: dict, prices: dict, *, slippage_bps: float = 5.0,
 # _edge_requires_validation rule, which a test cross-checks.
 
 
-def _verdict(dsr: Optional[float], pbo: Optional[float]) -> str:
+def _verdict(dsr: float | None, pbo: float | None) -> str:
     if dsr is None:
-        return "inconclusive"                  # no rigor figure -> never 'edge'
+        return "inconclusive"  # no rigor figure -> never 'edge'
     if pbo is not None and pbo > 0.5:
-        return "likely_noise"                  # overfit by PBO
+        return "likely_noise"  # overfit by PBO
     if dsr >= 0.9 and (pbo is None or pbo <= 0.2):
         return "edge"
     if dsr < 0.5:
@@ -336,6 +361,7 @@ def _ar1_effective_n(returns: list) -> tuple:
     autocorrelation is not credited (never claims more significance than the raw
     sample). Returns (n_eff, r1)."""
     import numpy as np
+
     arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
     n = arr.size
     if n < 3:
@@ -385,14 +411,17 @@ def _excursions(trades: list, prices: dict) -> dict:
             if path:
                 sign = -1.0 if str(t.get("side")) == "short" else 1.0
                 favs = [sign * (p - entry) / entry * 100.0 for p in path]
-                mae, mfe = round(min(favs), 4), round(max(favs), 4)   # worst adverse, best favorable
+                mae, mfe = round(min(favs), 4), round(max(favs), 4)  # worst adverse, best favorable
                 maes.append(mae)
                 mfes.append(mfe)
                 n_cov += 1
         per.append({"ticker": tk, "entry_date": ed, "exit_date": xd, "mae_pct": mae, "mfe_pct": mfe})
-    return {"per_trade": per, "n_covered": n_cov,
-            "avg_mae_pct": round(sum(maes) / len(maes), 4) if maes else None,
-            "avg_mfe_pct": round(sum(mfes) / len(mfes), 4) if mfes else None}
+    return {
+        "per_trade": per,
+        "n_covered": n_cov,
+        "avg_mae_pct": round(sum(maes) / len(maes), 4) if maes else None,
+        "avg_mfe_pct": round(sum(mfes) / len(mfes), 4) if mfes else None,
+    }
 
 
 def _regime_attribution(trades: list, regime_series: dict) -> dict:
@@ -409,13 +438,19 @@ def _regime_attribution(trades: list, regime_series: dict) -> dict:
         b["pnl"] += t.get("pnl", 0.0)
         if (t.get("pnl_pct") or 0) > 0:
             b["wins"] += 1
-    return {reg: {"n_trades": b["n"], "total_pnl": round(b["pnl"], 2),
-                  "win_rate_pct": round(b["wins"] / b["n"] * 100.0, 2) if b["n"] else None}
-            for reg, b in buckets.items()}
+    return {
+        reg: {
+            "n_trades": b["n"],
+            "total_pnl": round(b["pnl"], 2),
+            "win_rate_pct": round(b["wins"] / b["n"] * 100.0, 2) if b["n"] else None,
+        }
+        for reg, b in buckets.items()
+    }
 
 
-def _attribution(bt: dict, returns: list, prices, factor_returns, regime_series,
-                 risk_free_rate: float, not_computed: dict) -> dict:
+def _attribution(
+    bt: dict, returns: list, prices, factor_returns, regime_series, risk_free_rate: float, not_computed: dict
+) -> dict:
     """MAE/MFE + factor + regime attribution. Each leg is OPTIONAL and pure: it
     runs only when its caller-supplied input is present, else names itself in
     not_computed (never fetched, never fabricated)."""
@@ -427,6 +462,7 @@ def _attribution(bt: dict, returns: list, prices, factor_returns, regime_series,
         not_computed["attribution.excursions"] = "supply prices to compute MAE/MFE (intra-trade excursions)"
     if factor_returns:
         from .factors import decompose_factors
+
         fa = decompose_factors(returns, factor_returns, risk_free_rate=risk_free_rate)
         if "error" in fa:
             attribution["factors"] = None
@@ -434,15 +470,19 @@ def _attribution(bt: dict, returns: list, prices, factor_returns, regime_series,
         else:
             attribution["factors"] = fa
     else:
-        not_computed["attribution.factors"] = "supply factor_returns {factor: [...]} to attribute returns (no factor vendor)"
+        not_computed["attribution.factors"] = (
+            "supply factor_returns {factor: [...]} to attribute returns (no factor vendor)"
+        )
     if regime_series:
         attribution["regime"] = _regime_attribution(trades, regime_series)
     else:
-        not_computed["attribution.regime"] = "supply regime_series {date: regime} to bucket trade P&L by regime at entry"
+        not_computed["attribution.regime"] = (
+            "supply regime_series {date: regime} to bucket trade P&L by regime at entry"
+        )
     return attribution
 
 
-def _cost_report(bt: dict, perf, risk_free_rate: float) -> Optional[dict]:
+def _cost_report(bt: dict, perf, risk_free_rate: float) -> dict | None:
     """Turnover + net-of-cost vs gross Sharpe from the sim's cost bookkeeping.
 
     The equity curve is ALREADY net of slippage + commission + impact (they are
@@ -462,8 +502,9 @@ def _cost_report(bt: dict, perf, risk_free_rate: float) -> Optional[dict]:
         "cost_breakdown": cb,
         "cost_drag_pct": round(total_cost / init_cap * 100.0, 4) if init_cap else None,
         "turnover_ratio": round(turnover_ratio, 4) if turnover_ratio is not None else None,
-        "annualized_turnover": (round(turnover_ratio * 252.0 / n_bars, 4)
-                                if (turnover_ratio is not None and n_bars) else None),
+        "annualized_turnover": (
+            round(turnover_ratio * 252.0 / n_bars, 4) if (turnover_ratio is not None and n_bars) else None
+        ),
         "net_of_cost_sharpe": (perf.get("sharpe_annualized") if isinstance(perf, dict) else None),
         "gross_sharpe": None,
         "sharpe_cost_drag": None,
@@ -474,13 +515,17 @@ def _cost_report(bt: dict, perf, risk_free_rate: float) -> Optional[dict]:
     eq = bt.get("equity_curve")
     if isinstance(cpb, list) and isinstance(eq, list) and len(cpb) == len(eq) and len(eq) > 1:
         from .performance import performance_report
+
         cum = 0.0
         gross_eq = []
         for i, e in enumerate(eq):
             cum += float(cpb[i])
             gross_eq.append(e + cum)
-        gross_rets = [round((gross_eq[i] - gross_eq[i - 1]) / gross_eq[i - 1], 8)
-                      for i in range(1, len(gross_eq)) if gross_eq[i - 1]]
+        gross_rets = [
+            round((gross_eq[i] - gross_eq[i - 1]) / gross_eq[i - 1], 8)
+            for i in range(1, len(gross_eq))
+            if gross_eq[i - 1]
+        ]
         gp = performance_report(gross_rets, equity_curve=gross_eq, risk_free_rate=risk_free_rate)
         if isinstance(gp, dict) and "error" not in gp:
             out["gross_sharpe"] = gp.get("sharpe_annualized")
@@ -489,12 +534,23 @@ def _cost_report(bt: dict, perf, risk_free_rate: float) -> Optional[dict]:
     return out
 
 
-def score_backtest(bt: dict, *, n_trials: int = 1, risk_free_rate: float = 0.0,
-                   benchmark_returns: Optional[list] = None, pnl_matrix=None,
-                   trials_sharpe_std: Optional[float] = None, prices: Optional[dict] = None,
-                   factor_returns: Optional[dict] = None, regime_series: Optional[dict] = None,
-                   cpcv: bool = False, cpcv_n_groups: int = 8, cpcv_n_test_groups: int = 2,
-                   cpcv_purge: int = 1, cpcv_embargo: int = 1) -> dict:
+def score_backtest(
+    bt: dict,
+    *,
+    n_trials: int = 1,
+    risk_free_rate: float = 0.0,
+    benchmark_returns: list | None = None,
+    pnl_matrix=None,
+    trials_sharpe_std: float | None = None,
+    prices: dict | None = None,
+    factor_returns: dict | None = None,
+    regime_series: dict | None = None,
+    cpcv: bool = False,
+    cpcv_n_groups: int = 8,
+    cpcv_n_test_groups: int = 2,
+    cpcv_purge: int = 1,
+    cpcv_embargo: int = 1,
+) -> dict:
     """Score a run_backtest result: performance_report + deflated-Sharpe (+ PBO
     when a parameter-sweep `pnl_matrix` is supplied) -> a MOAT-GATED verdict.
 
@@ -509,11 +565,15 @@ def score_backtest(bt: dict, *, n_trials: int = 1, risk_free_rate: float = 0.0,
     distribution across many purged held-out partitions. When the sim carried
     costs, a `costs` block reports turnover + net-of-cost vs gross Sharpe."""
     from .performance import performance_report
-    from .validation import deflated_sharpe, pbo_cscv, min_track_record_length, cpcv_score
+    from .validation import cpcv_score, deflated_sharpe, min_track_record_length, pbo_cscv
 
     returns = bt.get("returns") or []
-    perf = performance_report(returns, equity_curve=bt.get("equity_curve"),
-                              benchmark_returns=benchmark_returns, risk_free_rate=risk_free_rate)
+    perf = performance_report(
+        returns,
+        equity_curve=bt.get("equity_curve"),
+        benchmark_returns=benchmark_returns,
+        risk_free_rate=risk_free_rate,
+    )
     dsr = deflated_sharpe(returns, n_trials=max(1, int(n_trials)), trials_sharpe_std=trials_sharpe_std)
     pbo = pbo_cscv(pnl_matrix) if pnl_matrix is not None else None
     mintrl = min_track_record_length(returns)
@@ -530,50 +590,74 @@ def score_backtest(bt: dict, *, n_trials: int = 1, risk_free_rate: float = 0.0,
     sr_pp = dsr.get("sharpe_per_period") if dsr_ok else None
     if sr_pp is None:
         arr_len = len([r for r in returns if r is not None])
-        from .validation import _per_period_sharpe
         import numpy as _np
-        sr_pp = _per_period_sharpe(_np.asarray([float(r) for r in returns if r is not None], dtype=float)) if arr_len >= 2 else 0.0
+
+        from .validation import _per_period_sharpe
+
+        sr_pp = (
+            _per_period_sharpe(_np.asarray([float(r) for r in returns if r is not None], dtype=float))
+            if arr_len >= 2
+            else 0.0
+        )
     t_stat = float(sr_pp) * math.sqrt(n_eff)
 
-    validation = {"deflated_sharpe": dsr_val, "pbo": pbo_val, "psr": psr_val,
-                  "n_trials": int(n_trials), "verdict": _verdict(dsr_val, pbo_val),
-                  # A2, autocorrelation-honest significance.
-                  "n_obs": (dsr.get("n_obs") if dsr_ok else len([r for r in returns if r is not None])),
-                  "n_obs_effective": round(n_eff, 1),
-                  "autocorr_lag1": round(r1, 4),
-                  "sharpe_tstat": round(t_stat, 4),
-                  "harvey_liu_hurdle": 3.0,
-                  "passes_harvey_liu": bool(t_stat > 3.0),
-                  # A3, MinTRL: is the sample long enough to trust the Sharpe? (Bailey/LdP)
-                  "min_track_record_length": (mintrl.get("min_track_record_length") if mintrl_ok else None),
-                  "min_track_record_years": (mintrl.get("min_track_record_years") if mintrl_ok else None),
-                  "track_length_sufficient": (mintrl.get("sufficient") if mintrl_ok else None),
-                  "track_record_shortfall_obs": (mintrl.get("shortfall_obs") if mintrl_ok else None)}
+    validation = {
+        "deflated_sharpe": dsr_val,
+        "pbo": pbo_val,
+        "psr": psr_val,
+        "n_trials": int(n_trials),
+        "verdict": _verdict(dsr_val, pbo_val),
+        # A2, autocorrelation-honest significance.
+        "n_obs": (dsr.get("n_obs") if dsr_ok else len([r for r in returns if r is not None])),
+        "n_obs_effective": round(n_eff, 1),
+        "autocorr_lag1": round(r1, 4),
+        "sharpe_tstat": round(t_stat, 4),
+        "harvey_liu_hurdle": 3.0,
+        "passes_harvey_liu": bool(t_stat > 3.0),
+        # A3, MinTRL: is the sample long enough to trust the Sharpe? (Bailey/LdP)
+        "min_track_record_length": (mintrl.get("min_track_record_length") if mintrl_ok else None),
+        "min_track_record_years": (mintrl.get("min_track_record_years") if mintrl_ok else None),
+        "track_length_sufficient": (mintrl.get("sufficient") if mintrl_ok else None),
+        "track_record_shortfall_obs": (mintrl.get("shortfall_obs") if mintrl_ok else None),
+    }
 
     not_computed: dict = {}
     if not (isinstance(perf, dict) and "error" not in perf):
         not_computed["performance"] = (perf or {}).get("error", "insufficient observations (need >= 30 bars)")
         perf = None
     if not dsr_ok:
-        not_computed["validation.deflated_sharpe"] = dsr.get("error", "insufficient observations (need >= 8 bars)")
+        not_computed["validation.deflated_sharpe"] = dsr.get(
+            "error", "insufficient observations (need >= 8 bars)"
+        )
     if pbo is None:
-        not_computed["validation.pbo"] = "supply a parameter-sweep pnl_matrix (one column per config) to run PBO"
+        not_computed["validation.pbo"] = (
+            "supply a parameter-sweep pnl_matrix (one column per config) to run PBO"
+        )
     elif not pbo_ok:
         not_computed["validation.pbo"] = pbo.get("error", "pbo unavailable")
 
     # A1, CPCV (opt-in): OOS Sharpe/DSR distribution across purged partitions.
     if cpcv:
-        cp = cpcv_score(returns, n_groups=cpcv_n_groups, n_test_groups=cpcv_n_test_groups,
-                        purge=cpcv_purge, embargo=cpcv_embargo, n_trials=n_trials)
+        cp = cpcv_score(
+            returns,
+            n_groups=cpcv_n_groups,
+            n_test_groups=cpcv_n_test_groups,
+            purge=cpcv_purge,
+            embargo=cpcv_embargo,
+            n_trials=n_trials,
+        )
         if isinstance(cp, dict) and "error" not in cp:
             validation["cpcv"] = cp
         else:
             not_computed["validation.cpcv"] = (cp or {}).get("error", "cpcv unavailable")
     else:
-        not_computed["validation.cpcv"] = "set cpcv=true to run Combinatorial Purged Cross-Validation (OOS path distribution)"
+        not_computed["validation.cpcv"] = (
+            "set cpcv=true to run Combinatorial Purged Cross-Validation (OOS path distribution)"
+        )
 
-    attribution = _attribution(bt, returns, prices, factor_returns, regime_series,
-                               risk_free_rate, not_computed)
+    attribution = _attribution(
+        bt, returns, prices, factor_returns, regime_series, risk_free_rate, not_computed
+    )
 
     # C2, turnover + net-of-cost vs gross Sharpe (from the sim's cost bookkeeping).
     costs = _cost_report(bt, perf, risk_free_rate)
