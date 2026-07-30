@@ -28,5 +28,20 @@ OFFLINE BY CONSTRUCTION
 """
 
 from ._version import __version__
+from .study import SCHEMA_VERSION, Study, load, save
+from .sweep import SweepResult, sweep
 
-__all__ = ["__version__"]
+# `sweep` is bound here to the FUNCTION, deliberately shadowing the subpackage
+# of the same name. The documented entry point is `from alphaengine import
+# sweep`, and a user who writes that and gets a module back has hit a bug on
+# their first line. `from alphaengine.sweep import ...` still resolves through
+# sys.modules for anyone who wants the module explicitly.
+__all__ = [
+    "__version__",
+    "sweep",
+    "SweepResult",
+    "Study",
+    "save",
+    "load",
+    "SCHEMA_VERSION",
+]
