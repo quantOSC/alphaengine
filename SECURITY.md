@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Report privately through [GitHub Security Advisories](https://github.com/quantos/alphaengine/security/advisories/new),
+Report privately through [GitHub Security Advisories](https://github.com/quantOSC/alphaengine/security/advisories/new),
 or email **security@quantos.dev**. Please don't open a public issue for a
 suspected vulnerability.
 

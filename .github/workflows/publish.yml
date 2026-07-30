@@ -10,7 +10,7 @@ name: publish
 #
 # One-time PyPI setup (do this BEFORE the first tag):
 #   PyPI -> the project -> Publishing -> Add a new pending publisher
-#     owner:        quantos
+#     owner:        quantOSC
 #     repository:   alphaengine
 #     workflow:     publish.yml
 #     environment:  pypi

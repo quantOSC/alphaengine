@@ -62,10 +62,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/quantos/alphaengine"
-Documentation = "https://github.com/quantos/alphaengine#readme"
-Source = "https://github.com/quantos/alphaengine"
-Issues = "https://github.com/quantos/alphaengine/issues"
+Homepage = "https://github.com/quantOSC/alphaengine"
+Documentation = "https://github.com/quantOSC/alphaengine#readme"
+Source = "https://github.com/quantOSC/alphaengine"
+Issues = "https://github.com/quantOSC/alphaengine/issues"
 
 [tool.hatch.version]
 path = "src/alphaengine/_version.py"
