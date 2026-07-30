@@ -13,7 +13,7 @@ you in the advisory unless you'd rather we didn't.
 ## What's in scope
 
 This repository: the library, its build, and its release pipeline. The hosted
-platform is a separate system — report issues there to the same address and say
+platform is a separate system, report issues there to the same address and say
 so.
 
 ## How this package is built and shipped

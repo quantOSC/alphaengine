@@ -1,4 +1,4 @@
-"""AlphaEngine — validated research tooling for investment strategies.
+"""AlphaEngine, validated research tooling for investment strategies.
 
 Answers one question honestly: **is this result an edge, or did you try enough
 things that something was bound to look good?**
@@ -13,7 +13,7 @@ things that something was bound to look good?**
 WHY A SWEEP AND NOT A CALCULATOR
     The correction that makes a Sharpe ratio honest needs to know how many
     variants you tested. Ask a person for that number and you get the number
-    that flatters them — not from dishonesty, but because nobody counts the
+    that flatters them, not from dishonesty, but because nobody counts the
     thing they threw away. Run the grid and the count is `len(grid)`, so the
     question never has to be asked.
 

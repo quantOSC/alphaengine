@@ -43,6 +43,13 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Factor decomposition (OLS with HAC errors) and cointegration (ADF) need
+# statsmodels, which pulls pandas and patsy behind it. Kept OUT of the core so
+# the headline install stays at two dependencies — the sweep and the whole
+# validation path are numpy/scipy only and do not touch these.
+factors = [
+    "statsmodels>=0.14",
+]
 # The agent driver. Optional because `import alphaengine` must never require a
 # model client, a key, or a network call — a researcher who wants a deflated
 # Sharpe should not need an LLM dependency to get one.

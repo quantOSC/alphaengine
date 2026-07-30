@@ -1,4 +1,4 @@
-"""Skeleton checks — replaced by the real suite when core/ lands.
+"""Skeleton checks, replaced by the real suite when core/ lands.
 
 The golden marker is registered here from the start so the CI job that guards
 computed values has something to run before there are any values to guard.
