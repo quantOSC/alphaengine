@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "alphaengine"
+dynamic = ["version"]
+description = "Validated research tooling for investment strategies: deflation, overfitting detection, and honest trial counts."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+authors = [{ name = "QuantOS" }]
+keywords = [
+    "quantitative-finance",
+    "backtesting",
+    "overfitting",
+    "deflated-sharpe",
+    "research",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Scientific/Engineering :: Mathematics",
+    "Typing :: Typed",
+]
+
+# TWO DEPENDENCIES, AND THAT NUMBER IS A DESIGN CONSTRAINT.
+# Both are already present in every quant environment we target, so installing
+# this adds nothing new to anyone's lockfile. Most supply-chain risk arrives
+# through dependency count, and every addition here is a conversation with
+# somebody's security team. Do not add a third without a hard reason.
+dependencies = [
+    "numpy>=1.24",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+# The agent driver. Optional because `import alphaengine` must never require a
+# model client, a key, or a network call — a researcher who wants a deflated
+# Sharpe should not need an LLM dependency to get one.
+agents = [
+    "anthropic>=0.40",
+]
+# Pulling data from a provider the customer already pays for.
+connectors = [
+    "httpx>=0.27",
+    "pyarrow>=15.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/quantos/alphaengine"
+Documentation = "https://github.com/quantos/alphaengine#readme"
+Source = "https://github.com/quantos/alphaengine"
+Issues = "https://github.com/quantos/alphaengine/issues"
+
+[tool.hatch.version]
+path = "src/alphaengine/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alphaengine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "golden: pins a computed value that is a public contract; changing it needs a major version bump",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unreachable = true

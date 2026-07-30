@@ -1,0 +1,54 @@
+name: publish
+
+# Publishes to PyPI on a version tag.
+#
+# TRUSTED PUBLISHING VIA OIDC — there is no API token anywhere in this repo or
+# in its secrets. GitHub mints a short-lived identity token that PyPI verifies
+# against a publisher it has on record for this repo, workflow and environment.
+# A long-lived PyPI token is the standard way a package gets hijacked; this
+# removes the credential rather than protecting it.
+#
+# One-time PyPI setup (do this BEFORE the first tag):
+#   PyPI -> the project -> Publishing -> Add a new pending publisher
+#     owner:        quantos
+#     repository:   alphaengine
+#     workflow:     publish.yml
+#     environment:  pypi
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Build once, publish that exact artifact. Building inside the publish job
+  # would make the tested artifact and the shipped artifact different objects.
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade build
+      - run: python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write        # the OIDC token. the only credential involved.
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
