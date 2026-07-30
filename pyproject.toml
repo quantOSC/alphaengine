@@ -117,7 +117,20 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 "src/alphaengine/core/*.py" = ["E501", "SIM108"]
 
 [tool.mypy]
-python_version = "3.10"
+# python_version is deliberately NOT set.
+#
+# Pinning it to "3.10" while CI runs mypy on a 3.12 interpreter breaks the
+# build in a way that has nothing to do with our code: numpy's bundled stubs
+# use PEP 695 `type X = ...`, which is 3.12+ syntax, and a checker targeting
+# 3.10 refuses to parse them. It fails before reaching src/ at all.
+#
+# Leaving it unset makes mypy use the interpreter it is running on, which is
+# also the interpreter whose installed stubs it is reading. Those two should
+# never disagree.
+#
+# We do not lose 3.10 coverage: the pytest matrix runs on 3.10 (and on
+# numpy<2), requires-python declares the floor, and ruff's target-version =
+# "py310" catches syntax and idioms that would not run there.
 strict = true
 warn_unreachable = true
 
