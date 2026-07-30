@@ -64,8 +64,16 @@ connectors = [
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
-    "ruff>=0.6",
-    "mypy>=1.11",
+    # PINNED, not floored. A range here means CI can pick up a new lint release
+    # on any given day and fail a build that passed yesterday with no change
+    # from us. Bump these deliberately.
+    "ruff==0.16.1",
+    "mypy==2.3.0",
+    # The optional extra is installed for development so CI actually exercises
+    # and type-checks the factors/pairs path instead of skipping it. Without
+    # this, mypy cannot resolve statsmodels in a clean environment even though
+    # it resolves fine on a machine that happens to have it.
+    "statsmodels>=0.14",
 ]
 
 [project.urls]
@@ -124,3 +132,10 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = "alphaengine.core.*"
 ignore_errors = true
+
+# scipy and statsmodels ship no type information. Under `strict` an unresolved
+# import is an error, so this is the difference between a build that passes on a
+# machine that happens to have them and one that passes anywhere.
+[[tool.mypy.overrides]]
+module = ["scipy.*", "statsmodels.*"]
+ignore_missing_imports = true
