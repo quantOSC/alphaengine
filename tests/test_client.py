@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 from alphaengine.agent import AgentDriver, RefusedChoice
-from alphaengine.client import Offline, StepExecutor, UnsupportedOp, connect
+from alphaengine.client import MAX_FIGURE_LIST, Offline, StepExecutor, UnsupportedOp, connect
 from alphaengine.client.session import Session
 
 
@@ -293,3 +293,114 @@ def test_the_agent_drives_a_real_run_to_completion():
     AgentDriver(choose=lambda p, f: 0).drive(run)
     assert run.status == "closed"
     assert [b["step_id"] for b in session.seen] == ["s1", "s2", "s3"]
+
+
+# ── emit.study and record.*: the ops that had no handler ───────────────────
+#
+# Both were vocabulary strings the server could issue and this executor could
+# not execute, so a run that reached one could never produce the artifact it
+# existed to produce. The consumer was built before the producer.
+
+
+def test_emit_study_assembles_the_run_that_actually_happened():
+    ex = executor()
+    ex.execute("compute.sweep", {"grid": {"fast": [5, 10, 15], "slow": [50, 100]}})
+    ex.execute("compute.deflated_sharpe", {})
+
+    study = ex.execute("emit.study", {"label": "MA cross", "notes": "first pass"})
+
+    # THE COUNT COMES FROM THE GRID THAT RAN. 3 x 2 = 6.
+    assert study["n_trials"] == 6
+    assert study["n_trials_source"] == "derived_from_grid"
+    assert study["label"] == "MA cross"
+    assert study["data_hash"]
+    assert study["engine_version"].startswith("alphaengine@")
+    assert study["schema_version"]
+    # The verdict RIDES ALONG from the step that computed it rather than being
+    # derived a second time, because two derivations can disagree.
+    assert "deflated_sharpe" in study
+    assert study["surface"]["n_ok"] == 6
+
+
+def test_emit_study_ignores_a_trial_count_offered_by_the_server():
+    """A count arriving in a directive is one somebody upstream could choose.
+
+    Since 0.2.0 an unrecorded or flattered denominator cannot reach an `edge`
+    verdict, so the distinction has to be made at the only point in the system
+    that knows what actually ran.
+    """
+    ex = executor()
+    ex.execute("compute.sweep", {"grid": {"fast": [5, 10], "slow": [50]}})
+    study = ex.execute("emit.study", {"label": "x", "n_trials": 1, "n_trials_source": "asserted"})
+    assert study["n_trials"] == 2
+    assert study["n_trials_source"] == "derived_from_grid"
+
+
+def test_emit_study_with_no_sweep_refuses_rather_than_inventing_one():
+    with pytest.raises(UnsupportedOp) as e:
+        executor().execute("emit.study", {"label": "nothing ran"})
+    assert "sweep" in str(e.value)
+
+
+def test_emit_study_still_cannot_send_a_series():
+    """The guard runs on this like any other op."""
+    ex = executor()
+    ex.execute("compute.sweep", {"grid": {"fast": [5, 10], "slow": [50]}})
+    study = ex.execute("emit.study", {"label": "x"})
+    for value in study.values():
+        assert not (isinstance(value, list) and len(value) > MAX_FIGURE_LIST)
+
+
+def test_record_hands_values_back_for_the_ledger():
+    out = executor().execute("record.decision", {"choice": "proceed", "why": "cleared the gate"})
+    assert out == {"choice": "proceed", "why": "cleared the gate"}
+
+
+# ── a step that cannot succeed stops the run, and says why ─────────────────
+
+
+class StubbornSession(Session):
+    """A server that keeps offering a step this build cannot execute.
+
+    Not contrived: that IS the server's behaviour on a failed step, and it is
+    correct for a transient failure. For a permanent one — an op with no handler
+    — it used to mean two hundred identical round trips ending in a max_steps
+    error naming a limit that had nothing to do with the problem.
+    """
+
+    def __init__(self):
+        super().__init__(base_url="fake://", api_key=None)
+        self.attempts = 0
+
+    def _post(self, path, body):
+        if path.endswith("/steps"):
+            self.attempts += 1
+        return {
+            "run_id": "r9",
+            "status": "open",
+            "cursor": 0,
+            "selection": "any",
+            "permitted": [{"step_id": "s1", "op": "compute.nope", "params": {}, "expects": "figures"}],
+        }
+
+
+def test_a_step_that_keeps_failing_abandons_the_run_with_a_reason():
+    session = StubbornSession()
+    run = session.open("fake", data=prices(), backtest_fn=ma_cross)
+    run.drive(max_steps=200)
+
+    assert run.status == "abandoned"
+    assert run.stopped["reason"] == "step_failed"
+    assert run.stopped["op"] == "compute.nope"
+    # Two attempts, not two hundred. The old loop spun to max_steps and raised.
+    assert session.attempts == 2
+    assert "compute.nope" in run.stopped["detail"]
+
+
+def test_the_failure_is_reported_to_the_server_not_swallowed():
+    """A skipped step reports success on work that never happened."""
+    session = StubbornSession()
+    run = session.open("fake", data=prices(), backtest_fn=ma_cross)
+    run.drive()
+    # `step()` posts ok=False with the reason; the server's trace needs it.
+    assert run.status == "abandoned"

@@ -74,6 +74,20 @@ def _hash(data: Any) -> str:
         return hashlib.sha256(blob).hexdigest()[:16]
 
 
+def _engine_version() -> str:
+    """Which build produced the figures. Stamped so a consumer can reproduce or
+    refuse, which is the whole reason the version is a public contract."""
+    from .._version import __version__
+
+    return f"alphaengine@{__version__}"
+
+
+def _schema_version() -> str:
+    from ..study import SCHEMA_VERSION
+
+    return str(SCHEMA_VERSION)
+
+
 def _n_obs(data: Any) -> int:
     try:
         return int(np.asarray(data, dtype=float).shape[0])
@@ -137,6 +151,14 @@ class StepExecutor:
             "compute.performance_report": self._performance,
             "compute.compute_var_cvar": self._var,
             "compute.technical_features": self._technical,
+            # `emit.*` and `record.*` were vocabulary strings the server could
+            # issue and this executor had no handler for, so a run that reached
+            # one could never produce the artifact it existed to produce. The
+            # consumer was built before the producer.
+            "emit.study": self._emit_study,
+            "record.note": self._record,
+            "record.decision": self._record,
+            "record.approval": self._record,
         }
         if handlers:
             self._handlers.update(handlers)
@@ -201,13 +223,18 @@ class StepExecutor:
         # could flatter.
         n_trials = result.n_trials if result is not None else int(params.get("n_trials") or 1)
         out = deflated_sharpe(self._best_column(ws), n_trials=n_trials)
-        return {
+        figures = {
             "deflated_sharpe": out.get("deflated_sharpe"),
             "psr_vs_zero": out.get("psr_vs_zero"),
             "sr0_expected_max": out.get("sr0_expected_max"),
             "verdict": out.get("verdict"),
             "n_trials": n_trials,
         }
+        # Kept so `emit.study` can carry the verdict this run actually produced
+        # rather than deriving it a second time. Two derivations of one figure
+        # can disagree, and the second is the one nobody looks at.
+        ws["verdict"] = figures
+        return figures
 
     def _pbo(self, params: Figures, ws: Workspace) -> Figures:
         result = ws.get("sweep")
@@ -234,3 +261,69 @@ class StepExecutor:
         # Only the scalar readings travel; any embedded series is dropped rather
         # than transmitted.
         return {k: v for k, v in out.items() if not isinstance(v, (list, tuple))}
+
+    # ── emit / record ──────────────────────────────────────────────────────
+    #
+    # THESE RETURN FIGURES; THEY DO NOT POST ANYWHERE. The server already
+    # receives every step result and is the only party that can write to your
+    # workspace, so having the client open a second connection with a second
+    # credential to deliver something the server is about to be handed anyway
+    # would be two ways to do one thing — and the two would drift.
+    #
+    # `report()` remains the OFFLINE path: a notebook with no run, no server and
+    # no workflow. Different caller, different problem, deliberately separate.
+
+    def _emit_study(self, params: Figures, ws: Workspace) -> Figures:
+        """Assemble the study this run produced, from what actually ran.
+
+        THE TRIAL COUNT IS TAKEN FROM THE SWEEP, NEVER FROM `params`. A count
+        arriving in a directive is a count somebody upstream could have chosen;
+        a count read off the grid that executed is one that was counted. Since
+        alphaengine 0.2.0 an unrecorded denominator cannot reach an `edge`
+        verdict at all, which is precisely why the distinction has to be made
+        HERE, at the only point in the system that knows the truth.
+        """
+        result = ws.get("sweep")
+        if result is None:
+            raise UnsupportedOp(
+                "emit.study has no sweep to describe. Run compute.sweep first, or "
+                "this run has nothing to emit."
+            )
+
+        study: Figures = {
+            "label": params.get("label") or "Study",
+            "engine_version": _engine_version(),
+            "schema_version": _schema_version(),
+            "n_trials": result.n_trials,
+            "n_trials_source": "derived_from_grid",
+            "data_hash": result.data_hash,
+        }
+        if params.get("data_description"):
+            study["data_description"] = params["data_description"]
+        if params.get("notes"):
+            study["notes"] = params["notes"]
+
+        # Whatever the run already computed rides along rather than being
+        # recomputed: a study whose verdict was derived twice can disagree with
+        # itself, and the second derivation is the one nobody looks at.
+        surface = result.surface()
+        study["surface"] = {
+            k: surface[k]
+            for k in ("shape", "share_within_20pct_of_best", "best_sharpe", "n_ok", "n_failed")
+            if k in surface
+        }
+        verdict = ws.get("verdict") or {}
+        if verdict:
+            study["verdict"] = verdict.get("verdict")
+            study["deflated_sharpe"] = verdict.get("deflated_sharpe")
+        return study
+
+    def _record(self, params: Figures, ws: Workspace) -> Figures:
+        """A note, a decision, an approval: values only, echoed for the ledger.
+
+        VALUES, NOT FREE TEXT PARSED FOR MEANING. The one time this codebase
+        parsed prose to decide something it inverted an entire slate to short.
+        Whatever the server wants recorded it names as a parameter, and this
+        hands it back so the durable step record carries it.
+        """
+        return dict(params)

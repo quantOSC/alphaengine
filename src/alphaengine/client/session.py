@@ -120,14 +120,32 @@ class Run:
         self._absorb(directive)
         return directive
 
-    def drive(self, *, max_steps: int = 200) -> Run:
+    def drive(self, *, max_steps: int = 200, max_attempts: int = 2) -> Run:
         """Run to completion: execute what is permitted until stopped or closed.
 
         `max_steps` is a backstop against a server that keeps issuing work, not
         an expected limit. Hitting it is a bug somewhere, so it raises rather
         than returning a half-finished run that looks finished.
+
+        ── WHY `max_attempts` EXISTS ──────────────────────────────────────────
+
+        A step this build cannot execute reports `ok: False`, and the server
+        answers by permitting THE SAME STEP AGAIN. That is correct for a
+        transient failure and catastrophic for a permanent one: an op with no
+        handler fails identically every time, so the loop spun the same
+        impossible directive two hundred times and then raised a
+        `max_steps` error naming a limit that had nothing to do with the
+        problem. Survivable in a script that nobody watches. In an interactive
+        session it is two hundred round trips and a message that points at the
+        wrong thing.
+
+        A step that fails twice in a row is a step that will not succeed, so the
+        run stops with the REASON — the op and what it said — rather than
+        exhausting a counter. That is the same instinct as `Stop` being a 200:
+        "this cannot proceed" is a result, and it should read like one.
         """
         n = 0
+        failures: dict[str, int] = {}
         while self.status == "open":
             if n >= max_steps:
                 raise RuntimeError(f"run {self.run_id} exceeded {max_steps} steps without finishing")
@@ -141,10 +159,35 @@ class Run:
             # choice as any and is at least deterministic.
             batch = self.permitted if self.selection == "all" else self.permitted[:1]
             for s in batch:
+                before = self.status
                 self.step(s)
                 n += 1
                 if self.status != "open":
                     return self
+
+                # Did the server hand back the same step? Then the report we
+                # just filed was a failure it wants retried.
+                still_offered = any(p.get("step_id") == s.get("step_id") for p in self.permitted)
+                if still_offered and before == "open":
+                    key = str(s.get("step_id"))
+                    failures[key] = failures.get(key, 0) + 1
+                    if failures[key] >= max_attempts:
+                        op = s.get("op")
+                        self.status = "abandoned"
+                        self.stopped = {
+                            "reason": "step_failed",
+                            "op": op,
+                            "step_id": key,
+                            "attempts": failures[key],
+                            "detail": (
+                                f"{op!r} failed {failures[key]} times and the server keeps "
+                                f"offering it. This build cannot execute it: supply a handler "
+                                f"for {op!r}, or upgrade alphaengine."
+                            ),
+                        }
+                        return self
+                else:
+                    failures.pop(str(s.get("step_id")), None)
         return self
 
 

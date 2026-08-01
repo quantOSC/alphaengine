@@ -23,7 +23,7 @@ EVERYTHING ELSE IN THIS PACKAGE WORKS WITHOUT ANY OF THIS
 
 from __future__ import annotations
 
-from .executor import StepExecutor, UnsupportedOp
+from .executor import MAX_FIGURE_LIST, StepExecutor, UnsupportedOp
 from .session import Offline, Run, ServerError, Session, connect, connect_or_offline
 
 __all__ = [
@@ -33,6 +33,9 @@ __all__ = [
     "Run",
     "StepExecutor",
     "UnsupportedOp",
+    # The line between a figure and a series, exported so a custom handler can
+    # check its own output against the same number the guard enforces.
+    "MAX_FIGURE_LIST",
     "Offline",
     "ServerError",
 ]

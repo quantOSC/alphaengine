@@ -42,6 +42,19 @@ dependencies = [
     "scipy>=1.10",
 ]
 
+# THE TERMINAL ENTRY POINT. Deliberately adds nothing new: argparse from the
+# standard library, and the client's urllib transport. A CLI that dragged in a
+# TUI framework would break the two-dependency promise above on behalf of people
+# who may never run it.
+#
+# INSTALL THIS IN YOUR PROJECT VENV, NOT WITH pipx OR `uv tool install`.
+# `compute.*` ops execute in-process against your own DataFrames, so tool
+# isolation — the usual and otherwise correct way to install a CLI — is the one
+# thing that cannot work here. You cannot have isolation and in-process data
+# access, and the data not moving is the whole point.
+[project.scripts]
+alphaengine = "alphaengine.cli:main"
+
 [project.optional-dependencies]
 # Factor decomposition (OLS with HAC errors) and cointegration (ADF) need
 # statsmodels, which pulls pandas and patsy behind it. Kept OUT of the core so

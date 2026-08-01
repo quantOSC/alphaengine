@@ -7,6 +7,44 @@ minor bump.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- **`alphaengine`, a terminal entry point.** The harness was complete on both
+  sides and nothing could start a run: the server held the workflow, this
+  package held the executor, and wiring them together was a Python script the
+  user had to write. `alphaengine run validate_study --project research.momentum`
+  is that script.
+
+  **Install it into your project venv, not with pipx.** `compute.*` ops execute
+  in-process against your own DataFrames, so tool isolation — the usual and
+  otherwise correct way to install a CLI — is the one thing that cannot work
+  here. You cannot have isolation and in-process data access, and the data not
+  moving is the point.
+
+  Your data and your simulator come from a PROJECT MODULE you write and we
+  import (`data`, `backtest_fn`), because that module already exists: it is the
+  notebook cell you were going to run anyway.
+
+  No new dependencies. Nothing to put a model key in.
+
+- **`emit.study` and `record.*` handlers** in `StepExecutor`. They were
+  vocabulary strings the server could issue and the client could not execute, so
+  a run that reached one could never produce the artifact it existed to produce.
+  `emit.study` takes the trial count FROM THE SWEEP THAT RAN, never from the
+  directive — a count arriving over the wire is one somebody upstream could have
+  chosen.
+
+### Fixed
+
+- **A step that cannot succeed no longer spins two hundred times.** The server
+  re-offers a failed step, which is right for a transient failure and
+  catastrophic for a permanent one: an op with no handler failed identically
+  every time, and `drive()` exhausted `max_steps` before raising an error that
+  named the wrong problem. Two identical failures now end the run with the op
+  and the reason.
+
 ## [0.2.0] - 2026-08-01
 
 **A COMPUTED VALUE CHANGED.** `score_backtest` can return a different `verdict`
