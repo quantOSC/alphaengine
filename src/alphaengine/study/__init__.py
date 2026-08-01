@@ -27,14 +27,14 @@ WHAT IS NOT IN IT
     whoever owns them.
 """
 
+from typing import Any
+
 from .schema import SCHEMA_VERSION, Study, load, save
 
-__all__ = [
-    "report",
-    "ReportError","Study", "save", "load", "SCHEMA_VERSION"]
+__all__ = ["report", "ReportError", "Study", "save", "load", "SCHEMA_VERSION"]
 
 
-def __getattr__(name: str):  # PEP 562
+def __getattr__(name: str) -> Any:  # PEP 562
     """`report` and `ReportError` load on first use.
 
     Eager import would pull urllib into `import alphaengine`, which the offline

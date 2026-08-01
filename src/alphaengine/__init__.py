@@ -27,6 +27,8 @@ OFFLINE BY CONSTRUCTION
     and your data never leaves the machine.
 """
 
+from typing import Any
+
 from ._version import __version__
 from .study import SCHEMA_VERSION, Study, load, save
 from .sweep import SweepResult, sweep
@@ -49,7 +51,7 @@ __all__ = [
 ]
 
 
-def __getattr__(name: str):  # PEP 562
+def __getattr__(name: str) -> Any:  # PEP 562
     """`report` and `ReportError` load on first use.
 
     Everything else in this package is offline by construction and imports

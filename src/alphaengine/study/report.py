@@ -29,6 +29,7 @@ user of the offline half, who did not ask for this.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from typing import TYPE_CHECKING, Any
@@ -38,7 +39,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 __all__ = ["report", "ReportError"]
 
-DEFAULT_BASE_URL = "https://api.quantos.dev"
+DEFAULT_BASE_URL = "https://alpha-backend-production-51df.up.railway.app"
 _ENV_KEY = "QUANTOS_API_KEY"
 _ENV_URL = "QUANTOS_API_URL"
 _PATH = "/api/me/runs/ingest"
@@ -140,8 +141,7 @@ def report(
     key = api_key or os.environ.get(_ENV_KEY, "")
     if not key.strip():
         raise ReportError(
-            f"No API key. Pass api_key=..., or set {_ENV_KEY}. "
-            "Create one in the portal under Settings."
+            f"No API key. Pass api_key=..., or set {_ENV_KEY}. Create one in the portal under Settings."
         )
 
     root = (base_url or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip("/")
@@ -160,13 +160,16 @@ def report(
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            recorded: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+            return recorded
     except urllib.error.HTTPError as e:
+        # The body is best-effort context for the message. A server that
+        # answers with HTML, an empty body, or nothing at all still has to
+        # produce a usable error rather than a second exception on top of the
+        # first, which is why the failure to read it is suppressed entirely.
         detail = ""
-        try:
+        with contextlib.suppress(Exception):
             detail = json.loads(e.read().decode("utf-8")).get("detail", "")
-        except Exception:  # noqa: BLE001 - the body is best-effort context
-            pass
         if e.code in (401, 403):
             raise ReportError(
                 f"The key was rejected ({e.code}). It may be revoked, or from a different "
@@ -174,6 +177,4 @@ def report(
             ) from e
         raise ReportError(f"The server refused the study ({e.code}). {detail}".strip()) from e
     except urllib.error.URLError as e:
-        raise ReportError(
-            f"Could not reach {root}: {e.reason}. Your study is still on your disk."
-        ) from e
+        raise ReportError(f"Could not reach {root}: {e.reason}. Your study is still on your disk.") from e

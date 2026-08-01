@@ -7,6 +7,25 @@ minor bump.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-07-31
+
+**No computed value changed.** Identical figures to 0.1.0 and 0.1.1.
+
+### Fixed
+
+- `report()` used `try`/`except`/`pass` to read an error body, which ruff's
+  SIM105 correctly objects to. It is `contextlib.suppress` now. The intent was
+  always total suppression: a server answering with HTML, an empty body or
+  nothing at all still has to produce a usable error rather than a second
+  exception raised on top of the first.
+
+### Changed
+
+- `DEFAULT_BASE_URL` points at the live platform. 0.1.1 shipped with a
+  placeholder host, so every `report()` call that did not pass `base_url` or set
+  `QUANTOS_API_URL` resolved to a domain that does not answer. Reporting was
+  effectively unusable at its default in that release.
+
 ## [0.1.1] - 2026-07-31
 
 **No computed value changed.** Every figure this version produces is identical
