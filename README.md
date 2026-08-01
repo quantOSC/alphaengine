@@ -18,6 +18,23 @@ r.verdict()    # deflated for the 9 trials that were actually run
 r.save()       # study.json, on your disk
 ```
 
+Everything above runs offline, with no account and no key. There is also a
+terminal entry point for driving a workflow end to end against a workspace:
+
+```bash
+alphaengine workflows                    # what your workspace offers
+alphaengine run validate_study --project research.momentum
+```
+
+`--project` names an ordinary module of yours exposing `data` and, if the
+workflow sweeps, `backtest_fn`.
+
+> **Install this into the venv you do research in — not with `pipx` or
+> `uv tool install`.** The compute steps execute in-process against your own
+> DataFrames, so tool isolation, which is normally the right way to install a
+> CLI, is the one thing that cannot work here. You cannot have isolation and
+> in-process data access, and your data not moving is the point.
+
 ## What it does
 
 **Runs your parameter grid.** `sweep()` calls your backtest function once per
