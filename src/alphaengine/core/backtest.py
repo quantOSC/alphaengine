@@ -341,15 +341,35 @@ def run_backtest(
 # _edge_requires_validation rule, which a test cross-checks.
 
 
-def _verdict(dsr: float | None, pbo: float | None) -> str:
+def _verdict(dsr: float | None, pbo: float | None, n_trials_source: str = "asserted") -> str:
+    """The moat. `edge` requires BOTH a rigor figure and a recorded denominator.
+
+    THE HOLE THIS CLOSES (0.2.0). `score_backtest` declared `n_trials: int = 1`,
+    so a caller who simply omitted the argument got the most generous deflation
+    arithmetic can produce -- no deflation at all -- and a populated
+    `deflated_sharpe`, which was the only thing the moat checked. **Omitting the
+    trial count was the easiest path to `edge`**, in the function whose own
+    docstring advertises deflation as the overfitting moat.
+
+    A deflated Sharpe is a ratio and `n_trials` is its denominator. Deflating by
+    an unrecorded denominator does not produce a weaker claim; it produces a
+    claim about nothing. So an unrecorded count caps the verdict at
+    `inconclusive`. The figure is still computed and returned, because the
+    undeflated number is informative -- it just cannot clear the gate alone.
+
+    `sweep()` is unaffected: it derives `n_trials` as a property with no setter,
+    so its source is always `derived_from_grid`.
+    """
     if dsr is None:
         return "inconclusive"  # no rigor figure -> never 'edge'
     if pbo is not None and pbo > 0.5:
         return "likely_noise"  # overfit by PBO
+    if dsr < 0.5:
+        return "likely_noise"  # weak on its own terms, denominator or not
+    if n_trials_source == "not_recorded":
+        return "inconclusive"  # no denominator -> never 'edge'
     if dsr >= 0.9 and (pbo is None or pbo <= 0.2):
         return "edge"
-    if dsr < 0.5:
-        return "likely_noise"
     return "inconclusive"
 
 
@@ -537,7 +557,8 @@ def _cost_report(bt: dict, perf, risk_free_rate: float) -> dict | None:
 def score_backtest(
     bt: dict,
     *,
-    n_trials: int = 1,
+    n_trials: int | None = None,
+    n_trials_source: str | None = None,
     risk_free_rate: float = 0.0,
     benchmark_returns: list | None = None,
     pnl_matrix=None,
@@ -555,8 +576,25 @@ def score_backtest(
     when a parameter-sweep `pnl_matrix` is supplied) -> a MOAT-GATED verdict.
 
     `n_trials` is the number of strategy configs the caller searched; it deflates
-    the Sharpe for multiple testing. The 'edge' verdict is structurally
-    unreachable unless a deflated_sharpe figure is populated (the moat).
+    the Sharpe for multiple testing.
+
+    **IT DEFAULTS TO `None`, NOT TO 1** (changed in 0.2.0). The old default made
+    omission the most generous possible answer -- no deflation, a populated
+    `deflated_sharpe`, and therefore the easiest available route to an `edge`
+    verdict. `None` now means NOT RECORDED, which is a different claim from "I
+    searched one configuration" and is reported as such: `n_trials` comes back
+    `null` rather than 1, and `edge` is unreachable. The DSR itself is still
+    computed at an effective denominator of 1 and returned, because the
+    undeflated figure is informative -- it just cannot clear a gate on its own.
+
+    `n_trials_source` is one of `derived_from_grid`, `asserted`, `not_recorded`.
+    A count that was COUNTED and a count that was CLAIMED are different claims,
+    and every deflated figure downstream rests on which one it is. `sweep()`
+    passes `derived_from_grid` because it counted the grid; it is inferred from
+    `n_trials` when omitted.
+
+    The 'edge' verdict is structurally unreachable unless a deflated_sharpe
+    figure is populated AND its denominator was recorded (the moat).
 
     The validation block always surfaces the AR(1)-honest effective sample size
     (`n_obs_effective`) and the Harvey-Liu multiple-testing hurdle (`sharpe_tstat`
@@ -567,6 +605,12 @@ def score_backtest(
     from .performance import performance_report
     from .validation import cpcv_score, deflated_sharpe, min_track_record_length, pbo_cscv
 
+    # NOT RECORDED is not the same claim as "one trial", so the two are kept
+    # apart: `n_trials_eff` drives the arithmetic, `source` drives the gate and
+    # what the caller is told.
+    source = n_trials_source or ("not_recorded" if n_trials is None else "asserted")
+    n_trials_eff = max(1, int(n_trials)) if n_trials is not None else 1
+
     returns = bt.get("returns") or []
     perf = performance_report(
         returns,
@@ -574,7 +618,7 @@ def score_backtest(
         benchmark_returns=benchmark_returns,
         risk_free_rate=risk_free_rate,
     )
-    dsr = deflated_sharpe(returns, n_trials=max(1, int(n_trials)), trials_sharpe_std=trials_sharpe_std)
+    dsr = deflated_sharpe(returns, n_trials=n_trials_eff, trials_sharpe_std=trials_sharpe_std)
     pbo = pbo_cscv(pnl_matrix) if pnl_matrix is not None else None
     mintrl = min_track_record_length(returns)
 
@@ -605,8 +649,11 @@ def score_backtest(
         "deflated_sharpe": dsr_val,
         "pbo": pbo_val,
         "psr": psr_val,
-        "n_trials": int(n_trials),
-        "verdict": _verdict(dsr_val, pbo_val),
+        # `null`, NEVER 0 and never a silent 1 -- "not recorded" is a distinct
+        # fact from "I searched one configuration".
+        "n_trials": (int(n_trials) if n_trials is not None else None),
+        "n_trials_source": source,
+        "verdict": _verdict(dsr_val, pbo_val, source),
         # A2, autocorrelation-honest significance.
         "n_obs": (dsr.get("n_obs") if dsr_ok else len([r for r in returns if r is not None])),
         "n_obs_effective": round(n_eff, 1),
@@ -644,7 +691,7 @@ def score_backtest(
             n_test_groups=cpcv_n_test_groups,
             purge=cpcv_purge,
             embargo=cpcv_embargo,
-            n_trials=n_trials,
+            n_trials=n_trials_eff,
         )
         if isinstance(cp, dict) and "error" not in cp:
             validation["cpcv"] = cp

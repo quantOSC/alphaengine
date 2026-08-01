@@ -7,6 +7,45 @@ minor bump.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-08-01
+
+**A COMPUTED VALUE CHANGED.** `score_backtest` can return a different `verdict`
+and a different `n_trials` for the same inputs. A study saved by 0.1.x whose
+scoring omitted `n_trials` will not reproduce here, deliberately — that is the
+whole point of the change, and it is why this is a minor bump under the
+versioning rule rather than a patch.
+
+### Changed
+
+- **`score_backtest(n_trials=...)` no longer defaults to 1. It defaults to
+  `None`, meaning NOT RECORDED, and an unrecorded count can no longer reach an
+  `edge` verdict.**
+
+  The old signature made omission the most generous answer arithmetic can
+  produce: no deflation at all, a fully populated `deflated_sharpe`, and — since
+  the moat only ever checked that the DSR was populated — the single cheapest
+  route to `edge`. The docstring advertising deflation as the overfitting moat
+  and the signature quietly undermining it shipped in the same function.
+
+  A deflated Sharpe is a ratio and `n_trials` is its denominator. Deflating by a
+  denominator nobody wrote down does not produce a weaker claim, it produces a
+  claim about nothing. So:
+
+  - `n_trials` comes back `null` rather than `1` when it was not supplied. "Not
+    recorded" and "I searched one configuration" are different facts and the
+    response no longer conflates them.
+  - `n_trials_source` is reported beside it — one of `derived_from_grid`,
+    `asserted`, `not_recorded`. A count that was COUNTED and a count that was
+    CLAIMED are different claims and every figure downstream rests on which.
+  - The DSR is still computed at an effective denominator of 1 and returned,
+    because the undeflated number is informative. It simply cannot clear a gate
+    alone.
+
+  **`sweep()` is unaffected in every respect.** It derives `n_trials` from the
+  grid as a property with no setter, so its source has always been
+  `derived_from_grid` and its figures are unchanged. If you were already passing
+  a trial count, nothing about your results moves either.
+
 ## [0.1.2] - 2026-07-31
 
 **No computed value changed.** Identical figures to 0.1.0 and 0.1.1.
