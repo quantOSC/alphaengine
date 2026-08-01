@@ -43,5 +43,23 @@ __all__ = [
     "Study",
     "save",
     "load",
+    "report",
+    "ReportError",
     "SCHEMA_VERSION",
 ]
+
+
+def __getattr__(name: str):  # PEP 562
+    """`report` and `ReportError` load on first use.
+
+    Everything else in this package is offline by construction and imports
+    eagerly. Reporting is the one thing that touches a network, so it is the one
+    thing that is not imported until you ask for it — which is what keeps
+    `import alphaengine` free of networking code entirely.
+    """
+    if name in ("report", "ReportError"):
+        import importlib
+
+        mod = importlib.import_module(".study.report", __name__)
+        return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -7,6 +7,49 @@ minor bump.
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.1] - 2026-07-31
+
+**No computed value changed.** Every figure this version produces is identical
+to 0.1.0; the goldens are untouched. A study saved by 0.1.0 reproduces here.
+
+### Added
+
+- `report()`, which sends a study to a QuantOS workspace. The offline half is
+  unchanged and always will be: `save()` still needs no account, no key and no
+  network. What it could not do was reach the person who has to act on the
+  work, so a run done in a notebook stayed in the notebook. This is that
+  crossing, and nothing else about the package assumes you will ever call it.
+
+  Available as `alphaengine.report(study, ...)` and as `Study.report()`. A key
+  comes from `QUANTOS_API_KEY` unless passed explicitly, because a key pasted
+  into a notebook is a key committed to git. `QUANTOS_API_URL` points it at a
+  self-hosted or VPC deployment.
+
+- A client-side series guard on the reported payload, keyed on LENGTH rather
+  than field name, so renaming a key cannot smuggle a return series past it.
+  The same check runs on the server. The duplication is deliberate: a check
+  that runs only on the client is not a check, and one that runs only on the
+  server tells you too late and without naming the field.
+
+  What crosses is an explicit allowlist — the trial count and how it was
+  obtained, the data hash, the verdict, the surface, the performance figures. A
+  field added to `Study` later does not start leaving the machine because
+  somebody forgot to exclude it. `best_params` is absent on purpose: the grid
+  is frequently bigger intellectual property than the returns.
+
+### Unchanged, and enforced
+
+- `import alphaengine` still makes no network call and pulls in no HTTP client.
+  Reporting is the one thing here that touches a network, so it is the one
+  thing not imported until you ask for it — `report` resolves through a module
+  `__getattr__` rather than at import time. Two tests hold that line: one
+  asserts no HTTP client lands in `sys.modules`, the other that the top level
+  never drags in the client subpackage.
+
+- Still two runtime dependencies. Reporting uses `urllib` from the standard
+  library rather than `requests`, because a third dependency would be a cost
+  paid by every user of the offline half, who did not ask for it.
+
 ## [0.1.0] - 2026-07-30
 
 First public release. No figures changed, because there is nothing yet to

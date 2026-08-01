@@ -82,6 +82,17 @@ class Study:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def report(self, **kw: Any) -> dict[str, Any]:
+        """Send this study to a QuantOS workspace. See `alphaengine.report`.
+
+        Imported inside the method so that `import alphaengine` still touches no
+        networking code at all — the offline half must stay offline by
+        construction, not by good intentions.
+        """
+        from .report import report as _report
+
+        return _report(self, **kw)
+
     @classmethod
     def from_sweep(
         cls,

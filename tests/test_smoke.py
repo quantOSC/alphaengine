@@ -60,3 +60,32 @@ def test_import_makes_no_network_call():
     # offline claim gets quietly broken.
     for mod in ("requests", "httpx", "urllib3", "aiohttp"):
         assert mod not in sys.modules, f"importing alphaengine dragged in {mod}"
+
+
+def test_report_refuses_a_series_before_it_leaves_the_machine():
+    """The client-side half of the boundary, asserted rather than trusted.
+
+    The guard is keyed on LENGTH, not on field name, so this must fail for a
+    series hidden under any key at all. It is duplicated on the server on
+    purpose: a check that runs only on the client is not a check, and one that
+    runs only on the server tells you too late and without naming the field.
+    """
+    import pytest
+
+    from alphaengine.study.report import _guard
+
+    _guard({"performance": {"sharpe": 1.2}})  # figures pass
+
+    with pytest.raises(ValueError, match="is a series"):
+        _guard({"performance": {"totally_not_returns": list(range(500))}})
+
+
+def test_report_needs_a_key_and_says_so():
+    """No key is a message, not a traceback, and never a silent no-op."""
+    import pytest
+
+    from alphaengine import Study
+    from alphaengine.study.report import ReportError
+
+    with pytest.raises(ReportError, match="No API key"):
+        Study(label="x").report(api_key="")

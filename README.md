@@ -50,6 +50,33 @@ research environment. `import alphaengine` makes no network call and needs no
 account. Factor decomposition and cointegration testing need statsmodels and
 are available as `pip install 'alphaengine[factors]'`.
 
+## Getting a study to somebody else
+
+`save()` writes to your disk and needs no account. When the work has to reach
+the PM who will act on it, `report()` sends the study — and only the study.
+
+```python
+import os
+from alphaengine import Study, sweep
+
+os.environ["QUANTOS_API_KEY"] = "ae_live_..."   # created in the portal
+
+r = sweep(backtest_fn, grid, data=prices)
+r.save()                                        # yours, on your disk, always
+
+Study.from_sweep(r, label="momentum, 9 configs").report()
+```
+
+What crosses is an explicit allowlist: the trial count and how it was obtained,
+a content hash of the data, the verdict, the shape of the neighbourhood, the
+performance figures. Your returns, your prices and your parameter grid stay on
+the machine, and a guard keyed on length rather than field name refuses to send
+anything series-shaped whatever it is called.
+
+Reporting is the only part of this package that touches a network, so it is the
+only part that is not imported until you call it. `import alphaengine` still
+makes no network call.
+
 ## Where this sits in QuantOS
 
 AlphaEngine is the open research layer of the [QuantOS](https://github.com/quantOSC)
