@@ -837,6 +837,19 @@ def enter_key(which: str) -> bool:
     return True
 
 
+def _is_workflow(session: Any, name: str) -> bool:
+    """Is this the name of a workflow, or the first word of a sentence?
+
+    Asked of the SERVER rather than guessed, because the catalogue is the only
+    authority on what a workflow is called. A network failure answers False,
+    which routes the line to the agent — the friendlier wrong answer of the two.
+    """
+    try:
+        return any(str(w.get("name")) == name for w in session.workflows())
+    except Exception:  # noqa: BLE001 - offline/refused is handled downstream
+        return False
+
+
 def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -> Any:
     """Natural language → a workflow chosen and driven by the user's own model.
 
@@ -978,10 +991,18 @@ def cmd_repl(args: argparse.Namespace) -> int:
             except ProjectError as exc:
                 say(red(str(exc)))
             continue
-        if verb == "run":
-            if not rest:
-                say(red("run what? try `workflows`"))
-                continue
+        # A COMMAND WORD AT THE START OF A SENTENCE IS STILL A SENTENCE.
+        #
+        # `run a query into the S&P 500 and see which stocks are outperforming`
+        # was parsed as `run` + a workflow named "a query into the S&P 500 …",
+        # and the server answered "no workflow named …". The most natural way to
+        # phrase an agentic request begins with a verb, so the one parse rule
+        # that mattered was throwing every good request away.
+        #
+        # `run` means the scripted path ONLY when what follows is a single token
+        # naming a real workflow. Anything else is a request, which is what the
+        # user obviously meant.
+        if verb == "run" and rest and (" " not in rest) and _is_workflow(session, rest):
             try:
                 last = session.open(rest, data=data, backtest_fn=backtest_fn)
                 _drive(last)
@@ -996,6 +1017,10 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 if is_auth_error(exc) and offer_key():
                     session, url = _session(args.url, args.key)
                     say(dim("  Try that again."))
+            continue
+
+        if verb == "run" and not rest:
+            say(red("run what? try `workflows`, or just describe what you want."))
             continue
 
         # ── ANYTHING ELSE IS A REQUEST, NOT A TYPO ─────────────────────────
