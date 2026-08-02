@@ -151,10 +151,13 @@ def build_think(model: str | None = None) -> tuple[Callable[[str], str], str]:
 def _anthropic(key: str, model: str) -> Callable[[str], str]:
     def think(prompt: str) -> str:
         try:
-            # `type: ignore` because the SDK is deliberately NOT a dependency —
-            # see the module docstring. mypy is right that it may be absent;
-            # the ImportError below is the handling.
-            import anthropic  # type: ignore[import-not-found]  # noqa: PLC0415
+            # No inline ignore. The SDK is deliberately NOT a dependency, so on
+            # a machine without it mypy reports import-not-found and on a
+            # machine WITH it any ignore is UNUSED and strict mode errors on
+            # that. One annotation cannot be right in both states, so the answer
+            # is configuration: see `ignore_missing_imports` for these two
+            # modules in pyproject.toml.
+            import anthropic  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover - depends on the machine
             raise NoModelConfigured(
                 "ANTHROPIC_API_KEY is set but the SDK is not installed: pip install anthropic"
@@ -165,7 +168,13 @@ def _anthropic(key: str, model: str) -> Callable[[str], str]:
             max_tokens=512,
             messages=[{"role": "user", "content": prompt}],
         )
-        return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+        # `getattr` rather than `b.text`. A response block is a union of a dozen
+        # types and only TextBlock carries `.text` — reading the attribute
+        # directly is a type error on every other member, and the runtime filter
+        # in front of it is invisible to a checker. This says what the filter
+        # already guarantees, in a form that survives the SDK adding a
+        # fourteenth block type next month.
+        return "".join(str(getattr(b, "text", "")) for b in msg.content if getattr(b, "type", None) == "text")
 
     return think
 
@@ -173,7 +182,7 @@ def _anthropic(key: str, model: str) -> Callable[[str], str]:
 def _openai(key: str, model: str) -> Callable[[str], str]:
     def think(prompt: str) -> str:
         try:
-            import openai  # type: ignore[import-not-found]  # noqa: PLC0415
+            import openai  # noqa: PLC0415  # see the anthropic import above
         except ImportError as exc:  # pragma: no cover - depends on the machine
             raise NoModelConfigured(
                 "OPENAI_API_KEY is set but the SDK is not installed: pip install openai"

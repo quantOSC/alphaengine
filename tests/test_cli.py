@@ -550,7 +550,10 @@ def test_a_sweep_workflow_without_a_backtest_is_refused_up_front():
     assert gap and "backtest_fn" in gap
     # And it says what to actually type, including a path that needs nothing.
     assert "--project" in gap
-    assert "alphaengine.demo" in gap
+    # The example is `alphaengine demo` now, not a --project pointed at the demo
+    # module: one word, no arguments, and it is the fastest way to see the thing
+    # work at all.
+    assert "alphaengine demo" in gap
 
 
 def test_data_alone_is_not_enough_for_a_sweep():

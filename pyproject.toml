@@ -159,6 +159,21 @@ warn_unreachable = true
 module = "alphaengine.core.*"
 ignore_errors = true
 
+# THE PROVIDER SDKs ARE OPTIONAL AND THAT BREAKS INLINE IGNORES.
+#
+# `anthropic` and `openai` are extras, not dependencies (see model.py). So mypy
+# sees two different worlds: on a machine without them the import is
+# `import-not-found`, and on a machine WITH them any `# type: ignore` on that
+# line is UNUSED — which strict mode reports as an error. One inline annotation
+# cannot be correct in both, and CI and a developer's laptop are frequently in
+# different states, so the fix has to be here rather than on the line.
+#
+# Observed, not theorised: installing `anthropic` locally to reproduce a bug
+# turned a green checkout red on a file nobody had touched.
+[[tool.mypy.overrides]]
+module = ["anthropic.*", "openai.*"]
+ignore_missing_imports = true
+
 # scipy and statsmodels ship no type information. Under `strict` an unresolved
 # import is an error, so this is the difference between a build that passes on a
 # machine that happens to have them and one that passes anywhere.

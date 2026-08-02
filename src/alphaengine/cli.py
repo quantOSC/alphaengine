@@ -431,13 +431,29 @@ def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest
 
     what = " and ".join(f"`{m}`" for m in missing)
     shapes = "\n".join(f"  {_SHAPES[m]}" for m in missing if m in _SHAPES)
+    # THE DOORS, EASIEST FIRST. This named `--project` and nothing else, so
+    # somebody holding a CSV was told to go and write a Python module — and a
+    # message that offers only the hardest route reads as "you cannot do this".
+    # `--data` is one flag and it is the answer most of the time.
+    if "backtest_fn" in missing:
+        # Only a module can carry a simulator, so here the module is not the
+        # hard route, it is the only one.
+        doors = [f"      alphaengine run {name} --project research.momentum"]
+    else:
+        doors = [f"      alphaengine run {name} --data prices.csv"]
+        if "universe" in missing:
+            doors.append(
+                f"      alphaengine run {name} --universe <name>        # one you registered in the portal"
+            )
+        doors.append(f"      alphaengine run {name} --project research.momentum")
+
     return (
-        f"{name} needs {what} from your project module, and none was loaded.\n"
+        f"{name} needs {what}, and none was loaded.\n"
         + (shapes + "\n" if shapes else "")
-        + f"  Point at a module of yours that defines them:\n"
-        f"      alphaengine run {name} --project research.momentum\n"
-        f"  Or try it on the built-in example first:\n"
-        f"      alphaengine run {name} --project alphaengine.demo"
+        + "\n  Load some:\n"
+        + "\n".join(doors)
+        + "\n\n  Or see it work on the built-in example first:\n"
+        "      alphaengine demo"
     )
 
 
@@ -1062,6 +1078,24 @@ def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -
         return None
 
     name = str(chosen.get("name"))
+
+    # PREFLIGHT ON THIS PATH TOO. It was called only from `cmd_run`, so the
+    # guard built to say "this workflow needs X and none was loaded" BEFORE a
+    # run churns did not run on the path people actually type into.
+    #
+    # The cost of that was not a missing message, it was a WRONG one: with no
+    # data the run started, `data.resolve` reported zero names, and the screen's
+    # gate answered with the sentence written for a small universe -- "that is a
+    # handful of names rather than a universe" -- when nothing had been supplied
+    # at all. A refusal that names the wrong cause is worse than no refusal,
+    # because it sends somebody to fix a thing that was never broken.
+    gap = preflight(catalogue, name, data=data, backtest_fn=backtest_fn)
+    if gap:
+        say(yellow(f"  {name} is the right workflow for that, and it cannot start yet."))
+        for line in gap.splitlines()[1:]:
+            say(dim(line) if line.strip() else "")
+        return None
+
     repro = chosen.get("reproducible")
     say(
         f"  {dim('agent  ' + DOT)}  chose {bold(name)}  "

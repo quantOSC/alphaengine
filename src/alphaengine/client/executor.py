@@ -213,7 +213,27 @@ class StepExecutor:
         A content hash rather than a name: a label can be changed to escape a
         history and an array cannot, so this is what makes a run reproducible
         without the series ever crossing.
+
+        ── NOTHING IS NOT AN EMPTY DATASET ────────────────────────────────────
+
+        This used to hash `None` and return `{n_obs: 0, hash: "74999fd..."}`, a
+        content hash for absent data. That made "you supplied nothing"
+        indistinguishable from "you supplied an empty set" everywhere
+        downstream — and a gate reading `n_obs: 0` answered with the sentence
+        written for a SMALL universe: "that is a handful of names rather than a
+        universe", when there had been no universe at all.
+
+        A refusal that names the wrong cause is worse than no refusal. So this
+        refuses, and the message is the one the user can act on.
         """
+        if self.data is None:
+            raise UnsupportedOp(
+                "no data was loaded for this run, so there is nothing to identify. "
+                "Load some and try again:\n"
+                "  --data prices.csv        a local file\n"
+                "  --universe <name>        a universe you registered in the portal\n"
+                "  --project <module>       a Python module exposing `data`"
+            )
         return {
             "ref": params.get("ref") or "local",
             "hash": _hash(self.data),
