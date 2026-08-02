@@ -136,3 +136,43 @@ def test_var_cvar_golden_and_sign_convention() -> None:
     if hist.get("var_pct") is not None and hist.get("cvar_pct") is not None:
         assert hist["var_pct"] > 0
         assert hist["cvar_pct"] >= hist["var_pct"], "CVaR must be at least VaR"
+
+
+# ── screening ──────────────────────────────────────────────────────────────
+# A screen's score is a public contract for the same reason a Sharpe is: a
+# shortlist saved today has to be explicable in two years, and "the ranking
+# changed" is not an explanation anyone can act on.
+def walk(seed: int, n: int, drift: float) -> list[float]:
+    steps = np.random.default_rng(seed).normal(drift, 0.01, n)
+    return (100.0 * np.cumprod(1.0 + steps)).tolist()
+
+
+def test_screen_universe_golden() -> None:
+    from alphaengine.core import screen_universe
+
+    names = {f"S{i:02d}": walk(i, 300, 0.0002 * i) for i in range(25)}
+    got = screen_universe(names, rank_by="return_pct", top_n=3)
+
+    # The ranking is NOT the drift order the fixture was built with, and that is
+    # the fixture doing its job: `return_pct` is a TRAILING window, so a name
+    # with more drift over the whole path can easily have had a worse last
+    # quarter. A golden that happened to agree with the generator's parameters
+    # would be pinning the fixture rather than the function.
+    assert [row["symbol"] for row in got["rows"]] == ["S23", "S14", "S24"]
+    assert [row["score"] for row in got["rows"]] == [44.3267, 42.288308, 39.019312]
+    assert got["universe_size"] == 25
+    assert got["n_evaluated"] == 25
+    assert got["n_insufficient"] == 0
+
+
+def test_screen_counts_close_over_the_whole_universe() -> None:
+    """Pinned because a coverage figure that does not reconcile is the one
+    number a reader will trust without checking."""
+    from alphaengine.core import screen_universe
+
+    names = {f"S{i:02d}": walk(i, 300, 0.0003) for i in range(20)}
+    names["TOOSHORT"] = walk(99, 5, 0.0)
+
+    got = screen_universe(names, rank_by="return_pct", top_n=50)
+    assert got["universe_size"] == got["n_evaluated"] + got["n_insufficient"]
+    assert got["n_evaluated"] == got["n_passing"] + got["n_failing"] + got["n_undetermined"]

@@ -404,3 +404,154 @@ def test_the_failure_is_reported_to_the_server_not_swallowed():
     run.drive()
     # `step()` posts ok=False with the reason; the server's trace needs it.
     assert run.status == "abandoned"
+
+
+# ── measuring a series when no sweep ran ───────────────────────────────────
+#
+# Until 2026-08-02 every reading in this executor except `technical_features`
+# went through `_best_column`, which raises without a sweep. That was fine while
+# the catalogue held one workflow and that workflow swept. It stopped being fine
+# the moment a workflow wanted to measure something the caller already holds —
+# a live sleeve, a candidate with a track record — and those are three of the
+# four workflows now.
+
+
+def returns(seed: int = 5, n: int = 400) -> list[float]:
+    return np.random.default_rng(seed).normal(0.0006, 0.011, n).tolist()
+
+
+def test_performance_reads_supplied_returns_when_no_sweep_ran():
+    out = StepExecutor(data=returns()).execute("compute.performance_report", {})
+    assert out["n_obs"] == 400
+    assert out["sharpe_annualized"] is not None
+
+
+def test_returns_can_arrive_under_a_key_on_a_mapping():
+    """The two spellings a research module actually uses. Anything else is a
+    guess, and a wrong guess here silently measures the wrong column."""
+    for key in ("returns", "pnl"):
+        out = StepExecutor(data={key: returns()}).execute("compute.performance_report", {})
+        assert out["n_obs"] == 400
+
+
+def test_var_and_track_record_also_work_without_a_sweep():
+    ex = StepExecutor(data=returns())
+    var = ex.execute("compute.compute_var_cvar", {})
+    assert var["parametric"]["var_pct"] > 0
+    # CVaR travels too: a sizing gate needs what the bad day COSTS, not only how
+    # often it arrives.
+    assert var["cvar"]["cvar_pct"] >= var["historical"]["var_pct"]
+
+    trl = ex.execute("compute.min_track_record_length", {})
+    assert "sufficient" in trl
+
+
+def test_the_sweep_still_wins_when_there_is_one():
+    """Order matters: the sweep's best column IS what the run is about, and
+    reading the caller's raw data instead would measure a different thing than
+    the one being validated."""
+    ex = executor()
+    ex.execute("compute.sweep", {"grid": {"fast": [5, 10], "slow": [50]}})
+    swept = ex.execute("compute.performance_report", {})
+
+    ex.data = returns()
+    assert ex.execute("compute.performance_report", {})["n_obs"] == swept["n_obs"]
+
+
+def test_a_reading_with_nothing_to_read_names_what_was_wanted():
+    with pytest.raises(UnsupportedOp) as e:
+        StepExecutor(data={"prices": {"AAPL": [1, 2, 3]}}).execute("compute.performance_report", {})
+    assert "return series" in str(e.value)
+
+
+# ── the trial count is never invented ──────────────────────────────────────
+def test_a_deflated_sharpe_with_no_recorded_count_is_not_a_number():
+    """`int(params.get("n_trials") or 1)` used to sit in this handler.
+
+    One was the most generous denominator arithmetic can produce, which is why
+    it was removed from the core function. It survived here because
+    `_best_column` raised first and made it unreachable — and it would have gone
+    live the moment a workflow measured a supplied series without sweeping.
+    """
+    out = StepExecutor(data=returns()).execute("compute.deflated_sharpe", {})
+    assert out["deflated_sharpe"] is None
+    assert out["n_trials"] is None
+    assert out["n_trials_source"] == "not_recorded"
+    assert out["verdict"] is None
+    assert "count" in out["note"]
+
+
+def test_a_stated_count_is_used_and_labelled_as_asserted():
+    out = StepExecutor(data=returns()).execute("compute.deflated_sharpe", {"n_trials": 40})
+    assert out["n_trials"] == 40
+    assert out["n_trials_source"] == "asserted"
+    assert out["deflated_sharpe"] is not None
+
+
+def test_a_swept_count_outranks_a_stated_one_and_says_where_it_came_from():
+    ex = executor()
+    ex.execute("compute.sweep", {"grid": {"fast": [5, 10, 15], "slow": [50, 100]}})
+    out = ex.execute("compute.deflated_sharpe", {"n_trials": 1})
+    assert out["n_trials"] == 6
+    assert out["n_trials_source"] == "derived_from_grid"
+
+
+# ── screening ──────────────────────────────────────────────────────────────
+def universe(n: int = 30, obs: int = 300) -> dict:
+    rng = np.random.default_rng(7)
+    return {f"S{i:02d}": (100.0 * np.cumprod(1.0 + rng.normal(0.0004, 0.01, obs))).tolist() for i in range(n)}
+
+
+def test_screen_returns_a_shortlist_and_keeps_the_universe_local():
+    ex = StepExecutor(data=universe())
+    out = ex.execute("compute.screen", {"rank_by": "return_pct", "top_n": 5})
+
+    assert len(out["rows"]) == 5
+    assert out["universe_size"] == 30
+    # The bounded-payload property, which is the whole reason this op exists
+    # alongside `compute.technical_features`.
+    assert len(out["rows"]) < out["universe_size"]
+
+
+def test_screen_carries_its_coverage_so_a_gate_can_read_it():
+    out = StepExecutor(data=universe()).execute("compute.screen", {"rank_by": "return_pct"})
+    for key in ("universe_size", "n_evaluated", "n_passing", "n_insufficient"):
+        assert key in out
+
+
+def test_an_op_that_wants_a_universe_says_so_when_it_gets_a_series():
+    """Instead of an AttributeError about `.items` from three frames down."""
+    for op in ("compute.screen", "compute.technical_features"):
+        with pytest.raises(UnsupportedOp) as e:
+            StepExecutor(data=returns()).execute(op, {})
+        assert "universe" in str(e.value)
+
+
+def test_a_screen_of_a_big_universe_still_clears_the_series_guard():
+    """The executor's own guard runs on this like any other op, and a screen is
+    the one op whose result scales with the input if nothing bounds it."""
+    out = StepExecutor(data=universe(300)).execute("compute.screen", {"top_n": 10_000})
+    assert len(out["rows"]) <= MAX_FIGURE_LIST
+
+
+# ── sealing an artifact the server assembled ───────────────────────────────
+def test_emit_echoes_the_servers_conclusion_and_stamps_the_build():
+    for op in ("emit.screen", "emit.monitor", "emit.sizing_decision"):
+        out = StepExecutor().execute(op, {"label": "x", "target_weight": 0.02})
+        assert out["label"] == "x"
+        assert out["target_weight"] == 0.02
+        # What the server cannot know: which build produced the figures under it.
+        assert out["engine_version"].startswith("alphaengine@")
+        assert out["schema_version"]
+
+
+def test_emit_does_not_second_guess_the_workflow():
+    """The asymmetry with `emit.study` is deliberate. A study's trial count is
+    read off the sweep because this machine is the only party that knows it. A
+    shortlist or a sizing decision is the workflow's own conclusion, and a second
+    derivation here could disagree with the first."""
+    ex = StepExecutor(data=universe())
+    ex.execute("compute.screen", {"rank_by": "rsi", "top_n": 3})
+    out = ex.execute("emit.screen", {"rank_by": "return_pct", "n_passing": 99})
+    assert out["rank_by"] == "return_pct"
+    assert out["n_passing"] == 99

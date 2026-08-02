@@ -39,6 +39,7 @@ from ..core import (
     min_track_record_length,
     pbo_cscv,
     performance_report,
+    screen_universe,
     technical_features,
 )
 from ..sweep import sweep as run_sweep
@@ -98,6 +99,33 @@ def _n_obs(data: Any) -> int:
             return 0
 
 
+def _as_returns(data: Any) -> list[float] | None:
+    """Pull a return series out of whatever the caller passed as `data`.
+
+    Accepts a bare sequence of numbers, or a mapping carrying one under
+    `returns` / `pnl` — the two spellings a research module actually uses. Any
+    other shape returns None, which the caller turns into a message naming what
+    was expected. Guessing harder than this would mean picking a column out of a
+    frame on the caller's behalf and being wrong silently.
+    """
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        for key in ("returns", "pnl"):
+            inner = data.get(key)
+            if inner is not None:
+                return _as_returns(inner)
+        return None
+    try:
+        arr = np.asarray(data, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim != 1 or arr.size == 0:
+        return None
+    out: list[float] = arr.tolist()
+    return out
+
+
 def _guard(figures: dict[str, Any]) -> dict[str, Any]:
     """Refuse to send anything series-shaped, whatever it is called."""
 
@@ -151,11 +179,15 @@ class StepExecutor:
             "compute.performance_report": self._performance,
             "compute.compute_var_cvar": self._var,
             "compute.technical_features": self._technical,
+            "compute.screen": self._screen,
             # `emit.*` and `record.*` were vocabulary strings the server could
             # issue and this executor had no handler for, so a run that reached
             # one could never produce the artifact it existed to produce. The
             # consumer was built before the producer.
             "emit.study": self._emit_study,
+            "emit.screen": self._emit_echo,
+            "emit.monitor": self._emit_echo,
+            "emit.sizing_decision": self._emit_echo,
             "record.note": self._record,
             "record.decision": self._record,
             "record.approval": self._record,
@@ -216,19 +248,76 @@ class StepExecutor:
         column: list[float] = result.matrix[:, result.best.index].tolist()
         return column
 
+    def _returns_column(self, ws: Workspace) -> list[float]:
+        """The return series this run is measuring.
+
+        Two sources and the order matters. A sweep's best column when one ran:
+        that IS what the run is about, and reading anything else would measure a
+        different thing than the one being validated. Otherwise the returns the
+        caller supplied, because a workflow that does not sweep — a monitor, a
+        sizing decision — is still measuring something real and should not have
+        to fabricate a one-cell grid to be allowed to.
+        """
+        if ws.get("sweep") is not None:
+            return self._best_column(ws)
+
+        supplied = _as_returns(self.data)
+        if supplied is None:
+            raise UnsupportedOp(
+                "that figure needs a return series and this run has neither a sweep "
+                "nor one it can find. Pass returns as `data` — a sequence of "
+                "per-period returns, or a mapping with them under `returns`."
+            )
+        return supplied
+
     def _deflated(self, params: Figures, ws: Workspace) -> Figures:
+        """Deflate a Sharpe by the number of configurations actually tried.
+
+        THE DENOMINATOR DECIDES WHAT THIS FIGURE MEANS, so where it came from
+        travels beside it and is never invented here:
+
+            derived_from_grid   a sweep ran and this is its trial count
+            asserted            no sweep; the caller stated a count
+            not_recorded        neither, so there is no deflated Sharpe to give
+
+        The third case used to read `int(params.get("n_trials") or 1)`, which is
+        the most generous denominator arithmetic can produce and was removed from
+        the core function on 2026-08-01 for exactly that reason. It survived here
+        because `_best_column` raised first and made it unreachable — and it would
+        have gone live the moment a workflow measured a supplied series without
+        sweeping, which is now a thing workflows do. A default that is wrong and
+        currently unreachable is still wrong.
+        """
         result = ws.get("sweep")
-        # The trial count comes from the sweep that actually ran, not from the
-        # server's parameter. A count supplied from outside is a count somebody
-        # could flatter.
-        n_trials = result.n_trials if result is not None else int(params.get("n_trials") or 1)
-        out = deflated_sharpe(self._best_column(ws), n_trials=n_trials)
+        if result is not None:
+            n_trials, source = int(result.n_trials), "derived_from_grid"
+        elif params.get("n_trials") is not None:
+            n_trials, source = int(params["n_trials"]), "asserted"
+        else:
+            # No count, so no deflation. Reported as absent-with-a-reason rather
+            # than as a number, because a DSR standing on an invented denominator
+            # looks exactly like one standing on a counted grid.
+            figures: Figures = {
+                "deflated_sharpe": None,
+                "n_trials": None,
+                "n_trials_source": "not_recorded",
+                "verdict": None,
+                "note": (
+                    "no trial count was recorded for this run, so the Sharpe cannot "
+                    "be deflated. Sweep the grid, or state the count you searched."
+                ),
+            }
+            ws["verdict"] = figures
+            return figures
+
+        out = deflated_sharpe(self._returns_column(ws), n_trials=n_trials)
         figures = {
             "deflated_sharpe": out.get("deflated_sharpe"),
             "psr_vs_zero": out.get("psr_vs_zero"),
             "sr0_expected_max": out.get("sr0_expected_max"),
             "verdict": out.get("verdict"),
             "n_trials": n_trials,
+            "n_trials_source": source,
         }
         # Kept so `emit.study` can carry the verdict this run actually produced
         # rather than deriving it a second time. Two derivations of one figure
@@ -247,20 +336,60 @@ class StepExecutor:
         return {"pbo": out.get("pbo"), "verdict": out.get("verdict"), "n_configs": out.get("n_configs")}
 
     def _mintrl(self, params: Figures, ws: Workspace) -> Figures:
-        return dict(min_track_record_length(self._best_column(ws)))
+        return dict(min_track_record_length(self._returns_column(ws), **params))
 
     def _performance(self, params: Figures, ws: Workspace) -> Figures:
-        return dict(performance_report(self._best_column(ws)))
+        return dict(performance_report(self._returns_column(ws), **params))
 
     def _var(self, params: Figures, ws: Workspace) -> Figures:
-        out = compute_var_cvar(self._best_column(ws))
-        return {"confidence": out.get("confidence"), "parametric": out.get("parametric")}
+        out = compute_var_cvar(self._returns_column(ws), **params)
+        return {
+            "n_obs": out.get("n_obs"),
+            "confidence": out.get("confidence"),
+            "horizon_days": out.get("horizon_days"),
+            # A sample too small for the tail to mean anything. Travels with the
+            # number rather than being left for the reader to work out.
+            "low_sample": out.get("low_sample"),
+            "parametric": out.get("parametric"),
+            "cornish_fisher": out.get("cornish_fisher"),
+            "historical": out.get("historical"),
+            # CVaR is the figure a sizing gate should read: it is the average
+            # loss BEYOND the VaR point, so it says what the bad day costs rather
+            # than only how often it arrives.
+            "cvar": out.get("cvar"),
+        }
+
+    def _universe(self) -> dict[str, Any]:
+        """The caller's universe, or a message naming the shape that was wanted.
+
+        `{symbol: series}` is what both screening ops read. A caller who passed a
+        bare return series gets told so, instead of an AttributeError from three
+        frames down that names `.items` and explains nothing.
+        """
+        if not isinstance(self.data, dict) or not self.data:
+            raise UnsupportedOp(
+                "that operation reads a universe and this run's data is not one. "
+                "Pass `data` as {symbol: prices} — prices being closes, "
+                "{date: close}, or OHLC rows."
+            )
+        return self.data
 
     def _technical(self, params: Figures, ws: Workspace) -> Figures:
-        out = technical_features(self.data, **params)
+        out = technical_features(self._universe(), **params)
         # Only the scalar readings travel; any embedded series is dropped rather
         # than transmitted.
         return {k: v for k, v in out.items() if not isinstance(v, (list, tuple))}
+
+    def _screen(self, params: Figures, ws: Workspace) -> Figures:
+        """Rank the universe locally and send back the shortlist.
+
+        The universe stays here and a bounded number of rows leave, which is the
+        same split as everywhere else in this file: we orchestrate and measure,
+        your data does not move. Note this returns LESS than
+        `compute.technical_features` does on the same input, and that is the
+        point — a feature table grows with the universe, a shortlist does not.
+        """
+        return dict(screen_universe(self._universe(), **params))
 
     # ── emit / record ──────────────────────────────────────────────────────
     #
@@ -317,6 +446,26 @@ class StepExecutor:
             study["verdict"] = verdict.get("verdict")
             study["deflated_sharpe"] = verdict.get("deflated_sharpe")
         return study
+
+    def _emit_echo(self, params: Figures, ws: Workspace) -> Figures:
+        """Seal an artifact the SERVER assembled, and stamp which build sealed it.
+
+        THE ASYMMETRY WITH `emit.study` IS DELIBERATE. A study's trial count has
+        to be read off the sweep that ran, because a count is the one figure this
+        machine knows and the server can only be told. A shortlist, a sizing
+        decision and a monitor reading are the opposite: they are the workflow's
+        own conclusion drawn from figures it already holds, so re-deriving them
+        here would be a second opinion nobody asked for and the two could
+        disagree.
+
+        So this echoes the values and adds only what the server cannot know:
+        which build produced the figures underneath, which is what a consumer
+        needs to reproduce or refuse.
+        """
+        out: Figures = dict(params)
+        out["engine_version"] = _engine_version()
+        out["schema_version"] = _schema_version()
+        return out
 
     def _record(self, params: Figures, ws: Workspace) -> Figures:
         """A note, a decision, an approval: values only, echoed for the ledger.

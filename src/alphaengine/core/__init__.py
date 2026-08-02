@@ -34,6 +34,7 @@ everyone who does not need them:
 from .backtest import run_backtest, score_backtest
 from .performance import performance_report
 from .risk import compute_var_cvar
+from .screen import screen_universe
 from .technical import technical_features
 from .validation import (
     cpcv_score,
@@ -60,4 +61,6 @@ __all__ = [
     "score_backtest",
     # features
     "technical_features",
+    # selection: rank a supplied universe, return a bounded shortlist
+    "screen_universe",
 ]
