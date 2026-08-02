@@ -96,6 +96,7 @@ COMMANDS: tuple[Command, ...] = (
         verb="demo",
         group="start",
         args="",
+        scope="both",
         purpose="run the built-in example offline, with no account and no data",
         body=(
             "The fastest way to see the whole offline half work. A fixed seed, so it "

@@ -582,11 +582,27 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
         known = ", ".join(str(u.get("name")) for u in rows) or "none"
         raise DataShapeError(f"no universe called {wanted!r}. Yours: {known}")
 
-    symbols = list(match.get("symbols") or [])
-    if not symbols:
-        raise DataShapeError(f"universe {wanted!r} names no symbols.")
+    # SYMBOLS LIVE UNDER `definition`, NOT AT THE TOP LEVEL. The portal returns
+    # {id, name, version, definition, created_at, updated_at} and the symbol
+    # list is inside `definition` alongside `cache_id`. Reading
+    # `match["symbols"]` therefore found nothing on EVERY universe, so a real
+    # one reported "names no symbols" and could never load.
+    #
+    # The test that was supposed to catch this used a fixture invented from the
+    # shape I assumed rather than the one the server sends, which is worth more
+    # than the bug: a stub that agrees with the code instead of with the server
+    # tests nothing and reads as coverage. See `test_the_client_reads_the_shape_
+    # the_server_actually_sends` in the platform repo, which imports both.
+    definition = match.get("definition") or {}
+    symbols = [str(x) for x in (definition.get("symbols") or match.get("symbols") or [])]
 
     # ── NO LOCAL FILE? PULL THE CLOSES YOU STORED WITH IT ──────────────────
+    #
+    # ATTEMPTED BEFORE THE SYMBOL CHECK, and the order is the fix. A missing
+    # symbol list has nothing to do with whether the closes are stored, so
+    # gating the fetch on it refused a universe whose prices were sitting right
+    # there. Symbols only matter for the narrowing path below, where there is a
+    # local file to narrow.
     #
     # A universe registered WITH prices has them in the portal, encrypted, and
     # the portal will decrypt them back to the same account. Requiring the user
@@ -622,6 +638,14 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
             )
         )
         return prices
+
+    # From here there IS a local file, so the symbol list is what narrows it and
+    # its absence is genuinely fatal to this path.
+    if not symbols:
+        raise DataShapeError(
+            f"universe {wanted!r} lists no symbols, so there is nothing to narrow "
+            "your file to. Drop --universe and run on the file as it stands."
+        )
 
     kept, missing = coverage(data, symbols)
     if not kept:
@@ -1617,6 +1641,16 @@ def cmd_repl(args: argparse.Namespace) -> int:
             if not line.strip():
                 continue  # the flags WERE the instruction
 
+        # `alphaengine demo` at this prompt is somebody following the tool's own
+        # instructions: every message it prints shows the shell form, because
+        # that is the form that works in a shell. Stripping the binary name here
+        # costs one line and removes a whole class of "I typed what it told me
+        # to" and got a research question back.
+        if line.split()[:1] == ["alphaengine"]:
+            line = line.partition(" ")[2].strip()
+            if not line:
+                continue
+
         verb, _, rest = line.partition(" ")
         rest = rest.strip()
 
@@ -1624,6 +1658,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
             return 0
         if verb == "help":
             say(_help_text())
+            continue
+        if verb == "demo":
+            # A SHELL SUBCOMMAND ONLY, until now. So the single thing every
+            # refusal recommends to a stuck user -- "see it work on the built-in
+            # example first" -- was the one thing this prompt could not do.
+            cmd_demo(args)
             continue
         if verb in ("commands", "?"):
             cmd_commands(argparse.Namespace(verb=rest))
