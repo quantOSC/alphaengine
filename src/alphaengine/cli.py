@@ -36,13 +36,24 @@ THREE DOORS, and the third one only says which names:
 
     --project research.momentum     a module exposing `data` and `backtest_fn`
     --data    prices.csv            a local file: wide, long, or one series
-    --universe core                 a universe registered in the portal, which
-                                    narrows --data to the names it lists
+    --universe core                 a universe registered in the portal. Brings
+                                    its stored closes if you saved them there;
+                                    otherwise narrows --data to its names
 
 `--project` is the ONLY door that can supply a simulator, because a simulator is
 code, which is why `validate_study` needs it and the other three workflows do
-not. `--universe` supplies SYMBOLS AND NEVER PRICES: a universe is a definition,
-so fetching one moves no market data and your closes still come off this disk.
+not.
+
+`--universe` is the one that needs a word about §9. The rule is that WE never
+fetch market data on your behalf and never hold a series as our own. Pulling
+back closes YOU uploaded, encrypted at rest, into the same account that put them
+there is neither: nothing new crosses a boundary, a thing you already own moves
+between two of your own surfaces. Refusing that would not have been a data
+boundary, it would have been a missing function wearing one — upload an S&P
+universe to the portal, then be told the OS cannot see it.
+
+A local `--data` file still WINS over the stored copy, because it is the more
+explicit statement.
 
 A PROJECT MODULE that you write and we import: an ordinary Python module
 exposing `data` and, if a workflow sweeps, `backtest_fn`.
@@ -547,11 +558,6 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
 
     if session is None:
         raise DataShapeError("--universe needs a workflow server; none is configured.")
-    if data is None:
-        raise DataShapeError(
-            "--universe says WHICH names; it does not supply their prices, because a "
-            "universe is a definition and never a series. Add --data with the closes."
-        )
 
     rows = session.universes()
     match = next(
@@ -565,6 +571,43 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
     symbols = list(match.get("symbols") or [])
     if not symbols:
         raise DataShapeError(f"universe {wanted!r} names no symbols.")
+
+    # ── NO LOCAL FILE? PULL THE CLOSES YOU STORED WITH IT ──────────────────
+    #
+    # A universe registered WITH prices has them in the portal, encrypted, and
+    # the portal will decrypt them back to the same account. Requiring the user
+    # to find the same CSV on disk first was not a data boundary, it was a
+    # missing function wearing one: you upload an S&P universe, then the OS
+    # tells you it cannot see it.
+    #
+    # The local file still WINS when there is one. `--data` is the more explicit
+    # statement, and silently preferring a stored copy over the file somebody
+    # just pointed at is the kind of helpfulness nobody can debug.
+    if data is None:
+        from .client import ServerError
+
+        universe_id = str(match.get("id"))
+        try:
+            fetched = session.universe_series(universe_id)
+        except ServerError as exc:
+            if exc.status == 404:
+                raise DataShapeError(
+                    f"{wanted!r} was registered without its prices (symbols only), so "
+                    "there is nothing stored to run on. Add --data with the closes, or "
+                    "re-register the universe with them."
+                ) from exc
+            raise
+        prices = fetched.get("prices") or {}
+        if not prices:
+            raise DataShapeError(f"{wanted!r} resolved to no stored prices.")
+        n_obs = max((len(v) for v in prices.values() if isinstance(v, list)), default=0)
+        say(
+            dim(
+                f"  universe {wanted} {DOT} {len(prices)} names {DOT} "
+                f"{n_obs} observations {DOT} from the portal"
+            )
+        )
+        return prices
 
     kept, missing = coverage(data, symbols)
     if not kept:

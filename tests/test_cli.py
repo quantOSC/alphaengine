@@ -717,13 +717,21 @@ def test_a_broken_model_loses_the_answer_and_not_the_run(capsys):
 
 
 class _Universes:
-    """A session that answers `universes()` and nothing else."""
+    """A session whose universes are registered BROWSER-ONLY: symbols, no stored
+    series. The series call 404s, which is what the portal does for one of
+    these — stubbing it as missing entirely would pass the test with an
+    AttributeError for the wrong reason."""
 
     def __init__(self, rows):
         self._rows = rows
 
     def universes(self):
         return self._rows
+
+    def universe_series(self, universe_id, *, window=0):
+        from alphaengine.client import ServerError
+
+        raise ServerError(404, "Universe has no stored series (browser-only registration)")
 
 
 def _args(**kw):
@@ -764,10 +772,19 @@ def test_a_universe_may_be_named_by_id_too(tmp_path):
     assert set(data) == {"AAPL"}
 
 
-def test_a_universe_without_a_file_says_why_it_cannot_help():
-    """A universe is a DEFINITION and never a series. Saying which names does
-    not supply their prices, and pretending otherwise would be the one place
-    this product fetched data on somebody's behalf."""
+def test_a_universe_with_no_stored_series_and_no_file_says_what_to_do():
+    """SUPERSEDED 2026-08-02, and the reason is worth keeping.
+
+    This used to assert that `--universe` alone ALWAYS failed, on the reasoning
+    that a universe is a definition and never a series. The first half is right
+    and the conclusion was too broad: a universe registered WITH prices has them
+    stored in the portal, encrypted, and the portal decrypts them back to the
+    same account. Refusing to fetch the user's own upload was not a data
+    boundary, it was a missing function wearing one.
+
+    What survives is this case — a browser-only registration, symbols and no
+    stored series — where there genuinely is nothing to fetch.
+    """
     session = _Universes([{"id": "u1", "name": "core", "symbols": ["AAPL"]}])
     with pytest.raises(ValueError) as e:
         cli.resolve_data(_args(universe="core"), session)
@@ -958,3 +975,88 @@ def test_the_demo_modules_expose_exactly_what_project_reads():
 
     for mod in (demo_universe, demo_returns):
         assert hasattr(mod, "data"), f"{mod.__name__} has nothing --project can read"
+
+
+# ── a universe registered WITH prices travels to the OS ────────────────────
+#
+# THE GAP: `--universe` fetched the SYMBOL LIST and still demanded `--data` for
+# the closes. So somebody who uploaded an S&P universe to the portal was told to
+# go and find the same CSV on disk before the OS would look at it -- which is not
+# a data boundary, it is a missing function wearing one.
+#
+# §9 is that WE never fetch market data on the user's behalf and never hold a
+# series as our own. This is neither: it is their upload, encrypted at rest,
+# decrypted back to the same account. The portal endpoint's own docstring calls
+# it "another device of the SAME account", and the CLI is that device.
+
+
+class _Portal:
+    """A session that answers both universe calls."""
+
+    def __init__(self, rows, series=None, status=None):
+        self._rows = rows
+        self._series = series or {}
+        self._status = status
+        self.series_calls = 0
+
+    def universes(self):
+        return self._rows
+
+    def universe_series(self, universe_id, *, window=0):
+        self.series_calls += 1
+        if self._status:
+            from alphaengine.client import ServerError
+
+            raise ServerError(self._status, "no stored series")
+        return {"universe_id": universe_id, "prices": self._series}
+
+
+_SP = [{"id": "u_sp", "name": "sp500", "symbols": ["AAPL", "MSFT", "NVDA"]}]
+_PRICES = {"AAPL": [100.0, 101.0], "MSFT": [200.0, 201.0], "NVDA": [300.0, 301.0]}
+
+
+def test_a_universe_with_stored_prices_needs_no_local_file(capsys):
+    """THE ONE THAT WAS BROKEN."""
+    session = _Portal(_SP, series=_PRICES)
+    data, _ = cli.resolve_data(_args(universe="sp500"), session)
+
+    assert set(data) == {"AAPL", "MSFT", "NVDA"}
+    assert session.series_calls == 1
+    out = capsys.readouterr().out
+    # It says where the data came from. A run whose source is invisible is the
+    # shape this codebase keeps finding bugs in.
+    assert "from the portal" in out and "3 names" in out
+
+
+def test_a_local_file_still_wins_over_the_stored_copy(tmp_path):
+    """`--data` is the more explicit statement, and silently preferring a stored
+    copy over the file somebody just pointed at is helpfulness nobody can
+    debug."""
+    p = tmp_path / "mine.csv"
+    p.write_text("date,AAPL,MSFT\n2026-01-01,1,2\n", encoding="utf-8")
+
+    session = _Portal(_SP, series=_PRICES)
+    data, _ = cli.resolve_data(_args(data=str(p), universe="sp500"), session)
+
+    assert session.series_calls == 0, "it fetched when a local file was supplied"
+    assert data["AAPL"][0]["close"] == 1.0, "the stored copy overwrote the local file"
+
+
+def test_a_browser_only_universe_says_what_is_missing():
+    """Symbols with no stored series is a real and common registration, not a
+    fault, and the message has to say which one this is."""
+    session = _Portal(_SP, status=404)
+    with pytest.raises(ValueError) as e:
+        cli.resolve_data(_args(universe="sp500"), session)
+    assert "without its prices" in str(e.value)
+    assert "--data" in str(e.value)
+
+
+def test_a_server_error_that_is_not_a_404_is_not_swallowed():
+    """A 500 from the portal is an outage and must not be reported as "you
+    registered this without prices"."""
+    from alphaengine.client import ServerError
+
+    session = _Portal(_SP, status=503)
+    with pytest.raises(ServerError):
+        cli.resolve_data(_args(universe="sp500"), session)

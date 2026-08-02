@@ -12,4 +12,4 @@ While the leading digit is 0, the MINOR position carries that rule: 0.1 -> 0.2
 is what a changed figure costs. The API may still move underneath it.
 """
 
-__version__ = "0.2.4"
+__version__ = "0.2.5"

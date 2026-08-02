@@ -226,12 +226,38 @@ class Session:
     def universes(self) -> list[Figures]:
         """Universes you registered in the portal: names, and the SYMBOLS in them.
 
-        NOT PRICES, and that is the whole reason this call is safe to make. A
-        universe is a definition — which names, and how you source them — so
-        fetching one moves no market data in either direction. Your closes stay
-        on this machine and meet the symbol list here.
+        A universe is a DEFINITION — which names, and how you source them — so
+        this call moves no market data. `universe_series` is the separate call
+        for the case where you asked the portal to hold your closes too.
         """
         return list(self._get("/api/me/universes").get("universes") or [])
+
+    def universe_series(self, universe_id: str, *, window: int = 0) -> Figures:
+        """The closes you stored WITH a universe, decrypted back to you.
+
+        ── WHY THIS IS NOT A §9 VIOLATION, AND THE DISTINCTION IS THE WHOLE POINT
+
+        §9 is that WE never fetch market data on your behalf and never hold a
+        series as our own. This is neither: it is data you uploaded, encrypted
+        at rest, returned to the same account that put it there. The portal's
+        own endpoint calls it "owner-only decrypt… lets another device of the
+        SAME account run on a universe registered elsewhere" — and the CLI is
+        that other device. Nothing new crosses a boundary; a thing you already
+        own moves between two of your own surfaces.
+
+        The alternative is worse and is what shipped first: register an S&P
+        universe in the portal, then be told to find the same CSV on disk before
+        the OS will look at it. That is not a data boundary, it is a missing
+        function wearing one.
+
+        Raises `ServerError` with a 404 when the universe was registered
+        browser-only — symbols and no stored series, which is a real and common
+        choice rather than a fault.
+        """
+        path = f"/api/me/universes/{universe_id}/series"
+        if window:
+            path += f"?window={int(window)}"
+        return self._get(path)
 
     # ── transport ──────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Figures | None = None) -> Figures:
