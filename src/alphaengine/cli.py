@@ -484,12 +484,90 @@ def _report(run: Any) -> int:
 
 
 HELP = """
+  <anything else>      ASK IN PLAIN ENGLISH. Your model picks a workflow and
+                       drives it, choosing each step from what the server
+                       permits. Exploratory: two runs may differ.
+                       Needs ANTHROPIC_API_KEY or OPENAI_API_KEY in this shell.
+
+  run <name>           run one workflow exactly as written   (--label, --input k=v)
+                       Scripted: the same data gives the same path.
   workflows            what the server offers, and which are reproducible
-  run <name>           start one   (--project, --label, --input k=v)
+  project <module>     load `data` and `backtest_fn` from your module
+  keys                 what is unlocked, and what would unlock the rest
+  key <which>          enter one now (quantos | anthropic | openai), session only
   status               the current run
   help                 this
   quit                 leave
 """
+
+
+# ── the capability ladder ──────────────────────────────────────────────────
+#
+# THREE RUNGS, AND THE FIRST IS FREE FOREVER.
+#
+#   MATH      no key of any kind. `sweep`, deflation, the surface, `save`. The
+#             whole open core, offline, with no account. This rung is not a
+#             trial and never expires.
+#   HARNESS   a QuantOS key. Workflows: the SEQUENCE lives on the server, so
+#             this is the paid rung. Scripted and reproducible.
+#   AGENT     a model key OF YOUR OWN, on top of the harness. Plain English at
+#             the prompt; the model chooses each step from what the server
+#             permits. Exploratory, and not reproducible.
+#
+# WHY THE LADDER IS DRAWN AT ALL. Somebody with no keys was previously told
+# "No API key" and left to guess what that cost them — which reads as "this
+# tool does not work" when the truth is "two thirds of it works and always
+# will". Showing what is unlocked, what is not, and the single environment
+# variable that moves each line is the difference between a paywall and an
+# honest boundary.
+#
+# The rungs are ordered because they genuinely nest: the agent drives the
+# harness, and the harness runs the math. You cannot buy the third without the
+# second, and you never have to buy the first.
+
+
+def ladder_lines(*, keyed: bool) -> list[str]:
+    """The three rungs, with what is unlocked and how to unlock the rest."""
+    from .model import available_models
+
+    models = available_models()
+    on = "●" if _UNICODE_OK else "*"
+    off = "○" if _UNICODE_OK else "-"
+
+    rungs = [
+        (
+            True,  # always
+            "math",
+            "sweep, deflate, surface, save",
+            dim("free, offline, no account"),
+        ),
+        (
+            keyed,
+            "harness",
+            "run <workflow>",
+            green("unlocked") if keyed else yellow(f"set {_ENV_KEY}"),
+        ),
+        (
+            keyed and bool(models),
+            "agent",
+            "ask in plain English",
+            (
+                green(f"unlocked  {DOT}  {models[0][0]}")
+                if (keyed and models)
+                else yellow("set ANTHROPIC_API_KEY or OPENAI_API_KEY")
+                if keyed
+                else dim("needs the harness first")
+            ),
+        ),
+    ]
+
+    out = ["  " + dim("WHAT YOU CAN DO HERE")]
+    for live, name, does, note in rungs:
+        mark = green(on) if live else dim(off)
+        label = bold(name.ljust(9)) if live else dim(name.ljust(9))
+        does_s = does.ljust(30) if live else dim(does.ljust(30))
+        out.append(f"  {mark} {label}{does_s}{note}")
+    return out
 
 
 def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
@@ -526,10 +604,6 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
     rows: list[tuple[str, str]] = [
         ("version", bold(__version__)),
         ("server", url if keyed else dim(url)),
-        (
-            "auth",
-            green("key found") if keyed else yellow(f"none  {DOT}  set {_ENV_KEY}"),
-        ),
         ("project", (bold(project) if project else dim("none"))),
         ("data", loaded),
     ]
@@ -537,17 +611,137 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
         say(line)
 
     say("")
-    for cmd, what in (
-        ("workflows", "what your workspace offers"),
-        ("run <name>", "execute one, watching every step"),
-        ("help", "everything else, and `quit` to leave"),
-    ):
-        say("  " + bold(cmd.ljust(12)) + dim(what))
+    for line in ladder_lines(keyed=keyed):
+        say(line)
     say("")
     # THE ONE LINE THAT IS NOT STATUS. It is here because it is the thing most
     # often forgotten and the thing that makes the rest make sense.
     say("  " + dim("The sequence runs on the server. The compute runs here, on your data."))
     say("")
+
+
+def enter_key(which: str) -> bool:
+    """Prompt for a key and hold it FOR THIS SESSION ONLY.
+
+    ── WHY THIS DOES NOT PERSIST ANYTHING ─────────────────────────────────────
+    #
+    The convenient version writes to a config file, and then a credential that
+    can spend the user's money lives in plaintext on disk, survives the session,
+    and gets copied with the project directory. We are not in the business of
+    holding customer keys — that is the whole reason `AgentDriver` takes a
+    callable and has no key field — and a dotfile would give that up for the
+    sake of saving one `export`.
+
+    So this sets the variable in THIS PROCESS. Close the terminal and it is
+    gone. For a key you want every time, `export` it in your shell profile,
+    which is a thing your shell already manages properly.
+
+    Read with `getpass` so it does not echo and does not land in scrollback.
+    """
+    import getpass
+
+    if which == "quantos":
+        env, what = _ENV_KEY, "QuantOS key (ae_live_…) — created in the portal, on Data"
+    elif which == "anthropic":
+        env, what = "ANTHROPIC_API_KEY", "Anthropic key (sk-ant-…)"
+    elif which == "openai":
+        env, what = "OPENAI_API_KEY", "OpenAI key (sk-…)"
+    else:
+        say(red(f"unknown key {which!r} — try: quantos, anthropic, openai"))
+        return False
+
+    say(dim(f"  {what}"))
+    say(dim("  Held for this session only. Nothing is written to disk."))
+    try:
+        value = getpass.getpass("  paste it (input hidden): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        say("")
+        return False
+    if not value:
+        say(dim("  nothing entered."))
+        return False
+
+    os.environ[env] = value
+    say(green(f"  {env} set for this session."))
+    if which == "quantos":
+        say(dim("  Re-open the session, or `run` now — the next call uses it."))
+    return True
+
+
+def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -> Any:
+    """Natural language → a workflow chosen and driven by the user's own model.
+
+    THE PART THAT IS EASY TO GET WRONG: the model picks the WORKFLOW from the
+    server's catalogue and then picks each STEP from what the server permits. It
+    never composes a sequence. Everything it is allowed to do is a choice among
+    options somebody else produced, which is why this can be non-deterministic
+    without being unsafe.
+    """
+    from .client import AgentDriver, AgentRefusal, Offline, ServerError
+    from .model import NoModelConfigured, build_think
+
+    try:
+        think, label = build_think()
+    except NoModelConfigured as exc:
+        say(yellow(str(exc)))
+        return None
+
+    try:
+        catalogue = session.workflows()
+    except Offline:
+        _explain_offline(url)
+        return None
+    except ServerError as exc:
+        say(red(f"The server refused: {exc.detail}"))
+        return None
+
+    if not catalogue:
+        say(dim("The server offers no workflows, so there is nothing to choose from."))
+        return None
+
+    say(f"  {dim('agent  ' + DOT)}  {dim(label)}")
+
+    # Choosing the workflow is the same shape as choosing a step: an index into
+    # a list the server produced. Reusing `AgentDriver.pick` rather than writing
+    # a second selector keeps one place where a model's answer is validated.
+    driver = AgentDriver(
+        think,
+        goal=request,
+        on_thought=lambda why: say(f"  {dim('agent  ' + DOT)}  {dim(why)}"),
+    )
+    options = [{"op": w.get("name", "?"), "params": {"agency": w.get("agency")}} for w in catalogue]
+    try:
+        chosen = catalogue[driver.pick(options)]
+    except AgentRefusal as exc:
+        say(red(f"The model did not choose a workflow: {exc}"))
+        return None
+
+    name = str(chosen.get("name"))
+    repro = chosen.get("reproducible")
+    say(
+        f"  {dim('agent  ' + DOT)}  chose {bold(name)}  "
+        + (green("reproducible") if repro else yellow("not reproducible"))
+    )
+
+    try:
+        run = session.open(name, data=data, backtest_fn=backtest_fn)
+        driver.drive(run)
+    except Offline:
+        _explain_offline(url)
+        return None
+    except ServerError as exc:
+        say(red(f"The server refused: {exc.detail}"))
+        return None
+    except AgentRefusal as exc:
+        say(red(f"The run stopped: {exc}"))
+        return None
+
+    _report(run)
+    # SAID AT THE END, WHERE IT TRAVELS WITH THE RESULT. A study whose path was
+    # chosen by a model is a different object from one whose path was fixed in
+    # advance, and the difference has to reach whoever reads the artifact.
+    say(dim("  The model chose this path. Another run may take a different one."))
+    return run
 
 
 def cmd_repl(args: argparse.Namespace) -> int:
@@ -589,6 +783,19 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if verb == "status":
             say(dim("no run yet") if last is None else f"{last.run_id}  {last.status}")
             continue
+        if verb in ("key", "keys"):
+            if rest:
+                if enter_key(rest):
+                    # The session was built with the old key, so rebuild it or
+                    # the newly-entered credential would not be used until
+                    # restart — which looks exactly like the key not working.
+                    session, url = _session(args.url, args.key)
+            else:
+                for ln in ladder_lines(keyed=bool(os.environ.get(_ENV_KEY) or args.key)):
+                    say(ln)
+                say("")
+                say(dim("  `key quantos` · `key anthropic` · `key openai` to enter one now"))
+            continue
         if verb == "project":
             try:
                 data, backtest_fn = load_project(rest)
@@ -610,7 +817,21 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 say(red(f"The server refused: {exc.detail}"))
             continue
 
-        say(dim(f"unknown command {verb!r} — `help`"))
+        # ── ANYTHING ELSE IS A REQUEST, NOT A TYPO ─────────────────────────
+        #
+        # This used to answer "unknown command", which is the wrong default for
+        # a research tool: the interesting input is a sentence about what you
+        # are trying to find out, and the commands above are the shortcuts.
+        # Falling through to the agent makes the prompt behave the way a quant
+        # would expect after using any modern coding harness.
+        #
+        # THE SPLIT MATTERS AND IS VISIBLE. `run <workflow>` is SCRIPTED — the
+        # workflow owns the sequence, two runs over the same data give the same
+        # path, and the artifact is reproducible. A sentence is EXPLORATORY — a
+        # model chooses each step from what the server permits, and two runs can
+        # differ. Both are legitimate; conflating them is not, so the run says
+        # which one it was.
+        last = _ask(session, url, line, data=data, backtest_fn=backtest_fn) or last
 
 
 # ── entry point ────────────────────────────────────────────────────────────

@@ -280,3 +280,79 @@ def test_the_parser_offers_the_documented_commands():
         assert p.parse_args(argv).command == argv[0]
     # A bare invocation opens a session rather than printing usage and leaving.
     assert p.parse_args([]).command is None
+
+
+# ── the capability ladder ──────────────────────────────────────────────────
+#
+# THREE RUNGS AND THE FIRST IS FREE FOREVER. The rung a user is on has to be
+# visible at boot, because "No API key" with no further detail reads as "this
+# tool does not work" when the truth is "two thirds of it works and always
+# will".
+
+
+def _ladder(monkeypatch, *, keyed: bool, model: str | None):
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    for env in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    if model:
+        monkeypatch.setenv(model, "sk-test")
+    return "\n".join(cli.ladder_lines(keyed=keyed))
+
+
+def test_the_math_rung_is_unlocked_with_no_keys_at_all(monkeypatch):
+    """The open core is not a trial and never expires."""
+    out = _ladder(monkeypatch, keyed=False, model=None)
+    assert "free, offline, no account" in out
+
+
+def test_without_a_quantos_key_the_ladder_names_the_variable(monkeypatch):
+    out = _ladder(monkeypatch, keyed=False, model=None)
+    assert "QUANTOS_API_KEY" in out
+    # And the agent rung says WHY it is out of reach, rather than naming a
+    # second variable the user cannot use yet.
+    assert "needs the harness first" in out
+
+
+def test_with_a_quantos_key_the_agent_rung_names_the_model_variable(monkeypatch):
+    out = _ladder(monkeypatch, keyed=True, model=None)
+    assert "ANTHROPIC_API_KEY" in out or "OPENAI_API_KEY" in out
+
+
+def test_with_both_keys_every_rung_is_unlocked(monkeypatch):
+    out = _ladder(monkeypatch, keyed=True, model="ANTHROPIC_API_KEY")
+    assert out.count("unlocked") >= 2
+    assert "anthropic" in out
+
+
+def test_a_model_key_alone_does_not_unlock_the_agent(monkeypatch):
+    """The rungs nest: the agent drives the harness, so it cannot come first."""
+    out = _ladder(monkeypatch, keyed=False, model="ANTHROPIC_API_KEY")
+    assert "needs the harness first" in out
+
+
+def test_the_model_adapter_reports_nothing_available_with_no_keys(monkeypatch):
+    from alphaengine.model import NoModelConfigured, available_models, build_think
+
+    for env in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    assert available_models() == []
+    with pytest.raises(NoModelConfigured) as e:
+        build_think()
+    # The message has to say the free path still works, or it reads as a wall.
+    assert "scripted path" in str(e.value)
+
+
+def test_importing_the_model_adapter_pulls_in_no_provider_sdk():
+    """`pip install alphaengine` installs numpy and scipy. Nothing else."""
+    out = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import alphaengine.model, sys; "
+            "print(any(m in sys.modules for m in ('anthropic','openai','httpx')))",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.strip() == "False"

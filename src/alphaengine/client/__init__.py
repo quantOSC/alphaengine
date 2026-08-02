@@ -23,10 +23,14 @@ EVERYTHING ELSE IN THIS PACKAGE WORKS WITHOUT ANY OF THIS
 
 from __future__ import annotations
 
+from .agent import AgentDriver, AgentRefusal, Think
 from .executor import MAX_FIGURE_LIST, StepExecutor, UnsupportedOp
 from .session import Offline, Run, ServerError, Session, connect, connect_or_offline
 
 __all__ = [
+    "AgentDriver",
+    "AgentRefusal",
+    "Think",
     "connect",
     "connect_or_offline",
     "Session",
