@@ -1,6 +1,16 @@
-"""A project module you can actually run, so the CLI has something to point at.
+"""A project module you can actually run, shipped INSIDE the package.
 
-    alphaengine run validate_study --project examples.momentum
+    alphaengine demo                                       # just run it
+    alphaengine run validate_study --project alphaengine.demo
+
+IT LIVES IN THE PACKAGE ON PURPOSE. It started life in `examples/`, which meant
+it reached nobody: the wheel does not carry the repo, so `pip install
+alphaengine` gave you a CLI with nothing to point `--project` at, and the
+README's first instruction was `git clone`. Asking somebody to clone a repo to
+try a pip-installable tool is a first run most people do not complete.
+
+Two dependencies and no data, so shipping it costs nothing and every install can
+demonstrate itself offline.
 
 A PROJECT MODULE IS NOT A CONFIG FILE. It is an ordinary Python module of yours
 that exposes two names:
@@ -55,7 +65,7 @@ def _prices(n: int = 1200, seed: int = 7) -> list[float]:
     return out
 
 
-# What `--project examples.momentum` hands to the harness.
+# What `--project alphaengine.demo` hands to the harness.
 data = {"close": _prices()}
 
 # The grid the README and the CLI examples use. Nine combinations, so a
@@ -63,19 +73,24 @@ data = {"close": _prices()}
 GRID = {"fast": [5, 10, 20], "slow": [50, 100, 200]}
 
 
-def backtest_fn(*, data, fast: int = 10, slow: int = 50) -> list[float]:
+def backtest_fn(*, data: dict[str, list[float]], fast: int = 10, slow: int = 50) -> list[float]:
     """One moving-average crossover, long/flat, as a daily return series.
 
     `fast >= slow` is a degenerate corner of the grid. It returns a flat series
     of the right LENGTH rather than an empty one: a combination that fails is
     still a combination that was tried, and dropping it would quietly shrink the
     denominator every deflated figure downstream divides by.
+
+    NOTE the annotation on `data`: it is `dict[str, list[float]]` only because
+    THIS demo happens to hand over a dict of lists. `sweep` never inspects it —
+    yours can be a DataFrame, an array, or an object of your own, and the
+    harness passes it through untouched.
     """
-    close = data["close"]
+    close: list[float] = data["close"]
     n = len(close)
 
     def sma(k: int, i: int) -> float:
-        return sum(close[i - k + 1 : i + 1]) / k
+        return float(sum(close[i - k + 1 : i + 1]) / k)
 
     if fast >= slow or slow > WARMUP:
         return [0.0] * (n - WARMUP - 1)
@@ -89,17 +104,29 @@ def backtest_fn(*, data, fast: int = 10, slow: int = 50) -> list[float]:
     return out
 
 
-if __name__ == "__main__":
-    # `python -m examples.momentum` — the offline half. No server, no account,
-    # no network. This is the whole package working on its own.
+def run() -> int:
+    """The offline half, end to end. No server, no account, no network.
+
+    Printed rather than returned because the point is to SEE it — this is the
+    first thing a new install runs, and `alphaengine demo` should answer "does
+    any of this work" in one command.
+    """
     from alphaengine import sweep
 
     result = sweep(backtest_fn, GRID, data=data)
     verdict = result.verdict()
     surface = result.surface()
 
+    dsr = verdict.get("deflated_sharpe")
     print(f"trials     {result.n_trials}  ({verdict.get('n_trials_source')})")
     print(f"verdict    {verdict.get('verdict')}")
     print(f"surface    {surface.get('shape')}")
-    dsr = verdict.get("deflated_sharpe")
     print(f"dsr        {dsr if dsr is not None else 'not recorded'}")
+    print()
+    print("A crossover on a random walk has no edge, and the verdict says so")
+    print("rather than flattering it. That is this working, not failing.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run())

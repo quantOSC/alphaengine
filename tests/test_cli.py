@@ -239,6 +239,7 @@ def test_boot_warns_when_there_is_no_key(capsys, monkeypatch):
     cli.boot("https://example.invalid", project=None, data=None, keyed=False)
     printed = capsys.readouterr().out
     assert "QUANTOS_API_KEY" in printed
+    assert "key quantos" in printed
 
 
 def test_a_long_server_url_does_not_overflow_the_box(monkeypatch):
@@ -302,32 +303,35 @@ def _ladder(monkeypatch, *, keyed: bool, model: str | None):
 def test_the_math_rung_is_unlocked_with_no_keys_at_all(monkeypatch):
     """The open core is not a trial and never expires."""
     out = _ladder(monkeypatch, keyed=False, model=None)
-    assert "free, offline, no account" in out
+    assert "yours, offline, always" in out
 
 
 def test_without_a_quantos_key_the_ladder_names_the_variable(monkeypatch):
     out = _ladder(monkeypatch, keyed=False, model=None)
+    # The rungs stay in plain language; the ONE actionable line names the
+    # command and the variable, so a locked reader is never left guessing.
+    assert "key quantos" in out
     assert "QUANTOS_API_KEY" in out
     # And the agent rung says WHY it is out of reach, rather than naming a
-    # second variable the user cannot use yet.
-    assert "needs the harness first" in out
+    # second credential the user cannot use yet.
+    assert "sign in first" in out
 
 
 def test_with_a_quantos_key_the_agent_rung_names_the_model_variable(monkeypatch):
     out = _ladder(monkeypatch, keyed=True, model=None)
-    assert "ANTHROPIC_API_KEY" in out or "OPENAI_API_KEY" in out
+    assert "key anthropic" in out or "key openai" in out
 
 
 def test_with_both_keys_every_rung_is_unlocked(monkeypatch):
     out = _ladder(monkeypatch, keyed=True, model="ANTHROPIC_API_KEY")
-    assert out.count("unlocked") >= 2
+    assert out.count("ready") >= 2
     assert "anthropic" in out
 
 
 def test_a_model_key_alone_does_not_unlock_the_agent(monkeypatch):
     """The rungs nest: the agent drives the harness, so it cannot come first."""
     out = _ladder(monkeypatch, keyed=False, model="ANTHROPIC_API_KEY")
-    assert "needs the harness first" in out
+    assert "sign in first" in out
 
 
 def test_the_model_adapter_reports_nothing_available_with_no_keys(monkeypatch):
@@ -356,3 +360,167 @@ def test_importing_the_model_adapter_pulls_in_no_provider_sdk():
         check=True,
     )
     assert out.stdout.strip() == "False"
+
+
+# ── the demo, which must reach a pip-only install ──────────────────────────
+
+
+def test_the_demo_ships_inside_the_package():
+    """It lived in `examples/`, which the wheel does not carry — so a
+    `pip install` gave you a CLI with nothing to point `--project` at, and the
+    README's first instruction was `git clone`."""
+    out = subprocess.run(
+        [sys.executable, "-m", "alphaengine", "demo"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "derived_from_grid" in out.stdout
+    assert "9" in out.stdout  # the grid is 3x3 and the count is derived
+
+
+def test_the_demo_is_also_a_valid_project_module():
+    """So `--project alphaengine.demo` works without writing a module first."""
+    from alphaengine import cli as c
+
+    data, fn = c.load_project("alphaengine.demo")
+    assert data is not None and callable(fn)
+
+
+# ── authentication is a prompt, not a dead end ─────────────────────────────
+
+
+class _Refusal(RuntimeError):
+    def __init__(self, status, detail):
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def test_a_401_explains_that_a_browser_login_is_not_a_cli_credential(capsys, monkeypatch):
+    """THE REPORTED BUG. A paying user, signed into the portal, read
+    "Authentication required" as the product being broken. It is not: this
+    process has no cookie jar and should never acquire one."""
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    cli.refused(_Refusal(401, "Authentication required"))
+    out = capsys.readouterr().out
+    assert "portal login does not reach this process" in out
+    assert "Data" in out and "API keys" in out, "it must say where the key comes from"
+    assert "key quantos" in out, "and how to enter one"
+
+
+def test_a_403_is_treated_the_same_way(capsys, monkeypatch):
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    cli.refused(_Refusal(403, "Forbidden"))
+    assert "Not authenticated" in capsys.readouterr().out
+
+
+def test_a_non_auth_refusal_keeps_the_plain_message(capsys, monkeypatch):
+    """The fix for a 422 is not a credential, so it must not offer one."""
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    cli.refused(_Refusal(422, "workflow inputs invalid"))
+    out = capsys.readouterr().out
+    assert "workflow inputs invalid" in out
+    assert "key quantos" not in out
+
+
+def test_is_auth_error_distinguishes_the_two_cases():
+    assert cli.is_auth_error(_Refusal(401, "x")) is True
+    assert cli.is_auth_error(_Refusal(403, "x")) is True
+    assert cli.is_auth_error(_Refusal(404, "x")) is False
+    assert cli.is_auth_error(_Refusal(500, "x")) is False
+
+
+def test_the_key_prompt_never_fires_on_a_pipe(monkeypatch):
+    """A prompt in a CI log is a hang, not a question."""
+    monkeypatch.setattr(cli, "_tty", lambda: False)
+
+    def _boom(*a, **k):
+        raise AssertionError("the CLI tried to prompt on a non-interactive stream")
+
+    monkeypatch.setattr("builtins.input", _boom)
+    assert cli.offer_key("quantos") is False
+
+
+# ── staying signed in ──────────────────────────────────────────────────────
+
+
+def test_credentials_never_land_in_the_project_directory(tmp_path, monkeypatch):
+    """A key in a project folder is a key in somebody's git history eventually."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
+    monkeypatch.chdir(tmp_path)
+    from alphaengine import auth
+
+    p = auth.save_key("QUANTOS_API_KEY", "ae_live_secret")
+    assert (tmp_path / "cfg") in p.parents
+    assert "credentials.json" not in [f.name for f in tmp_path.iterdir() if f.is_file()]
+
+
+def test_a_stored_key_is_applied_but_never_overrides_the_shell(tmp_path, monkeypatch):
+    """CI, a VPC deploy and a colleague's machine all set the variable. A stale
+    file silently winning is a bug that takes a day to find."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from alphaengine import auth
+
+    auth.save_key("QUANTOS_API_KEY", "from_file")
+
+    # `apply_stored` writes os.environ directly, which monkeypatch does not
+    # track — so this test cleans up after itself or it leaks a credential into
+    # every test that runs later. (It did: test_smoke started failing.)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    try:
+        assert auth.apply_stored() == ["QUANTOS_API_KEY"]
+        assert os.environ["QUANTOS_API_KEY"] == "from_file"
+
+        os.environ["QUANTOS_API_KEY"] = "from_shell"
+        assert auth.apply_stored() == []
+        assert os.environ["QUANTOS_API_KEY"] == "from_shell"
+    finally:
+        os.environ.pop("QUANTOS_API_KEY", None)
+
+
+def test_logout_deletes_the_file_rather_than_flagging_it(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from alphaengine import auth
+
+    auth.save_key("QUANTOS_API_KEY", "x")
+    assert auth.config_path().exists()
+    assert auth.clear_stored() is True
+    assert not auth.config_path().exists()
+    assert auth.clear_stored() is False  # idempotent
+
+
+def test_a_corrupt_credentials_file_signs_you_out_rather_than_crashing(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from alphaengine import auth
+
+    auth.config_path().parent.mkdir(parents=True, exist_ok=True)
+    auth.config_path().write_text("{not json", encoding="utf-8")
+    assert auth.load_stored() == {}
+
+
+def test_only_known_credentials_can_be_stored(tmp_path, monkeypatch):
+    """The file is not a general-purpose config store."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from alphaengine import auth
+
+    with pytest.raises(ValueError):
+        auth.save_key("AWS_SECRET_ACCESS_KEY", "nope")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits; Windows uses profile ACLs")
+def test_the_file_is_mode_0600(tmp_path, monkeypatch):
+    """Created with those bits, not chmod'ed after — a file that was briefly
+    world-readable was briefly world-readable."""
+    import stat as _stat
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    from alphaengine import auth
+
+    p = auth.save_key("QUANTOS_API_KEY", "x")
+    assert _stat.S_IMODE(p.stat().st_mode) == 0o600

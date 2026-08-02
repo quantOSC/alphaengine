@@ -355,7 +355,9 @@ def cmd_workflows(args: argparse.Namespace) -> int:
         _explain_offline(url)
         return 2
     except ServerError as exc:
-        say(red(f"The server refused: {exc.detail}"))
+        refused(exc)
+        if is_auth_error(exc) and offer_key():
+            say(dim("  Key set. Run that again."))
         return 2
 
     if not rows:
@@ -447,7 +449,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         _explain_offline(url)
         return 2
     except ServerError as exc:
-        say(red(f"The server refused: {exc.detail}"))
+        refused(exc)
+        if is_auth_error(exc) and offer_key():
+            say(dim("  Key set. Run that again."))
         return 2
 
     return _report(run)
@@ -494,6 +498,7 @@ HELP = """
   workflows            what the server offers, and which are reproducible
   project <module>     load `data` and `backtest_fn` from your module
   keys                 what is unlocked, and what would unlock the rest
+  logout               remove stored credentials from this machine
   key <which>          enter one now (quantos | anthropic | openai), session only
   status               the current run
   help                 this
@@ -526,6 +531,15 @@ HELP = """
 # second, and you never have to buy the first.
 
 
+def _shell_set(name: str, stored: dict[str, str]) -> bool:
+    """True when the live value did NOT come from the stored file.
+
+    `apply_stored` never overrides the environment, so a value that differs from
+    the stored one was exported in the shell.
+    """
+    return os.environ.get(name, "") != stored.get(name, "")
+
+
 def ladder_lines(*, keyed: bool) -> list[str]:
     """The three rungs, with what is unlocked and how to unlock the rest."""
     from .model import available_models
@@ -537,36 +551,53 @@ def ladder_lines(*, keyed: bool) -> list[str]:
     rungs = [
         (
             True,  # always
-            "math",
-            "sweep, deflate, surface, save",
-            dim("free, offline, no account"),
+            "the maths",
+            "search a grid, deflate it, see the shape",
+            dim("yours, offline, always"),
         ),
         (
             keyed,
-            "harness",
-            "run <workflow>",
-            green("unlocked") if keyed else yellow(f"set {_ENV_KEY}"),
+            "workflows",
+            "a sequence worth trusting, end to end",
+            green("ready") if keyed else yellow("sign in to unlock"),
         ),
         (
             keyed and bool(models),
-            "agent",
-            "ask in plain English",
+            "ask anything",
+            "describe what you want to know",
             (
-                green(f"unlocked  {DOT}  {models[0][0]}")
+                green(f"ready  {DOT}  {models[0][0]}")
                 if (keyed and models)
-                else yellow("set ANTHROPIC_API_KEY or OPENAI_API_KEY")
+                else yellow("add your own model key")
                 if keyed
-                else dim("needs the harness first")
+                else dim("sign in first")
             ),
         ),
     ]
 
-    out = ["  " + dim("WHAT YOU CAN DO HERE")]
+    out = ["  " + dim("Where you are")]
     for live, name, does, note in rungs:
         mark = green(on) if live else dim(off)
-        label = bold(name.ljust(9)) if live else dim(name.ljust(9))
-        does_s = does.ljust(30) if live else dim(does.ljust(30))
+        label = bold(name.ljust(14)) if live else dim(name.ljust(14))
+        does_s = does.ljust(44) if live else dim(does.ljust(44))
         out.append(f"  {mark} {label}{does_s}{note}")
+
+    # ONE ACTIONABLE LINE, and only when something is locked. The rungs
+    # themselves stay in plain language — a menu that recites environment
+    # variables reads like a manual — but a reader who cannot do the thing they
+    # came for still needs to be told exactly how, without going to look it up.
+    if not keyed:
+        out += ["", "  " + dim("Type ") + bold("key quantos") + dim(f" to sign in, or export {_ENV_KEY}.")]
+    elif not models:
+        out += [
+            "",
+            "  "
+            + dim("Type ")
+            + bold("key anthropic")
+            + dim(" (or ")
+            + bold("key openai")
+            + dim(") to ask questions in your own words."),
+        ]
     return out
 
 
@@ -585,7 +616,7 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
     # is doing teaching rather than decoration.
     say("")
     say("  " + cyan(PLATEAU) + "   " + bold("alphaengine"))
-    say("  " + dim(EDGE) + "   " + dim("a plateau survives. a knife edge does not."))
+    say("  " + dim(EDGE) + "   " + dim("Find out what survives."))
     say("")
 
     # Data is described by SHAPE, never printed. A boot screen that echoes the
@@ -601,9 +632,23 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
             n = None
         loaded = green("ready") + dim(f"  {DOT}  {n} series" if n is not None else "")
 
+    # SIGNED IN IS A FACT THE USER SHOULD SEE, not infer from things working.
+    # It also disambiguates the two ways a key can be present: one survives a
+    # new terminal and one does not, and "why does it work here but not there"
+    # is exactly the confusion that costs an afternoon.
+    from .auth import load_stored
+
+    stored = load_stored()
+    if not keyed:
+        signed = dim("no")
+    elif "QUANTOS_API_KEY" in stored and not _shell_set("QUANTOS_API_KEY", stored):
+        signed = green("yes") + dim(f"  {DOT}  stored on this machine")
+    else:
+        signed = green("yes") + dim(f"  {DOT}  from your shell")
+
     rows: list[tuple[str, str]] = [
         ("version", bold(__version__)),
-        ("server", url if keyed else dim(url)),
+        ("signed in", signed),
         ("project", (bold(project) if project else dim("none"))),
         ("data", loaded),
     ]
@@ -616,8 +661,63 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
     say("")
     # THE ONE LINE THAT IS NOT STATUS. It is here because it is the thing most
     # often forgotten and the thing that makes the rest make sense.
-    say("  " + dim("The sequence runs on the server. The compute runs here, on your data."))
+    say("  " + dim("Your data stays on this machine. Only the findings ever travel."))
     say("")
+
+
+def refused(exc: Any) -> None:
+    """Report a server refusal, and make an AUTH refusal actionable.
+
+    ── WHY THIS IS NOT JUST A RED LINE ────────────────────────────────────────
+
+    "The server refused: Authentication required" is true, useless, and actively
+    misleading to somebody who IS a paying user — they are signed into the
+    portal in a browser two windows away, so the natural reading is that
+    something is broken. It is not: a browser session is not a CLI credential
+    and never will be, because this process has no cookie jar and should not
+    acquire one.
+
+    So a 401 says what is actually wrong, where the key comes from, and offers
+    to take it right here. Every other status keeps the plain message, because
+    the fix for a 404 or a 422 is not a credential.
+    """
+    status = getattr(exc, "status", None)
+    detail = getattr(exc, "detail", str(exc))
+
+    if status not in (401, 403):
+        say(red(f"The server refused: {detail}"))
+        return
+
+    say("")
+    say(yellow("  Not authenticated.") + dim("  Your portal login does not reach this process."))
+    say(dim("  A browser session is a cookie; this needs a key. They are different"))
+    say(dim("  credentials on purpose."))
+    say("")
+    say("  " + dim("Get one:") + f"  the portal {ARROW} Data {ARROW} API keys {ARROW} New key")
+    say("  " + dim("Then:") + "     " + bold("key quantos") + dim(f"   (or export {_ENV_KEY})"))
+    say("")
+
+
+def offer_key(which: str = "quantos") -> bool:
+    """Ask whether to enter a key now. True if one was entered.
+
+    Only ever called on an interactive terminal — a prompt in a CI log is a
+    hang, so callers check `_tty()` first.
+    """
+    if not _tty():
+        return False
+    try:
+        answer = input(bold("  Enter a key now? ") + dim("[Y/n] ")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        say("")
+        return False
+    if answer and not answer.startswith("y"):
+        return False
+    return enter_key(which)
+
+
+def is_auth_error(exc: Any) -> bool:
+    return getattr(exc, "status", None) in (401, 403)
 
 
 def enter_key(which: str) -> bool:
@@ -662,9 +762,29 @@ def enter_key(which: str) -> bool:
         return False
 
     os.environ[env] = value
-    say(green(f"  {env} set for this session."))
-    if which == "quantos":
-        say(dim("  Re-open the session, or `run` now — the next call uses it."))
+    say(green(f"  {env} accepted."))
+
+    # STAY SIGNED IN. Re-pasting a key into every new terminal is not security,
+    # it is friction — and friction is what puts `QUANTOS_API_KEY=ae_live_...`
+    # into a shell profile or a committed .env, which is strictly worse than a
+    # mode-0600 file this tool manages and can delete.
+    try:
+        keep = input(bold("  Stay signed in on this machine? ") + dim("[Y/n] ")).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        say("")
+        keep = "n"
+    if keep and not keep.startswith("y"):
+        say(dim("  Held for this session only."))
+        return True
+
+    from .auth import save_key
+
+    try:
+        path = save_key(env, value)
+    except OSError as exc:
+        say(yellow(f"  Could not write the credentials file ({exc}). Session only."))
+        return True
+    say(green("  Signed in.") + dim(f"  {path}  (mode 0600, `logout` to remove)"))
     return True
 
 
@@ -692,7 +812,7 @@ def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -
         _explain_offline(url)
         return None
     except ServerError as exc:
-        say(red(f"The server refused: {exc.detail}"))
+        refused(exc)
         return None
 
     if not catalogue:
@@ -730,7 +850,7 @@ def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -
         _explain_offline(url)
         return None
     except ServerError as exc:
-        say(red(f"The server refused: {exc.detail}"))
+        refused(exc)
         return None
     except AgentRefusal as exc:
         say(red(f"The run stopped: {exc}"))
@@ -783,6 +903,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if verb == "status":
             say(dim("no run yet") if last is None else f"{last.run_id}  {last.status}")
             continue
+        if verb == "logout":
+            cmd_logout(args)
+            for name in ("QUANTOS_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+                os.environ.pop(name, None)
+            session, url = _session(args.url, args.key)
+            continue
         if verb in ("key", "keys"):
             if rest:
                 if enter_key(rest):
@@ -814,7 +940,13 @@ def cmd_repl(args: argparse.Namespace) -> int:
             except Offline:
                 _explain_offline(url)
             except ServerError as exc:
-                say(red(f"The server refused: {exc.detail}"))
+                refused(exc)
+                # A session holds its credential, so a key entered now does
+                # nothing until the session is rebuilt — which is exactly the
+                # bug that makes "I entered my key and it still says denied".
+                if is_auth_error(exc) and offer_key():
+                    session, url = _session(args.url, args.key)
+                    say(dim("  Try that again."))
             continue
 
         # ── ANYTHING ELSE IS A REQUEST, NOT A TYPO ─────────────────────────
@@ -863,6 +995,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command")
     sub.add_parser("version", parents=[common], help="print the version")
     sub.add_parser("workflows", parents=[common], help="list what the server offers")
+    sub.add_parser("demo", parents=[common], help="run the built-in example, offline")
+    sub.add_parser("logout", parents=[common], help="remove stored credentials")
 
     r = sub.add_parser("run", parents=[common], help="run one workflow to completion")
     r.add_argument("workflow")
@@ -872,11 +1006,50 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def cmd_demo(_args: argparse.Namespace) -> int:
+    """The built-in example. No server, no account, no network, no repo.
+
+    This exists because `pip install alphaengine` used to leave you with a CLI
+    and nothing to point it at — the example lived in `examples/`, which the
+    wheel does not carry, so the README's first instruction was `git clone`.
+    Asking somebody to clone a repo to try a pip-installable tool is a first run
+    most people do not finish.
+    """
+    from . import demo
+
+    return demo.run()
+
+
+def cmd_logout(_args: argparse.Namespace) -> int:
+    """Delete the stored credentials. The file goes, not a flag inside it."""
+    from .auth import clear_stored, config_path
+
+    if clear_stored():
+        say(green("Signed out.") + dim(f"  removed {config_path()}"))
+    else:
+        say(dim("Not signed in — there was nothing stored."))
+    say(dim("Any key exported in your shell is untouched; unset it there."))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
+    # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
+    # user who is signed in, because one dispatch path forgot.
+    #
+    # The environment always wins over the file — CI, a VPC deploy and a
+    # colleague's machine all set the variable, and a stale file silently
+    # overriding it is a bug that takes a day to find.
+    from .auth import apply_stored
+
+    apply_stored()
+
     args = build_parser().parse_args(argv)
     handler = {
         "version": cmd_version,
         "workflows": cmd_workflows,
+        "demo": cmd_demo,
+        "logout": cmd_logout,
         "run": cmd_run,
         None: cmd_repl,  # bare `alphaengine` opens a session
     }[args.command]

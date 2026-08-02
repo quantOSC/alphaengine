@@ -26,10 +26,11 @@ The repo ships a runnable project module, so you can see the whole offline half
 work before deciding whether any of this is for you:
 
 ```bash
-git clone https://github.com/quantOSC/alphaengine && cd alphaengine
-pip install -e .
-python -m examples.momentum
+pip install alphaengine
+alphaengine demo
 ```
+
+No repo, no account, no network, no data of your own.
 
 ```
 trials     9  (derived_from_grid)
@@ -109,7 +110,7 @@ a QuantOS workflow server, so this part needs an account.
 ```bash
 alphaengine                                                # a session
 alphaengine workflows                                      # what your workspace offers
-alphaengine run validate_study --project examples.momentum
+alphaengine run validate_study --project alphaengine.demo
 ```
 
 ### "command not found"
