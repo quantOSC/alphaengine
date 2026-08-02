@@ -15,6 +15,7 @@ WHAT THESE GUARD, in order of how much it would cost to get wrong:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 
@@ -128,6 +129,42 @@ def test_colour_never_reaches_a_pipe():
     )
     assert "\033[" not in out.stdout
     assert out.stdout.startswith("alphaengine ")
+
+
+# The line that actually broke: `run` prints `<workflow> · <url>` BEFORE it
+# contacts anything, so an unreachable URL still exercises it.
+_RUN_HEADER = ["-m", "alphaengine.cli", "run", "validate_study", "--url", "http://127.0.0.1:9"]
+
+
+def test_separators_degrade_to_ascii_on_a_stream_that_cannot_encode_them():
+    """OBSERVED ON WINDOWS, not theorised.
+
+    `alphaengine run validate_study` printed `validate_study � https://...`
+    because stdout defaulted to a legacy code page. The glyphs are decoration
+    and the words either side carry the meaning, so a stream that cannot encode
+    them gets ASCII rather than a replacement character — or, worse, raises
+    UnicodeEncodeError and takes the run down over a separator.
+    """
+    out = subprocess.run(
+        [sys.executable, *_RUN_HEADER],
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "ascii:strict"},
+    )
+    # It must not have died encoding its own output.
+    assert b"UnicodeEncodeError" not in out.stderr, out.stderr.decode("ascii", "replace")
+    text = out.stdout.decode("ascii")  # raises if a non-ASCII byte got through
+    assert "validate_study" in text
+    assert "�" not in text
+
+
+def test_the_glyphs_are_the_real_ones_when_the_stream_can_take_them():
+    """The fallback must not become permanent — a UTF-8 terminal gets the mid-dot."""
+    out = subprocess.run(
+        [sys.executable, *_RUN_HEADER],
+        capture_output=True,
+        env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+    )
+    assert "·".encode() in out.stdout, out.stdout.decode("utf-8", "replace")
 
 
 def test_offline_names_the_host_and_the_half_that_still_works():

@@ -116,6 +116,40 @@ def yellow(t: str) -> str:
     return _c("33", t)
 
 
+# ── glyphs, which are not always available ─────────────────────────────────
+#
+# The same discipline as the colour above, applied to CHARACTERS. This CLI uses
+# `·` and `→` as separators, and on Windows `sys.stdout` defaults to the
+# console's legacy code page — cp437 cannot encode either one, and cp1252
+# encodes `·` to a byte that anything reading the log as UTF-8 renders as `�`.
+#
+# Observed, not theorised: `alphaengine run validate_study` on a stock Windows
+# Python printed `validate_study � https://...`.
+#
+# Forcing UTF-8 onto the stream is the tempting fix and the wrong one — it
+# overrides a choice the terminal made, and on a console that genuinely cannot
+# render the glyph it trades one mojibake for another. So we ask the stream what
+# it can encode, once, and fall back to ASCII when the answer is no. A separator
+# is decoration; the words either side carry the meaning.
+
+
+def _stream_handles(text: str) -> bool:
+    enc = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        text.encode(enc)
+    except (UnicodeEncodeError, LookupError):
+        return False
+    return True
+
+
+_UNICODE_OK = _stream_handles("·→")
+
+#: Mid-dot separator, or an ASCII hyphen where the stream cannot take one.
+DOT = "·" if _UNICODE_OK else "-"
+#: Rightwards arrow, or the ASCII spelling.
+ARROW = "→" if _UNICODE_OK else "->"
+
+
 def say(*parts: str) -> None:
     print(*parts, flush=True)
 
@@ -224,7 +258,7 @@ def cmd_workflows(args: argparse.Namespace) -> int:
         tag = (
             green("reproducible")
             if repro
-            else yellow("exploratory · two runs may differ")
+            else yellow(f"exploratory {DOT} two runs may differ")
             if repro is False
             else dim("")
         )
@@ -251,7 +285,7 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
         for step in batch:
             op = step.get("op", "?")
             if not quiet:
-                say(f"  {dim('server →')}  {bold(op)}")
+                say(f"  {dim('server ' + ARROW)}  {bold(op)}")
             before = run.status
             run.step(step)
             n += 1
@@ -261,13 +295,13 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                 key = str(step.get("step_id"))
                 failures[key] = failures.get(key, 0) + 1
                 if not quiet:
-                    say(f"  {red('local  ·')}  {op} could not be executed here")
+                    say(f"  {red('local  ' + DOT)}  {op} could not be executed here")
                 if failures[key] >= 2:
                     run.status = "abandoned"
                     run.stopped = {"reason": "step_failed", "op": op}
                     return
             elif not quiet:
-                say(f"  {dim('local  ·')}  done")
+                say(f"  {dim('local  ' + DOT)}  done")
 
             if run.status != "open":
                 return
@@ -294,7 +328,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         inputs["label"] = args.label
 
     try:
-        say(f"{bold(args.workflow)} {dim('· ' + url)}")
+        say(f"{bold(args.workflow)} {dim(DOT + ' ' + url)}")
         run = session.open(args.workflow, data=data, backtest_fn=backtest_fn, **inputs)
         _drive(run, quiet=args.quiet)
     except Offline:
@@ -361,7 +395,7 @@ def cmd_repl(args: argparse.Namespace) -> int:
             say(red(str(exc)))
             return 2
 
-    say(bold(f"alphaengine {__version__}") + dim(f"  ·  {url}"))
+    say(bold(f"alphaengine {__version__}") + dim(f"  {DOT}  {url}"))
     if args.project:
         say(dim(f"project: {args.project}"))
     if not (args.key or os.environ.get(_ENV_KEY)):

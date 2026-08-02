@@ -18,22 +18,61 @@ r.verdict()    # deflated for the 9 trials that were actually run
 r.save()       # study.json, on your disk
 ```
 
-Everything above runs offline, with no account and no key. There is also a
-terminal entry point for driving a workflow end to end against a workspace:
+Everything above runs offline, with no account and no key.
+
+## Try it without writing anything
+
+The repo ships a runnable project module, so you can see the whole offline half
+work before deciding whether any of this is for you:
 
 ```bash
-alphaengine workflows                    # what your workspace offers
-alphaengine run validate_study --project research.momentum
+git clone https://github.com/quantOSC/alphaengine && cd alphaengine
+pip install -e .
+python -m examples.momentum
 ```
 
-`--project` names an ordinary module of yours exposing `data` and, if the
-workflow sweeps, `backtest_fn`.
+```
+trials     9  (derived_from_grid)
+verdict    marginal
+surface    ridge
+dsr        0.6352
+```
 
-> **Install this into the venv you do research in — not with `pipx` or
-> `uv tool install`.** The compute steps execute in-process against your own
-> DataFrames, so tool isolation, which is normally the right way to install a
-> CLI, is the one thing that cannot work here. You cannot have isolation and
-> in-process data access, and your data not moving is the point.
+That is a moving-average crossover on **synthetic prices from a fixed seed** —
+no download, no data licence, same numbers on every machine. It is a
+demonstration of the wiring, not a strategy. A crossover on a random walk has no
+edge, and the verdict says so rather than flattering it. **That is the example
+working, not failing.**
+
+## Writing your own `backtest_fn`
+
+Two rules, both easy to get wrong the first time, and the reason the example
+above exists to copy:
+
+**Return a bare 1-D return series.** Not a dict, not a stats object — the
+per-period returns themselves. `sweep` does `np.asarray(list(raw))`, so a dict
+of results iterates its *keys* and fails on the first string.
+
+**Return the same length for every combination.** PBO splits the trial matrix
+into time blocks and compares configurations within each block, which only means
+anything if they line up in time. Ragged output is refused rather than truncated,
+because silently trimming produces a confident number over series that do not
+correspond. In practice: pick a warm-up long enough for the slowest window in
+your grid and start every configuration there.
+
+```python
+WARMUP = 200   # covers the slowest `slow` in the grid
+
+def backtest_fn(*, data, fast, slow):
+    close = data["close"]
+    return [
+        (close[i + 1] - close[i]) / close[i] * (1 if sma(close, fast, i) > sma(close, slow, i) else 0)
+        for i in range(WARMUP, len(close) - 1)
+    ]
+```
+
+`data` is whatever you want it to be — a DataFrame, a dict of series, an array.
+The package never inspects it and it never leaves your machine.
 
 ## What it does
 
@@ -46,6 +85,13 @@ multiple testing need to know how many variants were tested. That number is
 almost never recorded, because nobody counts what they discarded. Running the
 grid makes it `len(grid)`, so it never has to be asked for or asserted.
 
+**Refuses to flatter an unrecorded count.** Since 0.2.0, omitting `n_trials`
+means `not_recorded` — not `1`. The trial count comes back `null`,
+`n_trials_source` travels beside it, and **a verdict of `edge` is unreachable
+without a recorded denominator.** A deflated Sharpe is a ratio; deflating by a
+denominator nobody wrote down does not produce a weaker claim, it produces a
+claim about nothing.
+
 **Shows you the neighbourhood.** The output is whether your result sits on a
 broad plateau or a knife edge, and where the robust region is centred. A single
 spike surrounded by failures is a result fitted to its own parameters.
@@ -54,6 +100,53 @@ spike surrounded by failures is a result fitted to its own parameters.
 back, and a content hash of the data it ran on. Readable in a text editor,
 diffable, and versioned so it still parses in two years.
 
+## Running a workflow from the terminal
+
+The offline half above is complete on its own. A *workflow* adds a sequence — 
+what to run, in what order, and what stops the run — and that sequence lives on
+a QuantOS workflow server, so this part needs an account.
+
+```bash
+alphaengine version                                        # no account needed
+alphaengine workflows                                      # what your workspace offers
+alphaengine run validate_study --project examples.momentum
+```
+
+The run narrates itself, because a loop you cannot watch is a loop you cannot
+trust. The server names an op, this machine executes it and hands back figures:
+
+```
+validate_study · <your workflow server>
+  server →  compute.sweep
+  local  ·  done
+  server →  compute.deflated_sharpe
+  local  ·  done
+  server →  Stop: the surface is a ridge, not a plateau
+```
+
+`--project` names an ordinary module of yours exposing `data` and, if the
+workflow sweeps, `backtest_fn`. Authenticate with a key from the portal:
+
+```bash
+export QUANTOS_API_KEY=ae_live_...     # QUANTOS_API_URL for self-hosted or VPC
+```
+
+**A stop exits 0.** "This did not clear the bar" is the system working, not a
+broken build — a non-zero exit there would make every CI pipeline treat an
+honest refusal as a failure, which is exactly the pressure that gets honesty
+controls switched off. Only a run that could not execute a step exits non-zero.
+
+> **Install this into the venv you do research in — not with `pipx` or
+> `uv tool install`.** The compute steps execute in-process against your own
+> DataFrames, so tool isolation, which is normally the right way to install a
+> CLI, is the one thing that cannot work here. You cannot have isolation and
+> in-process data access, and your data not moving is the point.
+
+**No LLM dependency and no key field.** `AgentDriver` takes a callable, so you
+bring your own model by passing a function. There is nowhere in this tool to put
+a model key, ours or yours, and that is how "runs under your own account" is
+satisfied structurally rather than promised.
+
 ## What is in it
 
 | Module | Contents |
@@ -61,6 +154,8 @@ diffable, and versioned so it still parses in two years.
 | `alphaengine.core` | deflated Sharpe, PSR, PBO via CSCV, CPCV, minimum track record length, performance and risk statistics |
 | `alphaengine.sweep` | the grid runner and the sensitivity surface |
 | `alphaengine.study` | the study artifact and its schema |
+| `alphaengine.client` | the workflow client and the step executor |
+| `alphaengine.cli` | the `alphaengine` terminal entry point |
 
 Two runtime dependencies, numpy and scipy, both already present in a typical
 research environment. `import alphaengine` makes no network call and needs no
@@ -152,8 +247,18 @@ Statistical Association* 74(366), 427 to 431.
 
 The values these functions return are treated as a public contract. A study
 written today has to reproduce in two years, so a change to a computed value is
-a breaking change requiring a major version bump even when the signature is
-unchanged. CI fails if a pinned value moves.
+a breaking change requiring a version bump even when the signature is unchanged.
+While the leading digit is 0 the minor position carries that rule — 0.1 → 0.2 is
+what a changed figure costs — so every 0.2.x release produces identical numbers.
+CI fails if a pinned value moves.
+
+## Development
+
+```bash
+python -m venv .venv && .venv/bin/pip install -e '.[factors]' pytest ruff
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ruff check .
+```
 
 ## Licence
 

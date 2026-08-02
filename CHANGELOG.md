@@ -9,6 +9,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-01
+
+**A COMPUTED VALUE CHANGED.** `score_backtest` can return a different `verdict`
+and a different `n_trials` for the same inputs. A study saved by 0.1.x whose
+scoring omitted `n_trials` will not reproduce here, deliberately — that is the
+whole point of the change, and it is why this is a minor bump under the
+versioning rule rather than a patch.
+
 ### Added
 
 - **`alphaengine`, a terminal entry point.** The harness was complete on both
@@ -45,13 +53,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   named the wrong problem. Two identical failures now end the run with the op
   and the reason.
 
-## [0.2.0] - 2026-08-01
+- **Separators no longer arrive as `�` on a Windows console.** The CLI uses `·`
+  and `→`, and `sys.stdout` there defaults to the console's legacy code page:
+  cp437 cannot encode either, and cp1252 encodes the mid-dot to a byte that
+  anything reading the log as UTF-8 renders as a replacement character.
+  `alphaengine run validate_study` printed `validate_study � https://...` on a
+  stock install.
 
-**A COMPUTED VALUE CHANGED.** `score_backtest` can return a different `verdict`
-and a different `n_trials` for the same inputs. A study saved by 0.1.x whose
-scoring omitted `n_trials` will not reproduce here, deliberately — that is the
-whole point of the change, and it is why this is a minor bump under the
-versioning rule rather than a patch.
+  The stream is now asked once what it can encode and the glyphs fall back to
+  ASCII when the answer is no — the same discipline already applied to colour,
+  which is suppressed when stdout is not a TTY. Forcing UTF-8 onto the stream
+  would override a choice the terminal made and trade one mojibake for another.
+  A separator is decoration; the words either side carry the meaning.
 
 ### Changed
 
