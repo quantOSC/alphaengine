@@ -73,6 +73,49 @@ data = {"close": _prices()}
 GRID = {"fast": [5, 10, 20], "slow": [50, 100, 200]}
 
 
+# ── a universe, so the OTHER THREE workflows have a built-in example too ────
+#
+# WHY THIS EXISTS. The preflight message ends "or see it work on the built-in
+# example first", and until now that was only true of `validate_study`: `data`
+# above is one instrument, and pointing a screen at it produces a universe of
+# one called "close" — which the screen then refuses as a handful of names. A
+# worked example that only works for one of four workflows is a worked example
+# that tells three quarters of readers the product is broken.
+#
+# Same discipline as `_prices`: a fixed seed, so it runs offline, gives the same
+# shortlist on every machine, and needs no data licence. It is A DEMONSTRATION
+# OF THE WIRING and not a strategy — these are random walks and the screen ranks
+# them honestly, which is the example working rather than failing.
+def _universe(n_names: int = 60, n_obs: int = 400) -> dict[str, list[float]]:
+    out: dict[str, list[float]] = {}
+    for i in range(n_names):
+        rng = random.Random(1000 + i)
+        px, series = 100.0, []
+        # A spread of drifts so the ranking has something to rank. Still noise:
+        # the spread is inside what the volatility produces by itself.
+        drift = 0.0002 + (i - n_names / 2) * 8e-6
+        for _ in range(n_obs):
+            px *= 1.0 + rng.gauss(drift, 0.011)
+            series.append(round(px, 4))
+        out[f"SYM{i:02d}"] = series
+    return out
+
+
+#: What `--project alphaengine.demo_universe` hands to a screen.
+universe = _universe()
+
+
+#: A single return series, for `size_position` and `monitor_sleeve`. Derived
+#: from one of the universe's own names so the example is internally consistent
+#: — a reader can screen the universe, then size the name the screen returned.
+def _returns(symbol: str = "SYM42") -> list[float]:
+    px = universe[symbol]
+    return [round(px[i] / px[i - 1] - 1.0, 8) for i in range(1, len(px))]
+
+
+returns = _returns()
+
+
 def backtest_fn(*, data: dict[str, list[float]], fast: int = 10, slow: int = 50) -> list[float]:
     """One moving-average crossover, long/flat, as a daily return series.
 

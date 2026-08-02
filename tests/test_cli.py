@@ -903,3 +903,58 @@ def test_main_never_shows_a_traceback_for_a_configuration_problem(monkeypatch, c
     assert code == 2
     assert "Traceback" not in out
     assert "SDK is not installed" in out
+
+
+# ── the built-in example covers every workflow, not just the sweep ─────────
+#
+# The preflight message ends "or see it work on the built-in example first", and
+# that was only true of `validate_study`: `demo.data` is ONE instrument, so
+# pointing a screen at it produced a universe of one called "close" -- which the
+# screen then refuses as a handful of names. A worked example that works for one
+# of four workflows tells three quarters of readers the product is broken.
+
+
+def test_the_demo_universe_is_a_universe_a_screen_would_accept():
+    from alphaengine.core.screen import screen_universe
+    from alphaengine.demo_universe import data
+
+    assert len(data) >= 20, "below the screen's own floor, so the example would be refused"
+    out = screen_universe(data, rank_by="return_pct", top_n=5)
+    assert out["n_evaluated"] == out["universe_size"], "the example cannot be fully measured"
+    assert len(out["rows"]) == 5
+
+
+def test_the_demo_returns_are_a_series_the_measuring_ops_accept():
+    from alphaengine.client import StepExecutor
+    from alphaengine.demo_returns import data
+
+    ex = StepExecutor(data=data)
+    assert ex.execute("compute.performance_report", {})["n_obs"] == len(data)
+    assert ex.execute("compute.compute_var_cvar", {})["parametric"]["var_pct"] > 0
+
+
+def test_every_built_in_example_reproduces():
+    """Fixed seeds. The example must give the same figures on every machine, or
+    two people reading the same docs see different numbers."""
+    from alphaengine.demo import _returns, _universe
+
+    assert _universe() == _universe()
+    assert _returns() == _returns()
+
+
+def test_the_returns_come_from_the_universe_so_the_example_is_consistent():
+    """A reader can screen the universe and then size a name the screen
+    returned. Two unrelated fixtures would make that story a lie."""
+    from alphaengine.demo import universe
+    from alphaengine.demo_returns import data as returns
+
+    assert len(returns) == len(universe["SYM42"]) - 1
+
+
+def test_the_demo_modules_expose_exactly_what_project_reads():
+    """`--project` reads `data` off a module. A demo module that exposed
+    something else would be a worked example nobody can run."""
+    from alphaengine import demo_returns, demo_universe
+
+    for mod in (demo_universe, demo_returns):
+        assert hasattr(mod, "data"), f"{mod.__name__} has nothing --project can read"
