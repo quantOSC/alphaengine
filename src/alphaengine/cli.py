@@ -3,6 +3,7 @@
     $ alphaengine                      # a session
     $ alphaengine workflows            # what the server offers
     $ alphaengine run validate_study --project research.momentum
+    $ alphaengine run screen_universe --data prices.csv --universe core
     $ alphaengine version
 
 ── THE GAP THIS CLOSES ────────────────────────────────────────────────────────
@@ -30,6 +31,18 @@ You cannot have tool isolation AND in-process data access. Everything else here
 follows from choosing the second.
 
 ── WHERE YOUR DATA AND YOUR BACKTEST COME FROM ────────────────────────────────
+
+THREE DOORS, and the third one only says which names:
+
+    --project research.momentum     a module exposing `data` and `backtest_fn`
+    --data    prices.csv            a local file: wide, long, or one series
+    --universe core                 a universe registered in the portal, which
+                                    narrows --data to the names it lists
+
+`--project` is the ONLY door that can supply a simulator, because a simulator is
+code, which is why `validate_study` needs it and the other three workflows do
+not. `--universe` supplies SYMBOLS AND NEVER PRICES: a universe is a definition,
+so fetching one moves no market data and your closes still come off this disk.
 
 A PROJECT MODULE that you write and we import: an ordinary Python module
 exposing `data` and, if a workflow sweeps, `backtest_fn`.
@@ -466,6 +479,90 @@ def _looks_like_returns(data: Any) -> bool:
         return False
 
 
+def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, Any]:
+    """Everything a run can be fed, resolved in one place.
+
+    THREE DOORS, AND THE ORDER IS THE ARGUMENT:
+
+        --project   a module exposing `data` and `backtest_fn`. The only door
+                    that can supply a SIMULATOR, so it is the only one
+                    `validate_study` can use.
+        --data      a local CSV. Numbers live in files, and "write a Python
+                    module first" was a real barrier in front of the three
+                    workflows that need numbers rather than code.
+        --universe  a universe REGISTERED IN THE PORTAL, which supplies the
+                    symbol list and never the prices -- those are parameters, by
+                    design (§9: a universe definition is names plus how to source
+                    them, never a series). Combines with `--data`: the portal
+                    says which names, the file supplies their closes.
+
+    `--project` wins where they overlap, because a module that defines both is
+    the most specific thing the caller could have said.
+    """
+    data, backtest_fn = None, None
+
+    if getattr(args, "project", None):
+        data, backtest_fn = load_project(args.project)
+
+    if getattr(args, "data", None):
+        from .loaders import load_csv
+
+        loaded = load_csv(args.data)
+        # A project module that also defined `data` keeps it: the explicit module
+        # is the more specific statement, and silently replacing it would make
+        # two flags fight where the user can see neither winning.
+        data = data if data is not None else loaded
+
+    if getattr(args, "universe", None):
+        data = _narrow_to_universe(session, args.universe, data)
+
+    return data, backtest_fn
+
+
+def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
+    """Filter loaded prices to a universe the portal holds.
+
+    THE SPLIT THAT MAKES THIS SAFE: the portal returns SYMBOLS, this machine
+    holds the prices, and the two meet here rather than on the server. A
+    universe definition is parameters -- names plus how to source them -- and
+    that is why fetching one moves no market data.
+    """
+    from .loaders import DataShapeError, coverage
+
+    if session is None:
+        raise DataShapeError("--universe needs a workflow server; none is configured.")
+    if data is None:
+        raise DataShapeError(
+            "--universe says WHICH names; it does not supply their prices, because a "
+            "universe is a definition and never a series. Add --data with the closes."
+        )
+
+    rows = session.universes()
+    match = next(
+        (u for u in rows if wanted in (str(u.get("id")), str(u.get("name")))),
+        None,
+    )
+    if match is None:
+        known = ", ".join(str(u.get("name")) for u in rows) or "none"
+        raise DataShapeError(f"no universe called {wanted!r}. Yours: {known}")
+
+    symbols = list(match.get("symbols") or [])
+    if not symbols:
+        raise DataShapeError(f"universe {wanted!r} names no symbols.")
+
+    kept, missing = coverage(data, symbols)
+    if not kept:
+        raise DataShapeError(f"none of the {len(symbols)} names in {wanted!r} are in your file.")
+    if missing:
+        # SAID, NOT SWALLOWED. A universe of 500 screened against a file holding
+        # 40 of them is a different result from a universe of 40, and this is the
+        # last place that difference is visible.
+        shown = ", ".join(missing[:8]) + ("…" if len(missing) > 8 else "")
+        say(yellow(f"  {len(missing)} of {len(symbols)} names are not in your file: {shown}"))
+    say(dim(f"  universe {wanted} {DOT} {len(kept)} of {len(symbols)} names loaded"))
+    return kept
+
+
 def _drive(run: Any, *, quiet: bool = False) -> None:
     """Execute the run, narrating each step.
 
@@ -510,13 +607,13 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
 def cmd_run(args: argparse.Namespace) -> int:
     from .client import Offline, ServerError
 
+    session, url = _session(args.url, args.key)
     try:
-        data, backtest_fn = load_project(args.project)
-    except ProjectError as exc:
+        data, backtest_fn = resolve_data(args, session)
+    except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
         return 2
 
-    session, url = _session(args.url, args.key)
     inputs: dict[str, Any] = {}
     for pair in args.input or []:
         if "=" not in pair:
@@ -1063,13 +1160,11 @@ def cmd_repl(args: argparse.Namespace) -> int:
     from .client import Offline, ServerError
 
     session, url = _session(args.url, args.key)
-    data, backtest_fn = None, None
-    if args.project:
-        try:
-            data, backtest_fn = load_project(args.project)
-        except ProjectError as exc:
-            say(red(str(exc)))
-            return 2
+    try:
+        data, backtest_fn = resolve_data(args, session)
+    except (ProjectError, ValueError) as exc:
+        say(red(str(exc)))
+        return 2
 
     boot(url, project=args.project, data=data, keyed=bool(args.key or os.environ.get(_ENV_KEY)))
 
@@ -1191,6 +1286,12 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--url", help=f"workflow server (default ${_ENV_URL} or the public API)")
     common.add_argument("--key", help=f"portal-issued ae_live_ key (default ${_ENV_KEY})")
     common.add_argument("--project", help="module exposing `data` and `backtest_fn`, e.g. research.momentum")
+    common.add_argument(
+        "--data", help="a local CSV: wide (date,AAPL,MSFT), long (date,symbol,close), or one series"
+    )
+    common.add_argument(
+        "--universe", help="name or id of a universe registered in the portal; narrows --data to it"
+    )
 
     p = argparse.ArgumentParser(
         prog="alphaengine",

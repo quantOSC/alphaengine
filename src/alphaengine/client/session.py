@@ -223,6 +223,16 @@ class Session:
         """Names and versions. That is all a client is given, and all it needs."""
         return list(self._get("/api/harness/workflows").get("workflows") or [])
 
+    def universes(self) -> list[Figures]:
+        """Universes you registered in the portal: names, and the SYMBOLS in them.
+
+        NOT PRICES, and that is the whole reason this call is safe to make. A
+        universe is a definition — which names, and how you source them — so
+        fetching one moves no market data in either direction. Your closes stay
+        on this machine and meet the symbol list here.
+        """
+        return list(self._get("/api/me/universes").get("universes") or [])
+
     # ── transport ──────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Figures | None = None) -> Figures:
         url = f"{self.base_url.rstrip('/')}{path}"

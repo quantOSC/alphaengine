@@ -697,3 +697,111 @@ def test_a_broken_model_loses_the_answer_and_not_the_run(capsys):
 
     cli._answer("?", _Answered(_FIGS), boom)
     assert "No answer could be composed" in capsys.readouterr().out
+
+
+# ── three doors for data, not one ──────────────────────────────────────────
+#
+# `--project` was the ONLY way in. It is the right door for a quant with a
+# research package and the wrong one for the same quant on the day somebody
+# emails them a CSV. Three of the four workflows want numbers, not code.
+
+
+class _Universes:
+    """A session that answers `universes()` and nothing else."""
+
+    def __init__(self, rows):
+        self._rows = rows
+
+    def universes(self):
+        return self._rows
+
+
+def _args(**kw):
+    import argparse
+
+    fields = {"project": None, "data": None, "universe": None}
+    fields.update(kw)
+    return argparse.Namespace(**fields)
+
+
+def test_a_csv_becomes_the_runs_data(tmp_path):
+    p = tmp_path / "prices.csv"
+    p.write_text("date,AAPL,MSFT\n2026-01-01,100,200\n2026-01-02,101,201\n", encoding="utf-8")
+    data, backtest_fn = cli.resolve_data(_args(data=str(p)))
+    assert set(data) == {"AAPL", "MSFT"}
+    # No simulator, and that is correct: a file cannot carry one, which is why
+    # `validate_study` still needs --project and the other three do not.
+    assert backtest_fn is None
+
+
+def test_a_universe_narrows_the_file_to_the_names_it_lists(tmp_path, capsys):
+    p = tmp_path / "prices.csv"
+    p.write_text("date,AAPL,MSFT,NVDA\n2026-01-01,100,200,300\n", encoding="utf-8")
+    session = _Universes([{"id": "u1", "name": "core", "symbols": ["AAPL", "NVDA", "TSLA"]}])
+
+    data, _ = cli.resolve_data(_args(data=str(p), universe="core"), session)
+    assert set(data) == {"AAPL", "NVDA"}
+    # SAID, NOT SWALLOWED. A universe of 500 screened against a file holding 40
+    # is a different result from a universe of 40.
+    assert "TSLA" in capsys.readouterr().out
+
+
+def test_a_universe_may_be_named_by_id_too(tmp_path):
+    p = tmp_path / "prices.csv"
+    p.write_text("date,AAPL\n2026-01-01,100\n", encoding="utf-8")
+    session = _Universes([{"id": "u_7", "name": "core", "symbols": ["AAPL"]}])
+    data, _ = cli.resolve_data(_args(data=str(p), universe="u_7"), session)
+    assert set(data) == {"AAPL"}
+
+
+def test_a_universe_without_a_file_says_why_it_cannot_help():
+    """A universe is a DEFINITION and never a series. Saying which names does
+    not supply their prices, and pretending otherwise would be the one place
+    this product fetched data on somebody's behalf."""
+    session = _Universes([{"id": "u1", "name": "core", "symbols": ["AAPL"]}])
+    with pytest.raises(ValueError) as e:
+        cli.resolve_data(_args(universe="core"), session)
+    assert "--data" in str(e.value)
+
+
+def test_an_unknown_universe_lists_the_ones_you_have(tmp_path):
+    p = tmp_path / "prices.csv"
+    p.write_text("date,AAPL\n2026-01-01,100\n", encoding="utf-8")
+    session = _Universes([{"id": "u1", "name": "core", "symbols": ["AAPL"]}])
+    with pytest.raises(ValueError) as e:
+        cli.resolve_data(_args(data=str(p), universe="nope"), session)
+    assert "core" in str(e.value)
+
+
+def test_a_universe_sharing_no_names_with_the_file_is_refused(tmp_path):
+    p = tmp_path / "prices.csv"
+    p.write_text("date,AAPL\n2026-01-01,100\n", encoding="utf-8")
+    session = _Universes([{"id": "u1", "name": "core", "symbols": ["TSLA", "AMZN"]}])
+    with pytest.raises(ValueError) as e:
+        cli.resolve_data(_args(data=str(p), universe="core"), session)
+    assert "none of the 2 names" in str(e.value)
+
+
+def test_a_project_module_still_wins_where_they_overlap(tmp_path, monkeypatch):
+    """The module is the more specific statement. Silently replacing it would
+    make two flags fight where the user can see neither winning."""
+    import sys
+    import types
+
+    mod = types.ModuleType("fake_project")
+    mod.data = {"FROM_MODULE": [1.0, 2.0]}
+    mod.backtest_fn = lambda **k: [0.01]
+    monkeypatch.setitem(sys.modules, "fake_project", mod)
+
+    p = tmp_path / "prices.csv"
+    p.write_text("date,AAPL\n2026-01-01,100\n", encoding="utf-8")
+
+    data, backtest_fn = cli.resolve_data(_args(project="fake_project", data=str(p)))
+    assert set(data) == {"FROM_MODULE"}
+    assert backtest_fn is not None
+
+
+def test_nothing_supplied_is_not_an_error_here():
+    """Preflight is what refuses a run with nothing loaded, and it does so
+    naming the workflow. Raising here would pre-empt a better message."""
+    assert cli.resolve_data(_args()) == (None, None)
