@@ -524,3 +524,47 @@ def test_the_file_is_mode_0600(tmp_path, monkeypatch):
 
     p = auth.save_key("QUANTOS_API_KEY", "x")
     assert _stat.S_IMODE(p.stat().st_mode) == 0o600
+
+
+# ── preflight: refuse before the run, not after it churns ──────────────────
+
+_CAT = [
+    {"name": "validate_study", "version": "1.0.0", "requires": ["data", "backtest_fn"]},
+    {"name": "no_inputs", "version": "1.0.0", "requires": []},
+]
+
+
+def test_a_sweep_workflow_without_a_backtest_is_refused_up_front():
+    """THE FAILURE THIS REPLACES: the run started, `compute.sweep` raised, the
+    server correctly re-offered the step, the second identical failure abandoned
+    it — and the user watched a workflow grind and die naming an op they had
+    never heard of. It was knowable before the first request."""
+    gap = cli.preflight(_CAT, "validate_study", data=None, backtest_fn=None)
+    assert gap and "backtest_fn" in gap
+    # And it says what to actually type, including a path that needs nothing.
+    assert "--project" in gap
+    assert "alphaengine.demo" in gap
+
+
+def test_data_alone_is_not_enough_for_a_sweep():
+    gap = cli.preflight(_CAT, "validate_study", data={"close": [1.0]}, backtest_fn=None)
+    assert gap and "backtest_fn" in gap and "`data`" not in gap
+
+
+def test_nothing_missing_means_no_complaint():
+    assert cli.preflight(_CAT, "validate_study", data={"c": [1]}, backtest_fn=lambda **k: []) is None
+
+
+def test_a_workflow_needing_nothing_runs_with_nothing():
+    assert cli.preflight(_CAT, "no_inputs", data=None, backtest_fn=None) is None
+
+
+def test_an_unknown_workflow_lists_what_the_workspace_offers():
+    gap = cli.preflight(_CAT, "nope", data=None, backtest_fn=None)
+    assert gap and "validate_study" in gap and "no_inputs" in gap
+
+
+def test_an_unpublished_requirement_is_not_invented():
+    """A server that publishes no `requires` must not be second-guessed by the
+    client — the contract is the server's to state."""
+    assert cli.preflight([{"name": "x", "version": "1"}], "x", data=None, backtest_fn=None) is None

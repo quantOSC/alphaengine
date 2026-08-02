@@ -376,8 +376,44 @@ def cmd_workflows(args: argparse.Namespace) -> int:
             if repro is False
             else dim("")
         )
-        say(f"  {bold(str(r.get('name')))}  {dim(str(r.get('version')))}  {tag}")
+        needs = r.get("requires") or []
+        need_s = dim("  needs " + ", ".join(str(n) for n in needs)) if needs else dim("  needs nothing")
+        say(f"  {bold(str(r.get('name')))}  {dim(str(r.get('version')))}  {tag}{need_s}")
     return 0
+
+
+def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest_fn: Any) -> str | None:
+    """What is missing before a run starts. `None` when nothing is.
+
+    ── THE FAILURE THIS REPLACES ──────────────────────────────────────────────
+
+    `validate_study` sweeps, so it needs the caller's simulator. Without one,
+    `compute.sweep` raised UnsupportedOp, the server correctly re-offered the
+    step, the second identical failure abandoned the run — and the user watched
+    a workflow start, grind, and die naming an op they had never heard of. The
+    real problem was knowable before the first request.
+
+    The server publishes `requires` for exactly this. It is an input contract,
+    not workflow knowledge: it says what to bring, never what happens to it.
+    """
+    row = next((r for r in catalogue if r.get("name") == name), None)
+    if row is None:
+        known = ", ".join(str(r.get("name")) for r in catalogue) or "none"
+        return f"No workflow called {name!r}. This workspace offers: {known}"
+
+    have = {"data": data is not None, "backtest_fn": backtest_fn is not None}
+    missing = [r for r in (row.get("requires") or []) if not have.get(str(r), True)]
+    if not missing:
+        return None
+
+    what = " and ".join(f"`{m}`" for m in missing)
+    return (
+        f"{name} needs {what} from your project module, and none was loaded.\n"
+        f"  Point at a module of yours that defines them:\n"
+        f"      alphaengine run {name} --project research.momentum\n"
+        f"  Or try it on the built-in example first:\n"
+        f"      alphaengine run {name} --project alphaengine.demo"
+    )
 
 
 def _drive(run: Any, *, quiet: bool = False) -> None:
@@ -443,6 +479,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         say(f"{bold(args.workflow)} {dim(DOT + ' ' + url)}")
+        # ASK WHAT IT NEEDS BEFORE STARTING IT. One extra GET against a run that
+        # would otherwise fail twice and abandon.
+        gap = preflight(session.workflows(), args.workflow, data=data, backtest_fn=backtest_fn)
+        if gap:
+            say("")
+            say(yellow(gap))
+            return 2
         run = session.open(args.workflow, data=data, backtest_fn=backtest_fn, **inputs)
         _drive(run, quiet=args.quiet)
     except Offline:
