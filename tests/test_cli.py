@@ -323,6 +323,13 @@ def test_with_a_quantos_key_the_agent_rung_names_the_model_variable(monkeypatch)
 
 
 def test_with_both_keys_every_rung_is_unlocked(monkeypatch):
+    """The SDK is stubbed present because this is testing the LADDER, not this
+    machine's install state. Before 2026-08-02 the rung lit on the env var
+    alone, which meant it lit on a provider that would then raise -- a boot
+    screen that lied, when telling a user what they cannot do is its whole job."""
+    from alphaengine import model
+
+    monkeypatch.setattr(model, "_sdk_present", lambda _label: True)
     out = _ladder(monkeypatch, keyed=True, model="ANTHROPIC_API_KEY")
     assert out.count("ready") >= 2
     assert "anthropic" in out
@@ -805,3 +812,91 @@ def test_nothing_supplied_is_not_an_error_here():
     """Preflight is what refuses a run with nothing loaded, and it does so
     naming the workflow. Raising here would pre-empt a better message."""
     assert cli.resolve_data(_args()) == (None, None)
+
+
+# ── a configuration problem is not a crash ─────────────────────────────────
+#
+# THE BUG: `build_think` returned a closure whose SDK import ran on first call,
+# so a machine with ANTHROPIC_API_KEY set and the SDK missing got a valid-looking
+# callable and failed inside `driver.pick()` -- three frames past the
+# `except NoModelConfigured` in `_ask` that exists to handle exactly this. The
+# user saw two full tracebacks with the one actionable line buried underneath.
+
+
+def test_a_key_with_no_sdk_raises_where_the_handler_is(monkeypatch):
+    """At BUILD time, not on first call. A callable that cannot work is not a
+    callable."""
+    from alphaengine import model
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(model, "_sdk_present", lambda _label: False)
+
+    with pytest.raises(model.NoModelConfigured) as e:
+        model.build_think()
+    assert "pip install anthropic" in str(e.value)
+    # And it points at the extra that installs everything the agent path needs.
+    assert "alphaengine[agents]" in str(e.value)
+
+
+def test_a_missing_sdk_falls_through_to_a_provider_that_works(monkeypatch):
+    """A machine with both keys and only openai installed should USE openai
+    rather than refusing."""
+    from alphaengine import model
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-o")
+    monkeypatch.setattr(model, "_sdk_present", lambda label: label == "openai")
+
+    _think, label = model.build_think()
+    assert label.startswith("openai/")
+
+
+def test_the_ladder_does_not_light_a_rung_that_would_raise(monkeypatch):
+    """A boot screen that lights on a provider which then raises is a boot
+    screen that lied, and telling a user what they cannot do is its whole job."""
+    from alphaengine import model
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(model, "_sdk_present", lambda _label: False)
+
+    assert model.available_models() == []
+    assert model.keys_without_sdk() == ["anthropic"]
+
+
+def test_the_ladder_says_which_step_is_missing(monkeypatch):
+    """ "Add your own model key" told somebody who already had one to go and get
+    one, which reads as the product being broken."""
+    from alphaengine import model
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(model, "_sdk_present", lambda _label: False)
+
+    text = "\n".join(cli.ladder_lines(keyed=True))
+    assert "pip install anthropic" in text
+    assert "add your own model key" not in text
+
+
+def test_main_never_shows_a_traceback_for_a_configuration_problem(monkeypatch, capsys):
+    """The backstop. No future path gets to put a traceback in front of a user
+    for a missing key or a missing install."""
+    from alphaengine import cli as cli_mod
+    from alphaengine.model import NoModelConfigured
+
+    def boom(_args):
+        raise NoModelConfigured("a key is set and the SDK is not installed")
+
+    # `main` restores the signed-in credential before dispatching, which reads
+    # the REAL file on this machine and would leak QUANTOS_API_KEY into
+    # os.environ for every test that runs after this one. Stubbed rather than
+    # tolerated: a test that touches the developer's own credentials behaves
+    # differently on CI, and this one made an unrelated smoke test fail.
+    monkeypatch.setattr("alphaengine.auth.apply_stored", lambda: None)
+    monkeypatch.setattr(cli_mod, "cmd_version", boom)
+
+    code = cli_mod.main(["version"])
+    out = capsys.readouterr().out
+    assert code == 2
+    assert "Traceback" not in out
+    assert "SDK is not installed" in out

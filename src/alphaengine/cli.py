@@ -732,9 +732,13 @@ def _shell_set(name: str, stored: dict[str, str]) -> bool:
 
 def ladder_lines(*, keyed: bool) -> list[str]:
     """The three rungs, with what is unlocked and how to unlock the rest."""
-    from .model import available_models
+    from .model import available_models, keys_without_sdk
 
     models = available_models()
+    # A KEY WITH NO SDK IS A DIFFERENT SITUATION FROM NO KEY, and it wants a
+    # different sentence. "Add your own model key" told somebody who already had
+    # one to go and get one, which reads as the product being broken.
+    stranded = keys_without_sdk()
     on = "●" if _UNICODE_OK else "*"
     off = "○" if _UNICODE_OK else "-"
 
@@ -758,6 +762,8 @@ def ladder_lines(*, keyed: bool) -> list[str]:
             (
                 green(f"ready  {DOT}  {models[0][0]}")
                 if (keyed and models)
+                else yellow(f"{stranded[0]} key found {DOT} SDK missing")
+                if (keyed and stranded)
                 else yellow("add your own model key")
                 if keyed
                 else dim("sign in first")
@@ -778,6 +784,16 @@ def ladder_lines(*, keyed: bool) -> list[str]:
     # came for still needs to be told exactly how, without going to look it up.
     if not keyed:
         out += ["", "  " + dim("Type ") + bold("key quantos") + dim(f" to sign in, or export {_ENV_KEY}.")]
+    elif not models and stranded:
+        # ONE STEP AWAY, so say which step. This is the state the owner hit: a
+        # key set, the SDK absent, and a boot screen that suggested getting a key.
+        out += [
+            "",
+            "  "
+            + dim(f"Your {stranded[0]} key is set and its SDK is not installed. Run ")
+            + bold(f"pip install {stranded[0]}")
+            + dim("."),
+        ]
     elif not models:
         out += [
             "",
@@ -1347,6 +1363,7 @@ def main(argv: list[str] | None = None) -> int:
     # colleague's machine all set the variable, and a stale file silently
     # overriding it is a bug that takes a day to find.
     from .auth import apply_stored
+    from .model import NoModelConfigured
 
     apply_stored()
 
@@ -1364,6 +1381,16 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         say("")
         return 130
+    except NoModelConfigured as exc:
+        # A CONFIGURATION PROBLEM IS NOT A CRASH and must never look like one.
+        # This escaped as two full tracebacks with the one actionable line
+        # buried underneath, because the guard sat around `build_think()` while
+        # the failure came from a closure called three frames later. That is
+        # fixed at the source in `model.build_think`; this is the backstop, so
+        # no future path can put a traceback in front of a user for a missing
+        # key or a missing install.
+        say(yellow(str(exc)))
+        return 2
 
 
 if __name__ == "__main__":  # pragma: no cover

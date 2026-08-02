@@ -49,25 +49,95 @@ _PROVIDERS: list[tuple[str, str, str]] = [
 
 
 def available_models() -> list[tuple[str, str]]:
-    """Which providers this machine could use, as (label, model)."""
-    return [(label, model) for env, label, model in _PROVIDERS if os.environ.get(env)]
+    """Which providers this machine can ACTUALLY use, as (label, model).
+
+    A key with no SDK behind it does not count. The boot screen lights its third
+    rung from this, and a rung that lights on a provider which then raises is a
+    boot screen that lied — the specific failure the capability ladder exists to
+    prevent, since its whole job is telling a user what they cannot do and why.
+    """
+    return [(label, model) for env, label, model in _PROVIDERS if os.environ.get(env) and _sdk_present(label)]
+
+
+def keys_without_sdk() -> list[str]:
+    """Providers the user has a key for and cannot use yet.
+
+    Reported separately so the boot screen can say "one install away" rather
+    than "not configured", which are different situations and want different
+    next steps.
+    """
+    return [label for env, label, _model in _PROVIDERS if os.environ.get(env) and not _sdk_present(label)]
+
+
+#: Which import each provider needs, checked BEFORE a closure is handed out.
+_SDK = {"anthropic": "anthropic", "openai": "openai"}
+
+
+def _sdk_present(label: str) -> bool:
+    """Is the provider's SDK importable, without importing it?
+
+    `find_spec` rather than a try/import: this runs on every boot of the
+    interactive shell and importing a large SDK to discover it exists is a
+    visible pause for no result.
+    """
+    import importlib.util  # noqa: PLC0415
+
+    try:
+        return importlib.util.find_spec(_SDK[label]) is not None
+    except (ImportError, ValueError):  # pragma: no cover - malformed install
+        return False
 
 
 def build_think(model: str | None = None) -> tuple[Callable[[str], str], str]:
-    """Return `(think, label)` for the first provider with a key present.
+    """Return `(think, label)` for the first provider that is actually USABLE.
 
     `think` is `(prompt) -> text` and nothing more, because that is the whole
     interface `AgentDriver` accepts.
+
+    ── THE BUG THIS SHAPE FIXES ────────────────────────────────────────────
+
+    This used to return a closure whose SDK import happened on first call. So a
+    machine with `ANTHROPIC_API_KEY` set and the SDK missing got a valid-looking
+    `think`, and the failure surfaced inside `driver.pick()` — three frames past
+    the `except NoModelConfigured` in `cli._ask` that exists to handle exactly
+    this. The user saw two full tracebacks with the one actionable line buried
+    under them.
+
+    **A callable that cannot work is not a callable.** Checking here means the
+    error is raised where it is already handled, and the friendly message is the
+    only thing anybody sees.
+
+    ── AND A MISSING SDK NO LONGER DEAD-ENDS ───────────────────────────────
+
+    A provider whose key is set but whose SDK is absent is SKIPPED rather than
+    fatal, so a machine with both keys and only `openai` installed uses openai
+    instead of refusing. What is unusable is reported at the end, in the message,
+    because "you have a key for this and it needs one more install" is the most
+    useful thing we can say to somebody who is one step away.
     """
+    unusable: list[str] = []
+
     for env, label, default in _PROVIDERS:
         key = os.environ.get(env)
         if not key:
+            continue
+        if not _sdk_present(label):
+            unusable.append(label)
             continue
         chosen = model or os.environ.get("ALPHAENGINE_MODEL") or default
         if label == "anthropic":
             return _anthropic(key, chosen), f"{label}/{chosen}"
         if label == "openai":
             return _openai(key, chosen), f"{label}/{chosen}"
+
+    if unusable:
+        which = " or ".join(f"pip install {_SDK[label]}" for label in unusable)
+        raise NoModelConfigured(
+            f"A key is set for {' and '.join(unusable)}, and the SDK is not installed.\n"
+            f"    {which}\n"
+            "    or, for everything the agent path needs: pip install 'alphaengine[agents]'\n"
+            "The scripted path (`run <workflow>`) needs no model at all and works now."
+        )
 
     raise NoModelConfigured(
         "No model key found. The agentic path runs under YOUR account, so it "
