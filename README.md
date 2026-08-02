@@ -107,10 +107,36 @@ what to run, in what order, and what stops the run — and that sequence lives o
 a QuantOS workflow server, so this part needs an account.
 
 ```bash
-alphaengine version                                        # no account needed
+alphaengine                                                # a session
 alphaengine workflows                                      # what your workspace offers
 alphaengine run validate_study --project examples.momentum
 ```
+
+### "command not found"
+
+The console script lives in your venv's `Scripts/` (Windows) or `bin/` (POSIX),
+which joins your PATH only while that venv is **activated**. A fresh install
+followed by `alphaengine` therefore says *command not found*, which reads as a
+broken install and is not one.
+
+```powershell
+.\.venv\Scripts\Activate.ps1     # Windows PowerShell
+source .venv/bin/activate        # macOS / Linux
+alphaengine
+```
+
+Or skip activation entirely — **`python -m alphaengine` always works**, because
+the interpreter that can import the package can always run it:
+
+```bash
+.venv/Scripts/python.exe -m alphaengine      # Windows, unactivated
+.venv/bin/python -m alphaengine              # POSIX, unactivated
+```
+
+This is the price of in-process data access, and it is the one cost we will not
+engineer around: a launcher that worked from anywhere would have to run in its
+own environment, which is exactly the isolation that makes `compute.*` unable to
+see your DataFrames.
 
 The run narrates itself, because a loop you cannot watch is a loop you cannot
 trust. The server names an op, this machine executes it and hands back figures:

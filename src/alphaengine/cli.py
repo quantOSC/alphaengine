@@ -154,6 +154,118 @@ def say(*parts: str) -> None:
     print(*parts, flush=True)
 
 
+def cyan(t: str) -> str:
+    return _c("36", t)
+
+
+# ── the boot screen ────────────────────────────────────────────────────────
+#
+# WHAT A BOOT SCREEN IS FOR, and it is not decoration. Somebody typing
+# `alphaengine` in a project has three questions and no way to answer them
+# without one: am I pointed at the right workspace, can I actually reach it,
+# and is my data loaded. A banner that answers those is a banner that saves a
+# failed run; a banner that just says the name is a logo.
+#
+# So the box below is mostly STATE. The wordmark is three lines of it and the
+# rest is: where it is talking to, whether it is authenticated, which project
+# module is loaded, and what to type next. Anything that cannot be answered
+# gets a visible warning rather than silence, because "no API key" discovered
+# at boot costs nothing and discovered mid-run costs the run.
+#
+# It degrades the whole way down: box-drawing to ASCII when the stream cannot
+# encode it, colour dropped when stdout is not a TTY, and the entire banner
+# suppressed for a non-interactive invocation — piping `alphaengine run` into a
+# CI log must produce a transcript, not an ANSI painting.
+
+# THE MARK IS A PARAMETER SURFACE, which is the one thing this tool looks at.
+#
+# Figlet art was the first attempt and it was wrong for this product — a bank of
+# ASCII capitals is a hobby-project signal, and it says nothing. A plateau says
+# what a good result looks like: a broad region where neighbouring parameters
+# all work. Beside it, the knife edge that does not survive. Somebody who boots
+# this twice has already learned the distinction the verdict turns on.
+#
+# Two glyph sets. The blocks need Unicode; the ASCII fallback keeps the same
+# silhouette so the meaning survives a cp437 console.
+# The two are the SAME WIDTH on purpose — they sit on consecutive lines and the
+# text after them has to start at the same column, or the second line reads as a
+# misprint rather than as a comparison.
+_PLATEAU_U = "▁▂▄▆█████▆▄▂▁"
+_EDGE_U = "▁▁▁▁▁▁█▁▁▁▁▁▁"
+_PLATEAU_A = ".:-=+#####+=-:"
+_EDGE_A = "..........#..."
+
+PLATEAU = _PLATEAU_U if _UNICODE_OK else _PLATEAU_A
+EDGE = _EDGE_U if _UNICODE_OK else _EDGE_A
+
+
+def _boxed(rows: list[tuple[str, str]], width: int = 62) -> list[str]:
+    """A key/value box. Unicode rules when the stream takes them, ASCII when not."""
+    if _UNICODE_OK:
+        tl, tr, bl, br, h, v = "╭", "╮", "╰", "╯", "─", "│"
+    else:
+        tl, tr, bl, br, h, v = "+", "+", "+", "+", "-", "|"
+    inner = width - 2
+    out = [dim(tl + h * inner + tr)]
+    for k, val in rows:
+        if k == "":  # a full-width line, already coloured by the caller
+            pad = inner - 1 - _visible_len(val)
+            out.append(dim(v) + " " + val + " " * max(0, pad) + dim(v))
+            continue
+        label = k.ljust(9)
+        room = inner - 1 - 9 - 1
+        val = _fit(val, room)
+        pad = room - _visible_len(val)
+        out.append(dim(v) + f" {dim(label)} {val}" + " " * max(0, pad) + dim(v))
+    out.append(dim(bl + h * inner + br))
+    return out
+
+
+def _fit(s: str, room: int) -> str:
+    """Truncate to `room` VISIBLE characters, keeping ANSI codes intact.
+
+    The default server URL is 51 characters and overflowed the box on a fresh
+    install — the first thing an unconfigured user would ever see, broken. The
+    tail is what distinguishes one host from another, so the middle goes.
+    """
+    if _visible_len(s) <= room:
+        return s
+    ell = "…" if _UNICODE_OK else "..."
+    keep = room - len(ell)
+    head, tail = keep // 2, keep - keep // 2
+    plain, out, seen, i = "", [], 0, 0
+    while i < len(s):
+        if s[i] == "\033":  # copy the escape verbatim, it costs no width
+            j = i
+            while j < len(s) and s[j] != "m":
+                j += 1
+            out.append(s[i : j + 1])
+            i = j + 1
+            continue
+        if seen < head or seen >= _visible_len(s) - tail:
+            out.append(s[i])
+        elif seen == head:
+            out.append(ell)
+        seen += 1
+        i += 1
+    del plain
+    return "".join(out)
+
+
+def _visible_len(s: str) -> int:
+    """Length ignoring ANSI escapes, so padding survives colour."""
+    n, i = 0, 0
+    while i < len(s):
+        if s[i] == "\033":
+            while i < len(s) and s[i] != "m":
+                i += 1
+            i += 1
+            continue
+        n += 1
+        i += 1
+    return n
+
+
 # ── the project module ─────────────────────────────────────────────────────
 
 
@@ -380,10 +492,67 @@ HELP = """
 """
 
 
+def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
+    """The opening screen. State first, decoration second.
+
+    Suppressed entirely when stdout is not a TTY: a CI log wants a transcript.
+    """
+    from ._version import __version__
+
+    if not _tty():
+        say(f"alphaengine {__version__}  {DOT}  {url}")
+        return
+
+    # The mark, the name, and what the mark means — three lines, and the third
+    # is doing teaching rather than decoration.
+    say("")
+    say("  " + cyan(PLATEAU) + "   " + bold("alphaengine"))
+    say("  " + dim(EDGE) + "   " + dim("a plateau survives. a knife edge does not."))
+    say("")
+
+    # Data is described by SHAPE, never printed. A boot screen that echoes the
+    # first rows of somebody's price series into their scrollback — where it
+    # will sit until the buffer rolls, and into any recording of the session —
+    # is a boundary violation for the sake of a nicer banner.
+    if data is None:
+        loaded = dim("none") + dim(f"  {DOT}  pass --project to load yours")
+    else:
+        try:
+            n = len(data)  # dict of series, DataFrame, or sequence
+        except TypeError:
+            n = None
+        loaded = green("ready") + dim(f"  {DOT}  {n} series" if n is not None else "")
+
+    rows: list[tuple[str, str]] = [
+        ("version", bold(__version__)),
+        ("server", url if keyed else dim(url)),
+        (
+            "auth",
+            green("key found") if keyed else yellow(f"none  {DOT}  set {_ENV_KEY}"),
+        ),
+        ("project", (bold(project) if project else dim("none"))),
+        ("data", loaded),
+    ]
+    for line in _boxed(rows):
+        say(line)
+
+    say("")
+    for cmd, what in (
+        ("workflows", "what your workspace offers"),
+        ("run <name>", "execute one, watching every step"),
+        ("help", "everything else, and `quit` to leave"),
+    ):
+        say("  " + bold(cmd.ljust(12)) + dim(what))
+    say("")
+    # THE ONE LINE THAT IS NOT STATUS. It is here because it is the thing most
+    # often forgotten and the thing that makes the rest make sense.
+    say("  " + dim("The sequence runs on the server. The compute runs here, on your data."))
+    say("")
+
+
 def cmd_repl(args: argparse.Namespace) -> int:
     """A session. The point is that a run is watchable and repeatable without
     retyping a command line each time."""
-    from ._version import __version__
     from .client import Offline, ServerError
 
     session, url = _session(args.url, args.key)
@@ -395,12 +564,7 @@ def cmd_repl(args: argparse.Namespace) -> int:
             say(red(str(exc)))
             return 2
 
-    say(bold(f"alphaengine {__version__}") + dim(f"  {DOT}  {url}"))
-    if args.project:
-        say(dim(f"project: {args.project}"))
-    if not (args.key or os.environ.get(_ENV_KEY)):
-        say(yellow("No API key.") + dim(f"  Set {_ENV_KEY} to reach your workspace."))
-    say(dim("`help` for commands, `quit` to leave."))
+    boot(url, project=args.project, data=data, keyed=bool(args.key or os.environ.get(_ENV_KEY)))
 
     last = None
     while True:

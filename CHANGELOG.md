@@ -9,6 +9,35 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **A boot screen.** `alphaengine` with no arguments opened a bare `>` prompt,
+  so the three questions somebody actually has on entering a project — am I
+  pointed at the right workspace, can I reach it, is my data loaded — had no
+  answer until a run failed. The banner is mostly STATE for that reason; the
+  mark is two lines and the rest is server, auth, project and data shape.
+
+  It never prints your data. Shape only — a banner that echoes the first rows of
+  a price series puts them in the scrollback, in any screen recording, and in
+  any screenshot pasted into a ticket. A test asserts no value and no ticker
+  reaches the screen.
+
+  Degrades the whole way down: box-drawing to ASCII where the stream cannot
+  encode it, colour dropped off a TTY, and the banner suppressed entirely when
+  stdout is a pipe — a CI log wants a transcript, not an ANSI painting.
+
+- **`python -m alphaengine`.** The console script is on PATH only while the venv
+  is activated, so a fresh `pip install -e .` followed by `alphaengine` says
+  "command not found" and reads as a broken install. The module form needs no
+  PATH entry: the interpreter that can import the package can always run it.
+
+### Fixed
+
+- **A long server URL no longer overflows the boot box.** The default is 51
+  characters, so the very first thing an unconfigured user saw was misrendered.
+  Truncation keeps both ends, because the tail is what distinguishes one host
+  from another, and counts visible characters so ANSI codes survive intact.
+
 ## [0.2.0] - 2026-08-01
 
 **A COMPUTED VALUE CHANGED.** `score_backtest` can return a different `verdict`

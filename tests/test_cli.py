@@ -179,6 +179,101 @@ def test_offline_names_the_host_and_the_half_that_still_works():
     assert "sweep" in out.stdout, "offline must point at the half that needs no server"
 
 
+# ── the boot screen ────────────────────────────────────────────────────────
+
+
+def test_python_dash_m_works_without_the_console_script_on_path():
+    """THE ENTRY POINT THAT ALWAYS EXISTS.
+
+    The console script lives in the venv's Scripts/bin directory and is on PATH
+    only while that venv is activated, so a fresh `pip install -e .` followed by
+    `alphaengine` gives "command not found" — which reads as a broken install.
+    `python -m alphaengine` needs no PATH entry at all.
+    """
+    out = subprocess.run(
+        [sys.executable, "-m", "alphaengine", "version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert out.stdout.startswith("alphaengine ")
+
+
+def test_the_banner_is_suppressed_when_stdout_is_not_a_tty():
+    """A CI log wants a transcript, not an ANSI painting."""
+    out = subprocess.run(
+        [sys.executable, "-m", "alphaengine", "version"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "▁" not in out.stdout  # no block glyphs
+    assert "╭" not in out.stdout  # no box corner
+    assert len(out.stdout.strip().splitlines()) == 1
+
+
+def test_boot_never_prints_the_caller_s_data(capsys, monkeypatch):
+    """THE ONE THAT MATTERS ON THIS SCREEN.
+
+    A boot banner that echoes the first rows of somebody's price series puts
+    their data in the scrollback, in any recording of the session, and in any
+    screenshot they paste into a ticket. Shape only — never values.
+    """
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    secret = 1234.5678
+    cli.boot(
+        "https://example.invalid",
+        project="research.momentum",
+        data={"AAPL": [secret] * 100, "MSFT": [secret] * 100},
+        keyed=True,
+    )
+    printed = capsys.readouterr().out
+    assert "1234" not in printed, "a price reached the boot screen"
+    assert "AAPL" not in printed, "a ticker reached the boot screen"
+    assert "2 series" in printed, "the SHAPE should still be reported"
+
+
+def test_boot_warns_when_there_is_no_key(capsys, monkeypatch):
+    """Discovered at boot it costs nothing; discovered mid-run it costs the run."""
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    cli.boot("https://example.invalid", project=None, data=None, keyed=False)
+    printed = capsys.readouterr().out
+    assert "QUANTOS_API_KEY" in printed
+
+
+def test_a_long_server_url_does_not_overflow_the_box(monkeypatch):
+    """The default URL is 51 characters and broke the box on a fresh install —
+    the first thing an unconfigured user would ever see, misrendered."""
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    rows = [("server", "https://alpha-backend-production-51df.up.railway.app")]
+    lines = cli._boxed(rows, width=62)
+    widths = {cli._visible_len(ln) for ln in lines}
+    assert widths == {62}, f"box lines are ragged: {sorted(widths)}"
+
+
+def test_fit_keeps_both_ends_because_the_tail_identifies_the_host():
+    got = cli._fit("https://alpha-backend-production-51df.up.railway.app", 30)
+    assert cli._visible_len(got) == 30
+    assert got.startswith("https://")
+    assert got.endswith("railway.app")
+
+
+def test_fit_preserves_colour_codes():
+    """Truncation counts VISIBLE characters; an escape sequence costs no width
+    and must survive intact or the rest of the line inherits the colour."""
+    coloured = "\033[32m" + "x" * 80 + "\033[0m"
+    got = cli._fit(coloured, 10)
+    assert cli._visible_len(got) == 10
+    assert got.startswith("\033[32m") and got.endswith("\033[0m")
+
+
+def test_the_two_marks_are_the_same_width():
+    """They sit on consecutive lines and the text after them must start at the
+    same column, or the comparison reads as a misprint."""
+    assert len(cli._PLATEAU_U) == len(cli._EDGE_U)
+    assert len(cli._PLATEAU_A) == len(cli._EDGE_A)
+
+
 def test_the_parser_offers_the_documented_commands():
     p = cli.build_parser()
     for argv in (["version"], ["workflows"], ["run", "validate_study"]):
