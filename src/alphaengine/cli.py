@@ -750,6 +750,140 @@ def _report(run: Any) -> int:
     return 1
 
 
+NEWLINE = chr(10)
+
+
+def _extract_flags(line: str) -> tuple[str, list[str]]:
+    """Pull `--data x` / `--universe y` / `--project z` out of any line.
+
+    Returns (prose, flags). The prose is what the agent sees, so
+    `screen my book --universe sp100` asks about the book and loads sp100,
+    rather than asking a model to interpret a flag as part of a question.
+
+    Only the three data flags. Anything else stays in the prose: a sentence
+    containing "--" is more likely to be a sentence than a mistyped flag, and
+    stripping tokens a user meant to say is worse than passing one through.
+    """
+    parts = line.split()
+    prose: list[str] = []
+    flags: list[str] = []
+    i = 0
+    while i < len(parts):
+        tok = parts[i]
+        if tok in ("--data", "--universe", "--project") and i + 1 < len(parts):
+            flags += [tok, parts[i + 1]]
+            i += 2
+            continue
+        prose.append(tok)
+        i += 1
+    return " ".join(prose), flags
+
+
+def _universe_named_in(question: str, session: Any) -> str | None:
+    """A universe of the caller's OWN that the question names.
+
+    DETERMINISTIC AND NO MODEL CALL. "screen my sp100 universe" against a
+    portal holding `sp100` is a substring match, and spending an inference on it
+    would be slower, less reliable, and impossible to explain when it went wrong.
+
+    Matched against the user's own registered names ONLY, so this can never
+    invent a universe -- it either recognises something they own or returns
+    nothing. Longest match wins, so `sp500-ex-financials` beats `sp500`.
+    """
+    try:
+        rows = session.universes()
+    except Exception:  # noqa: BLE001 - offline or unauthenticated, not an error here
+        return None
+
+    low = question.lower()
+    hits = [
+        str(u.get("name"))
+        for u in rows
+        if str(u.get("name") or "").lower() in low and str(u.get("name") or "")
+    ]
+    return max(hits, key=len) if hits else None
+
+
+def _split_run(rest: str) -> tuple[str, list[str]]:
+    """`screen_universe --universe sp100` -> ("screen_universe", [...]).
+
+    Deliberately not argparse: the first token is a workflow name and the tail
+    may be anything, and argparse would exit the PROCESS on a bad flag rather
+    than the line. A session that dies on a typo is worse than one that says so.
+    """
+    parts = rest.split()
+    if not parts:
+        return "", []
+    return parts[0], parts[1:]
+
+
+def _apply_flags(flags: list[str], session: Any, data: Any, backtest_fn: Any) -> tuple[Any, Any]:
+    """Load whatever `--data` / `--universe` / `--project` name, mid-session.
+
+    THE SAME FLAGS THE SHELL TAKES, because a message that prints
+    `--universe sp100` must mean the same thing wherever it is read. Anything
+    else is a tool teaching two dialects of itself.
+    """
+    ns = argparse.Namespace(project=None, data=None, universe=None)
+    i = 0
+    unknown: list[str] = []
+    while i < len(flags):
+        f = flags[i]
+        value = flags[i + 1] if i + 1 < len(flags) else None
+        if f in ("--data", "--universe", "--project") and value:
+            setattr(ns, f[2:], value)
+            i += 2
+            continue
+        unknown.append(f)
+        i += 1
+    if unknown:
+        raise ValueError(
+            f"I do not know {' '.join(unknown)} in a session. "
+            "Here `run` takes --data, --universe and --project."
+        )
+    loaded, fn = resolve_data(ns, session)
+    return (loaded if loaded is not None else data), (fn or backtest_fn)
+
+
+def _describe_source(flags: list[str]) -> str | None:
+    for key in ("--universe", "--data", "--project"):
+        if key in flags:
+            i = flags.index(key)
+            if i + 1 < len(flags):
+                return f"{key[2:]}:{flags[i + 1]}"
+    return None
+
+
+def _repl_gap(gap: str, name: str) -> str:
+    """Preflight's message, rewritten for somebody who is already inside.
+
+    THE LOOP THIS BREAKS. The shell-form message printed
+    `alphaengine run screen_universe --universe <name>` -- correct advice at a
+    shell prompt and nonsense at this one, where `alphaengine` is not a word the
+    session knows. A user typed it, the session read it as a question, the agent
+    chose the same workflow, and preflight printed the same message again.
+
+    A tool that answers a refusal with instructions it cannot itself accept has
+    stopped being a tool.
+    """
+    head = gap.splitlines()[0]
+    return (
+        f"  {head}"
+        + NEWLINE
+        + NEWLINE
+        + "  From here, load it first:"
+        + NEWLINE
+        + "      universe <name>            a universe you registered in the portal"
+        + NEWLINE
+        + "      data <file.csv>            a local file"
+        + NEWLINE
+        + f"      run {name} --universe <name>"
+        + NEWLINE
+        + NEWLINE
+        + "  `workflows` lists what each one needs."
+    )
+
+
 def _near_verb(word: str) -> str | None:
     """The command `word` was probably meant to be, or None.
 
@@ -1466,6 +1600,23 @@ def cmd_repl(args: argparse.Namespace) -> int:
             return 0
         if not line:
             continue
+        # FLAGS FIRST, WHATEVER THE LINE IS. A command and a sentence are not
+        # alternatives here: `screen my book --universe sp100` is both, and the
+        # prompt used to force a choice between them.
+        line, inline_flags = _extract_flags(line)
+        if inline_flags:
+            try:
+                data, backtest_fn = _apply_flags(inline_flags, session, data, backtest_fn)
+                loaded_project = _describe_source(inline_flags) or loaded_project
+            except (ProjectError, ValueError) as exc:
+                say(red(str(exc)))
+                continue
+            except Exception as exc:  # noqa: BLE001 - a server refusal, said plainly
+                say(red(str(exc)))
+                continue
+            if not line.strip():
+                continue  # the flags WERE the instruction
+
         verb, _, rest = line.partition(" ")
         rest = rest.strip()
 
@@ -1502,6 +1653,26 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 say("")
                 say(dim("  `key quantos` · `key anthropic` · `key openai` to enter one now"))
             continue
+        if verb in ("universe", "data"):
+            if not rest:
+                say(red(f"{verb} what? try `{verb} <name>`."))
+                continue
+            try:
+                ns = argparse.Namespace(
+                    project=None,
+                    data=rest if verb == "data" else None,
+                    universe=rest if verb == "universe" else None,
+                )
+                loaded, _ = resolve_data(ns, session)
+                if loaded is not None:
+                    data = loaded
+                    loaded_project = f"{verb}:{rest}"
+            except (ProjectError, ValueError) as exc:
+                say(red(str(exc)))
+            except Exception as exc:  # noqa: BLE001 - a server refusal, said plainly
+                say(red(str(exc)))
+            continue
+
         if verb == "project":
             try:
                 data, backtest_fn = load_project(rest)
@@ -1521,6 +1692,29 @@ def cmd_repl(args: argparse.Namespace) -> int:
         # `run` means the scripted path ONLY when what follows is a single token
         # naming a real workflow. Anything else is a request, which is what the
         # user obviously meant.
+        if verb == "run" and rest:
+            name, flags = _split_run(rest)
+            if name and _is_workflow(session, name):
+                # FLAGS WORK IN HERE NOW. They are the same flags the shell
+                # takes, because a message that says "--universe sp100" has to
+                # mean the same thing wherever it is read -- and the preflight
+                # message says exactly that.
+                try:
+                    if flags:
+                        data, backtest_fn = _apply_flags(flags, session, data, backtest_fn)
+                        loaded_project = _describe_source(flags) or loaded_project
+                except (ProjectError, ValueError) as exc:
+                    say(red(str(exc)))
+                    continue
+
+                gap = preflight(session.workflows(), name, data=data, backtest_fn=backtest_fn)
+                if gap:
+                    say(yellow(_repl_gap(gap, name)))
+                    continue
+                rest = name
+            else:
+                rest = rest if not flags else name
+
         if verb == "run" and rest and (" " not in rest) and _is_workflow(session, rest):
             try:
                 last = session.open(rest, data=data, backtest_fn=backtest_fn)
@@ -1567,6 +1761,19 @@ def cmd_repl(args: argparse.Namespace) -> int:
         # model chooses each step from what the server permits, and two runs can
         # differ. Both are legitimate; conflating them is not, so the run says
         # which one it was.
+        # A QUESTION MAY NAME ITS OWN DATA. "screen my sp100 universe" is a
+        # complete instruction: the workflow is inferable and so is the data.
+        # Requiring the user to load it first, in a separate command, is the
+        # fork this whole change exists to remove.
+        if data is None:
+            named = _universe_named_in(line, session)
+            if named:
+                try:
+                    data, backtest_fn = _apply_flags(["--universe", named], session, data, backtest_fn)
+                    loaded_project = f"universe:{named}"
+                except Exception as exc:  # noqa: BLE001
+                    say(dim(f"  ({named} is registered and could not be loaded: {exc})"))
+
         last = _ask(session, url, line, data=data, backtest_fn=backtest_fn) or last
 
 

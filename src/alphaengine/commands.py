@@ -204,6 +204,36 @@ COMMANDS: tuple[Command, ...] = (
     ),
     # ── bring your data ────────────────────────────────────────────────────
     Command(
+        verb="universe",
+        group="data",
+        args="<name>",
+        scope="repl",
+        purpose="load a universe you registered in the portal, with its closes",
+        body=(
+            "Brings the closes you stored with it. That is your own upload, "
+            "decrypted back to your own account, not us fetching market data.\n\n"
+            "Registered without prices? Then it holds symbols only and there is "
+            "nothing to fetch; use `data` with a file instead.\n\n"
+            "This verb exists because `project` was the only way to load anything "
+            "mid-session, so somebody with a universe in the portal had to quit and "
+            "restart with a flag to reach it."
+        ),
+        examples=("universe sp100", "run screen_universe --universe sp100"),
+    ),
+    Command(
+        verb="data",
+        group="data",
+        args="<file.csv>",
+        scope="repl",
+        purpose="load a local CSV without leaving the session",
+        body=(
+            "Wide (date,AAPL,MSFT), long (date,symbol,close), or a single series. "
+            "The shape is decided by the header and nothing else; a file it cannot "
+            "place says so and names all three rather than guessing."
+        ),
+        examples=("data prices.csv", "run size_position --data returns.csv"),
+    ),
+    Command(
         verb="project",
         group="data",
         args="<module>",

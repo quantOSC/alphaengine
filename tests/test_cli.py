@@ -1060,3 +1060,142 @@ def test_a_server_error_that_is_not_a_404_is_not_swallowed():
     session = _Portal(_SP, status=503)
     with pytest.raises(ServerError):
         cli.resolve_data(_args(universe="sp500"), session)
+
+
+# ── the session accepts what its own messages tell you to type ─────────────
+#
+# THE LOOP, reported from a real terminal and the worst kind of bug there is.
+# `run screen_universe --universe sp100` inside the session was not parsed as a
+# run at all: the guard wanted a SINGLE TOKEN after `run`, so anything with a
+# flag fell through to the agent as a question. The agent then correctly chose
+# screen_universe, preflight correctly refused for want of data, and the refusal
+# printed `alphaengine run screen_universe --universe <name>` as the remedy --
+# which is what had just been typed.
+#
+# A tool that answers a refusal with instructions it cannot itself accept has
+# stopped being a tool.
+
+
+def test_run_with_flags_is_a_run_and_not_a_question():
+    """The parse that was missing."""
+    assert cli._split_run("screen_universe --universe sp100") == (
+        "screen_universe",
+        ["--universe", "sp100"],
+    )
+    assert cli._split_run("screen_universe") == ("screen_universe", [])
+    assert cli._split_run("") == ("", [])
+
+
+def test_the_session_loads_a_universe_from_a_run_flag():
+    session = _Portal(_SP, series=_PRICES)
+    data, _ = cli._apply_flags(["--universe", "sp500"], session, None, None)
+    assert set(data) == {"AAPL", "MSFT", "NVDA"}
+
+
+def test_the_session_loads_a_file_from_a_run_flag(tmp_path):
+    p = tmp_path / "p.csv"
+    p.write_text("date,AAPL,MSFT" + chr(10) + "2026-01-01,1,2" + chr(10), encoding="utf-8")
+    data, _ = cli._apply_flags(["--data", str(p)], _Portal(_SP), None, None)
+    assert set(data) == {"AAPL", "MSFT"}
+
+
+def test_a_flag_the_session_does_not_know_says_which_it_takes():
+    """And does not exit the process. A session that dies on a typo is worse
+    than one that says so."""
+    with pytest.raises(ValueError) as e:
+        cli._apply_flags(["--nope", "x"], _Portal(_SP), None, None)
+    assert "--universe" in str(e.value) and "--data" in str(e.value)
+
+
+def test_the_refusal_speaks_the_session_s_language_not_the_shell_s():
+    """THE LOOP-BREAKER. Inside the session `alphaengine` is not a word the
+    prompt knows, so printing shell syntax sent the user round again."""
+    gap = "screen_universe needs `universe`, and none was loaded." + chr(10) + "  more"
+    out = cli._repl_gap(gap, "screen_universe")
+
+    assert "universe <name>" in out
+    assert "data <file.csv>" in out
+    assert "run screen_universe --universe" in out
+    # The one thing it must NOT say in here.
+    assert "alphaengine run" not in out
+
+
+def test_the_source_is_named_so_the_status_line_can_show_it():
+    assert cli._describe_source(["--universe", "sp100"]) == "universe:sp100"
+    assert cli._describe_source(["--data", "p.csv"]) == "data:p.csv"
+    assert cli._describe_source([]) is None
+
+
+# ── language and commands are one input, not two modes ────────────────────
+#
+# The prompt FORKED: a known verb ran a command, anything else went to the
+# agent. So `screen my sp100 universe --data prices.csv` was a question with
+# noise on the end, and there was no way to say a sentence AND point at data in
+# the same breath. Every plain-English request therefore died at preflight, for
+# want of data the sentence had already named.
+
+
+def test_flags_come_out_of_any_line_and_the_prose_survives():
+    prose, flags = cli._extract_flags("screen my book for high rsi --universe sp100")
+    assert prose == "screen my book for high rsi"
+    assert flags == ["--universe", "sp100"]
+
+
+def test_a_line_with_no_flags_is_untouched():
+    prose, flags = cli._extract_flags("what changed since yesterday")
+    assert prose == "what changed since yesterday"
+    assert flags == []
+
+
+def test_flags_alone_are_a_complete_instruction():
+    prose, flags = cli._extract_flags("--universe sp100")
+    assert prose == ""
+    assert flags == ["--universe", "sp100"]
+
+
+def test_a_sentence_containing_dashes_is_not_mangled():
+    """Only the three data flags are extracted. A sentence with `--` in it is
+    far more likely to be a sentence than a mistyped flag, and stripping tokens
+    somebody meant to say is worse than passing one through."""
+    prose, flags = cli._extract_flags("compare pre-- and post-- earnings drift")
+    assert flags == []
+    assert "pre--" in prose
+
+
+class _Named:
+    def __init__(self, names):
+        self._names = names
+
+    def universes(self):
+        return [{"id": f"u_{n}", "name": n, "symbols": ["AAPL"]} for n in self._names]
+
+
+def test_a_question_that_names_your_own_universe_finds_it():
+    """DETERMINISTIC, NO MODEL CALL. Spending an inference on a substring match
+    would be slower, less reliable, and impossible to explain when it went
+    wrong."""
+    s = _Named(["sp100", "sp500"])
+    assert cli._universe_named_in("screen my sp100 universe for high RSI", s) == "sp100"
+
+
+def test_the_longest_match_wins():
+    s = _Named(["sp500", "sp500-ex-financials"])
+    assert cli._universe_named_in("deep dive sp500-ex-financials", s) == "sp500-ex-financials"
+
+
+def test_it_can_only_recognise_a_universe_you_own():
+    """Never invents one. It either matches something registered or returns
+    nothing, so a question mentioning a name you do not have cannot conjure it."""
+    s = _Named(["sp100"])
+    assert cli._universe_named_in("screen the russell 2000", s) is None
+
+
+def test_an_unreachable_portal_is_not_an_error_here():
+    """Offline or unauthenticated is a normal state at this point in the line,
+    and turning it into a raise would break asking a question without a key."""
+
+    class _Down:
+        def universes(self):
+            raise RuntimeError("offline")
+
+    assert cli._universe_named_in("screen my sp100 universe", _Down()) is None

@@ -110,6 +110,8 @@ distinction is the whole of the data boundary below.
 
 | Command | Does | Where |
 |---|---|---|
+| `universe <name>` | load a universe you registered in the portal, with its closes | session |
+| `data <file.csv>` | load a local CSV without leaving the session | session |
 | `project <module>` | load `data` and `backtest_fn` from a module of yours | session |
 
 ### Session

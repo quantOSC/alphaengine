@@ -12,3 +12,19 @@ build/
 htmlcov/
 .DS_Store
 .civenv/
+
+# CREDENTIALS. Nothing here was ignored, so a `.env` created while working on
+# this repo would have been committed to a PUBLIC repository with nothing to
+# stop it. Found in a sweep 2026-08-02; no secret was ever actually committed.
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# Artifacts the package itself writes. `r.save()` drops study.json in the
+# working directory by default, so running the example in a clone leaves one
+# staged for the next `git add .`.
+study.json
+*.study.json
