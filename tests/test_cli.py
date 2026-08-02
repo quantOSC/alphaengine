@@ -613,3 +613,87 @@ def test_returns_under_a_key_on_a_mapping_still_counts_as_returns():
 def test_nothing_loaded_still_names_every_gap():
     gap = cli.preflight(_SHAPED, "screen_universe", data=None, backtest_fn=None)
     assert gap and "universe" in gap and "--project" in gap
+
+
+# ── the run answers the question it was asked ──────────────────────────────
+#
+# Before this the agentic path produced step narration and a verdict and NO
+# ANSWER, because no call had saying anything as its job. `_answer` is that
+# call, and these hold the two properties that make it safe to have: it is a
+# separate pass from the one that drove the run, and it cannot quote a figure
+# the run did not produce.
+
+
+class _Answered:
+    def __init__(self, figures, stopped=None):
+        self.figures = figures
+        self.stopped = stopped
+
+
+_FIGS = {
+    "sweep": {"n_trials": 240, "n_trials_source": "derived_from_grid"},
+    "validate": {"deflated_sharpe": 0.61},
+}
+
+
+def test_the_answer_reaches_the_screen(capsys):
+    cli._answer("did it hold up?", _Answered(_FIGS), lambda _p: "A deflated Sharpe of 0.61 over 240 trials.")
+    out = capsys.readouterr().out
+    assert "0.61" in out and "240" in out
+
+
+def test_the_caveats_reach_the_screen_with_it(capsys):
+    """Every honesty control in this product exists to survive exactly this last
+    step. An answer rendered without them has reintroduced the failure."""
+    run = _Answered({"v": {"n_trials": None, "n_trials_source": "not_recorded", "sharpe_annualized": 1.4}})
+    cli._answer("good?", run, lambda _p: "The annualised Sharpe is 1.4.")
+    out = capsys.readouterr().out
+    assert "1.4" in out
+    assert "trial count" in out.lower()
+    assert "inconclusive" in out
+
+
+def test_an_invented_figure_is_named_rather_than_swallowed(capsys):
+    """A user who sees nothing cannot tell the guard firing from a model that
+    had nothing to say."""
+    cli._answer("how did it do?", _Answered(_FIGS), lambda _p: "A Sharpe of 3.99.")
+    out = capsys.readouterr().out
+    assert "refused" in out.lower()
+    assert "3.99" in out
+
+
+def test_a_stop_is_printed_as_written_and_the_model_is_not_asked(capsys):
+    def never(_prompt):
+        raise AssertionError("the model was asked to rewrite a refusal")
+
+    cli._answer(
+        "is it good?",
+        _Answered({"resolve": {"n_obs": 30}}, stopped={"reason": "The series is too short."}),
+        never,
+    )
+    assert "too short" in capsys.readouterr().out
+
+
+def test_the_prompt_carries_the_figures_and_not_the_workflow():
+    seen = {}
+
+    def capture(prompt):
+        seen["p"] = prompt
+        return "240 trials ran."
+
+    cli._answer("what happened?", _Answered(_FIGS), capture)
+    assert "sweep.n_trials = 240" in seen["p"]
+    assert "what happened?" in seen["p"]
+    for leak in ("stage", "gate", "threshold"):
+        assert leak not in seen["p"].lower()
+
+
+def test_a_broken_model_loses_the_answer_and_not_the_run(capsys):
+    """The figures are already printed by `_report`, so the worst case is the
+    behaviour that shipped before this existed."""
+
+    def boom(_prompt):
+        raise RuntimeError("model is down")
+
+    cli._answer("?", _Answered(_FIGS), boom)
+    assert "No answer could be composed" in capsys.readouterr().out

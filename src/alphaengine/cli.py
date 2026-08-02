@@ -72,6 +72,7 @@ import argparse
 import importlib
 import os
 import sys
+from collections.abc import Callable
 from typing import Any
 
 __all__ = ["main"]
@@ -968,11 +969,92 @@ def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -
         return None
 
     _report(run)
+    _answer(request, run, think)
     # SAID AT THE END, WHERE IT TRAVELS WITH THE RESULT. A study whose path was
     # chosen by a model is a different object from one whose path was fixed in
     # advance, and the difference has to reach whoever reads the artifact.
     say(dim("  The model chose this path. Another run may take a different one."))
     return run
+
+
+_ANSWER_PROMPT = """You are answering a question from a research run that has already finished.
+
+The question: {question}
+
+Everything the run recorded, as name -> number:
+{figures}
+
+Write two or three sentences answering the question from these figures.
+
+RULES, and the first is enforced after you reply:
+  * Quote ONLY numbers that appear above. An answer citing anything else is
+    thrown away, not corrected.
+  * If the figures do not answer the question, say that plainly. "The run did
+    not measure that" is a good answer.
+  * No recommendation the figures do not support. No hedging language added to
+    a clear result, and no confidence added to an unclear one.
+  * Do not restate caveats about missing or unrecorded values; those are added
+    afterwards from the figures themselves and would be duplicated."""
+
+
+def _answer(request: str, run: Any, think: Callable[[str], str]) -> None:
+    """The synthesis pass, which is the difference between a loop running and
+    the system answering.
+
+    A SEPARATE CALL FROM THE ONE THAT DROVE THE RUN, on purpose. `pick` returns
+    an index into what the server offered, and that narrowness is the safety
+    property; widening it to also produce prose would trade the guarantee for a
+    convenience. This asks a different question with a different contract, and
+    the contract is enforced by `synthesize` rather than by the prompt: an answer
+    quoting a figure the run did not produce is REFUSED.
+
+    A failure here loses the answer and keeps the run. The figures are already
+    printed above by `_report`, so the worst case is the behaviour that shipped
+    before this existed.
+    """
+    from .agent import UncitedFigure, synthesize
+
+    def write(question: str, figures: dict[str, Any]) -> str:
+        lines = "\n".join(f"  {k} = {v}" for k, v in sorted(figures.items()))
+        return think(_ANSWER_PROMPT.format(question=question, figures=lines or "  (none)"))
+
+    try:
+        answer = synthesize(request, run, write=write)
+    except UncitedFigure as exc:
+        # NAMED, NOT SWALLOWED. This is the guard working, and a user who sees
+        # nothing cannot tell it from a model that had nothing to say.
+        say(yellow(f"  The answer was refused: {exc}"))
+        return
+    except Exception:  # noqa: BLE001
+        say(dim("  No answer could be composed from this run."))
+        return
+
+    say("")
+    for line in _wrap(answer.text):
+        say(f"  {line}")
+    # THE CAVEATS ARE NOT OPTIONAL AND ARE NOT STYLED AWAY. Each one is a claim
+    # the figures cannot support without it, and every honesty control in this
+    # product exists to survive exactly this last step to the screen.
+    for caveat in answer.caveats:
+        for i, line in enumerate(_wrap(caveat, width=74)):
+            say(dim(f"    {'· ' if i == 0 else '  '}{line}"))
+    if answer.verdict_ceiling:
+        say(dim(f"    {DOT} No claim above {bold(answer.verdict_ceiling)} is supportable here."))
+
+
+def _wrap(text: str, width: int = 76) -> list[str]:
+    """Hard-wrap without importing textwrap for one call site."""
+    out: list[str] = []
+    line = ""
+    for word in str(text).split():
+        if line and len(line) + 1 + len(word) > width:
+            out.append(line)
+            line = word
+        else:
+            line = f"{line} {word}".strip()
+    if line:
+        out.append(line)
+    return out
 
 
 def cmd_repl(args: argparse.Namespace) -> int:
