@@ -401,19 +401,68 @@ def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest
         known = ", ".join(str(r.get("name")) for r in catalogue) or "none"
         return f"No workflow called {name!r}. This workspace offers: {known}"
 
-    have = {"data": data is not None, "backtest_fn": backtest_fn is not None}
+    have = {
+        "data": data is not None,
+        "backtest_fn": backtest_fn is not None,
+        # SHAPE, not only presence. `universe` and `returns` are both "data", and
+        # a caller who brings the wrong one used to get an UnsupportedOp from
+        # inside a running workflow — the same failure this function exists to
+        # prevent, arriving one level finer.
+        "universe": _looks_like_universe(data),
+        "returns": _looks_like_returns(data),
+    }
     missing = [r for r in (row.get("requires") or []) if not have.get(str(r), True)]
     if not missing:
         return None
 
     what = " and ".join(f"`{m}`" for m in missing)
+    shapes = "\n".join(f"  {_SHAPES[m]}" for m in missing if m in _SHAPES)
     return (
         f"{name} needs {what} from your project module, and none was loaded.\n"
-        f"  Point at a module of yours that defines them:\n"
+        + (shapes + "\n" if shapes else "")
+        + f"  Point at a module of yours that defines them:\n"
         f"      alphaengine run {name} --project research.momentum\n"
         f"  Or try it on the built-in example first:\n"
         f"      alphaengine run {name} --project alphaengine.demo"
     )
+
+
+#: What each named input has to look like, said once, in the message that fires.
+#: Guidance the CALLER needs about their own module — not a description of what
+#: the workflow does with it, which stays server side.
+_SHAPES = {
+    "universe": "`data` is a universe: {symbol: prices}, prices being closes, {date: close}, or OHLC rows.",
+    "returns": (
+        "`data` is a return series: a sequence of per-period returns, or a mapping with them under `returns`."
+    ),
+    "backtest_fn": "`backtest_fn` is your own simulator; we orchestrate and measure, you simulate.",
+}
+
+
+def _looks_like_universe(data: Any) -> bool:
+    """A non-empty mapping of symbol -> something sequence-like.
+
+    Deliberately shallow. This is a pre-run courtesy, not a validator: the
+    executor still refuses properly, and a check that tried to be exhaustive here
+    would reject a legitimate frame-like object it had never heard of.
+    """
+    if not isinstance(data, dict) or not data:
+        return False
+    if any(key in data for key in ("returns", "pnl")):
+        return False
+    first = next(iter(data.values()), None)
+    return isinstance(first, (list, tuple, dict)) or hasattr(first, "__len__")
+
+
+def _looks_like_returns(data: Any) -> bool:
+    if data is None:
+        return False
+    if isinstance(data, dict):
+        return any(data.get(key) is not None for key in ("returns", "pnl"))
+    try:
+        return len(data) > 0 and not isinstance(data, (str, bytes))
+    except TypeError:
+        return False
 
 
 def _drive(run: Any, *, quiet: bool = False) -> None:

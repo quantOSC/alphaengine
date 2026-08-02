@@ -568,3 +568,48 @@ def test_an_unpublished_requirement_is_not_invented():
     """A server that publishes no `requires` must not be second-guessed by the
     client — the contract is the server's to state."""
     assert cli.preflight([{"name": "x", "version": "1"}], "x", data=None, backtest_fn=None) is None
+
+
+# ── preflight knows the SHAPE, not only the presence ───────────────────────
+#
+# `universe` and `returns` are both "data". A caller who brings the wrong one
+# used to discover it from an UnsupportedOp raised inside a running workflow,
+# which is the failure preflight exists to prevent, arriving one level finer.
+
+_SHAPED = [
+    {"name": "screen_universe", "version": "1.0.0", "requires": ["universe"]},
+    {"name": "size_position", "version": "1.0.0", "requires": ["returns"]},
+]
+
+
+def test_a_return_series_pointed_at_a_screen_is_refused_up_front():
+    gap = cli.preflight(_SHAPED, "screen_universe", data=[0.01, -0.02, 0.03], backtest_fn=None)
+    assert gap and "universe" in gap
+    # And it says what the shape should be, once, in the message that fires.
+    assert "{symbol: prices}" in gap
+
+
+def test_a_universe_pointed_at_a_sizing_workflow_is_refused_up_front():
+    universe = {"AAPL": [1.0, 2.0], "MSFT": [3.0, 4.0]}
+    gap = cli.preflight(_SHAPED, "size_position", data=universe, backtest_fn=None)
+    assert gap and "returns" in gap
+    assert "per-period returns" in gap
+
+
+def test_the_right_shape_passes_without_comment():
+    assert cli.preflight(_SHAPED, "screen_universe", data={"AAPL": [1.0, 2.0]}, backtest_fn=None) is None
+    assert cli.preflight(_SHAPED, "size_position", data=[0.01, -0.02], backtest_fn=None) is None
+
+
+def test_returns_under_a_key_on_a_mapping_still_counts_as_returns():
+    """The two spellings a research module actually uses. A mapping is not
+    automatically a universe."""
+    for key in ("returns", "pnl"):
+        assert cli.preflight(_SHAPED, "size_position", data={key: [0.01, 0.02]}, backtest_fn=None) is None
+        gap = cli.preflight(_SHAPED, "screen_universe", data={key: [0.01, 0.02]}, backtest_fn=None)
+        assert gap, f"a {key} mapping is not a universe"
+
+
+def test_nothing_loaded_still_names_every_gap():
+    gap = cli.preflight(_SHAPED, "screen_universe", data=None, backtest_fn=None)
+    assert gap and "universe" in gap and "--project" in gap
