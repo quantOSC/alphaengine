@@ -45,6 +45,12 @@ jobs:
       - run: ruff check src tests
       - run: ruff format --check src tests
       - run: mypy src
+      # THE FIFTH COPY GUARD. The command list lived in three hand-maintained
+      # places and none of them agreed: `--data` and `--universe` shipped and
+      # appeared in one. It is generated from `commands.py` now, and this fails
+      # the build when the README falls behind rather than letting a stale list
+      # quietly tell somebody a feature does not exist.
+      - run: python scripts/gen_docs.py --check
 
   # The numbers this library returns are a public contract once published: a
   # study written today has to reproduce in two years. This job exists to make

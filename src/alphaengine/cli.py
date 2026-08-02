@@ -95,9 +95,13 @@ from __future__ import annotations
 import argparse
 import importlib
 import os
+import pathlib
 import sys
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover - annotations only
+    from .commands import Command
 
 __all__ = ["main"]
 
@@ -389,21 +393,31 @@ def cmd_workflows(args: argparse.Namespace) -> int:
         say("The server offers no workflows.")
         return 0
 
+    # WHAT EACH ONE ANSWERS, in the reader's words. The server publishes a name,
+    # a version and an input contract -- correctly, since anything more would be
+    # workflow knowledge crossing the wire -- but a name is not a choice. These
+    # sentences live here, on the client, for exactly that reason: they describe
+    # what a reader is picking between and disclose nothing about how it works.
+    ANSWERS = {
+        "screen_universe": "what in my universe is worth a look",
+        "validate_study": "does this result hold up once you count the tries",
+        "size_position": "how much of it should I hold",
+        "monitor_sleeve": "has anything crossed a line",
+    }
+
+    width = max(len(str(r.get("name"))) for r in rows)
+    say("")
     for r in rows:
+        name = str(r.get("name"))
+        needs = ", ".join(str(n) for n in (r.get("requires") or [])) or "nothing"
         # REPRODUCIBILITY IS STATED UP FRONT, not discovered when two runs of
         # the same question disagree. Same reasoning as a trial count that says
         # whether it was derived or asserted.
-        repro = r.get("reproducible")
-        tag = (
-            green("reproducible")
-            if repro
-            else yellow(f"exploratory {DOT} two runs may differ")
-            if repro is False
-            else dim("")
-        )
-        needs = r.get("requires") or []
-        need_s = dim("  needs " + ", ".join(str(n) for n in needs)) if needs else dim("  needs nothing")
-        say(f"  {bold(str(r.get('name')))}  {dim(str(r.get('version')))}  {tag}{need_s}")
+        repro = green("reproducible") if r.get("reproducible") else yellow("may differ")
+        say(f"  {bold(name.ljust(width))}   {ANSWERS.get(name, '')}")
+        say(f"  {' ' * width}   {dim('needs ' + needs)}  {DOT}  {repro}  {dim(str(r.get('version')))}")
+    say("")
+    say(dim("  alphaengine run <name> --data prices.csv   ") + dim(f"{DOT}  `commands run` for the flags"))
     return 0
 
 
@@ -736,23 +750,188 @@ def _report(run: Any) -> int:
     return 1
 
 
-HELP = """
-  <anything else>      ASK IN PLAIN ENGLISH. Your model picks a workflow and
-                       drives it, choosing each step from what the server
-                       permits. Exploratory: two runs may differ.
-                       Needs ANTHROPIC_API_KEY or OPENAI_API_KEY in this shell.
+def _near_verb(word: str) -> str | None:
+    """The command `word` was probably meant to be, or None.
 
-  run <name>           run one workflow exactly as written   (--label, --input k=v)
-                       Scripted: the same data gives the same path.
-  workflows            what the server offers, and which are reproducible
-  project <module>     load `data` and `backtest_fn` from your module
-  keys                 what is unlocked, and what would unlock the rest
-  logout               remove stored credentials from this machine
-  key <which>          enter one now (quantos | anthropic | openai), session only
-  status               the current run
-  help                 this
-  quit                 leave
-"""
+    Deliberately conservative: a shared prefix of three, or one character out.
+    Anything looser starts hijacking real questions, and a research prompt whose
+    input is second-guessed is worse than one that occasionally wastes a call.
+    """
+    from .commands import COMMANDS
+
+    verbs = [c.verb for c in COMMANDS if c.verb.isalpha()]
+    if word in verbs or len(word) < 3:
+        return None
+
+    best, best_d = None, 99
+    for v in verbs:
+        d = _edits(word.lower(), v)
+        # EDIT DISTANCE, NOT A SHARED PREFIX. A prefix rule misses the most
+        # common typo there is -- `wrokflows` transposes the second and third
+        # letters, so it shares no prefix with `workflows` at all and sailed
+        # through to the agent as a research question.
+        if d < best_d:
+            best, best_d = v, d
+    # Two edits on a word of five or more, one on anything shorter. Looser than
+    # that starts hijacking real questions, and a research prompt that
+    # second-guesses its input is worse than one that occasionally wastes a call.
+    limit = 2 if len(word) >= 5 else 1
+    return best if best_d <= limit else None
+
+
+def _edits(a: str, b: str) -> int:
+    """Levenshtein distance. Small enough to write than to depend on."""
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _help_text() -> str:
+    """The short list, rendered from the one declaration.
+
+    This was a hand-maintained string and it went stale the way every third copy
+    of a list does: `--data` and `--universe` shipped and never appeared here,
+    `demo` existed and was not mentioned. See `commands.py` for why there is now
+    one source and four renderings.
+    """
+    from .commands import COMMANDS
+
+    width = max(len(_signature(c)) for c in COMMANDS if c.scope in ("both", "repl"))
+    lines = [""]
+    for c in COMMANDS:
+        if c.scope not in ("both", "repl"):
+            continue
+        lines.append(f"  {bold(_signature(c).ljust(width))}   {dim(c.purpose)}")
+    lines += ["", "  " + dim("`commands` for the full directory, `commands <verb>` for one.")]
+    return "\n".join(lines)
+
+
+def _signature(c: Command) -> str:
+    return f"{c.verb} {c.args}".strip()
+
+
+def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str:
+    """One dim line above the prompt: what is loaded, and what can run.
+
+    THE QUESTION THIS ANSWERS is the one asked most often inside a session and
+    the one the boot screen answers once and then scrolls away: is my data in?
+    Without it a user types `keys` or `status` purely to re-read state that was
+    printed two minutes ago, and a run that silently had no data looked
+    identical to one that did -- which is exactly how "the S&P 500 is a handful
+    of names" happened.
+
+    Deliberately ONE LINE and dim. It sits above every prompt, so anything
+    louder becomes wallpaper and stops being read at all.
+    """
+    from .model import available_models
+
+    bits: list[str] = []
+
+    if data is None:
+        bits.append(dim("no data"))
+    else:
+        try:
+            n = len(data)
+        except TypeError:
+            n = None
+        label = project or "loaded"
+        bits.append(green(f"{label}" + (f" {DOT} {n} series" if n is not None else "")))
+
+    bits.append(green("signed in") if keyed else dim("not signed in"))
+
+    models = available_models()
+    bits.append(dim(models[0][0]) if models else dim("no model"))
+
+    return "  " + dim(f" {DOT} ").join(bits)
+
+
+def cmd_commands(args: argparse.Namespace) -> int:
+    """The directory. What you can type, grouped by the question it answers.
+
+    ── WHY A DIRECTORY AND NOT A LONGER HELP ──────────────────────────────────
+
+    The boot screen answers "where am I" — which workspace, signed in, what is
+    loaded. NOTHING answered "what can I do". A reader who does not already know
+    the verb cannot find it, and a flat list of thirteen makes them scan for a
+    word they have not learned yet.
+
+    Grouped by question, because that is the order somebody has them in: how do
+    I start, how do I do the work, how do I get my data in, how do I manage the
+    session.
+    """
+    from .commands import DATA_DOORS, GROUPS, by_verb, in_group
+
+    wanted = (getattr(args, "verb", None) or "").strip()
+    if wanted:
+        return _one_command(by_verb(wanted), wanted)
+
+    say("")
+    for group, title in GROUPS:
+        rows = in_group(group)
+        if not rows:
+            continue
+        say("  " + bold(title))
+        width = max(len(_signature(c)) for c in rows)
+        for c in rows:
+            where = "" if c.scope == "both" else dim(f"  ({c.scope})")
+            say(f"    {_signature(c).ljust(width)}   {dim(c.purpose)}{where}")
+        say("")
+
+    # THE DOORS GET THEIR OWN BLOCK. They are flags rather than verbs, and they
+    # are the single thing people are most often hunting for when they open a
+    # directory at all — "how do I give it my data" is not answerable from a
+    # list of verbs.
+    say("  " + bold("Getting your data in"))
+    width = max(len(d) for d, _ in DATA_DOORS)
+    for door, what in DATA_DOORS:
+        say(f"    {door.ljust(width)}   {dim(what)}")
+    say("")
+    say("  " + dim("`commands <verb>` for one in full."))
+    return 0
+
+
+def _one_command(c: Command | None, wanted: str) -> int:
+    from .commands import COMMANDS, FLAGS
+
+    if c is None:
+        near = [x.verb for x in COMMANDS if x.verb.startswith(wanted[:3])]
+        say(red(f"No command called {wanted!r}."))
+        if near:
+            say(dim("  Did you mean: " + ", ".join(near) + "?"))
+        say(dim("  `commands` lists everything."))
+        return 2
+
+    say("")
+    say("  " + bold(_signature(c)))
+    say("  " + dim(c.purpose))
+    if c.scope != "both":
+        say("  " + dim(f"Works in: {c.scope}"))
+    if c.body:
+        say("")
+        for para in c.body.split("\n\n"):
+            for line in _wrap(para.replace("\n", " "), width=72):
+                say("  " + line)
+            say("")
+    if c.flags:
+        say("  " + bold("Flags"))
+        width = max(len(f"{FLAGS[f].name} {FLAGS[f].takes}".strip()) for f in c.flags)
+        for f in c.flags:
+            flag = FLAGS[f]
+            sig = f"{flag.name} {flag.takes}".strip()
+            say(f"    {sig.ljust(width)}   {dim(flag.purpose)}")
+        say("")
+    if c.examples:
+        say("  " + bold("Examples"))
+        for ex in c.examples:
+            say("    " + cyan(ex))
+        say("")
+    return 0
 
 
 # ── the capability ladder ──────────────────────────────────────────────────
@@ -1261,9 +1440,26 @@ def cmd_repl(args: argparse.Namespace) -> int:
 
     boot(url, project=args.project, data=data, keyed=bool(args.key or os.environ.get(_ENV_KEY)))
 
+    # Named on the status line so "is my data in, and from where" is answerable
+    # without running a command. `--universe` and `--data` are recorded too,
+    # because "loaded" without a source is the half-answer that let a run with
+    # no data look like a run with data.
+    loaded_project = args.project or (
+        f"universe:{args.universe}"
+        if getattr(args, "universe", None)
+        else (f"file:{pathlib.Path(args.data).name}" if getattr(args, "data", None) else None)
+    )
     last = None
     while True:
         try:
+            # Reprinted each turn rather than once at boot: a `project` or `key`
+            # mid-session changes it, and a status line that can be stale is
+            # worse than none.
+            say(
+                status_line(
+                    url, data=data, project=loaded_project, keyed=bool(os.environ.get(_ENV_KEY) or args.key)
+                )
+            )
             line = input(bold("> ")).strip()
         except (EOFError, KeyboardInterrupt):
             say("")
@@ -1276,7 +1472,10 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if verb in ("quit", "exit"):
             return 0
         if verb == "help":
-            say(HELP)
+            say(_help_text())
+            continue
+        if verb in ("commands", "?"):
+            cmd_commands(argparse.Namespace(verb=rest))
             continue
         if verb == "workflows":
             cmd_workflows(args)
@@ -1306,6 +1505,7 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if verb == "project":
             try:
                 data, backtest_fn = load_project(rest)
+                loaded_project = rest
                 say(dim(f"project: {rest}"))
             except ProjectError as exc:
                 say(red(str(exc)))
@@ -1341,6 +1541,17 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if verb == "run" and not rest:
             say(red("run what? try `workflows`, or just describe what you want."))
             continue
+
+        # A TYPO IS NOT A RESEARCH QUESTION. Falling through to the agent is
+        # the right default, and it means one mistyped verb costs a model call
+        # and returns something unrelated to what was asked. A single-word input
+        # that is nearly a command is almost certainly that command.
+        if " " not in line:
+            near = _near_verb(line)
+            if near:
+                say(dim(f"  No command {line!r}. Did you mean `{near}`?"))
+                say(dim("  Type it again as a sentence if you meant it as a question."))
+                continue
 
         # ── ANYTHING ELSE IS A REQUEST, NOT A TYPO ─────────────────────────
         #
@@ -1396,6 +1607,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("workflows", parents=[common], help="list what the server offers")
     sub.add_parser("demo", parents=[common], help="run the built-in example, offline")
     sub.add_parser("logout", parents=[common], help="remove stored credentials")
+    d = sub.add_parser("commands", parents=[common], help="every command, grouped")
+    d.add_argument("verb", nargs="?", help="expand one command in full")
 
     r = sub.add_parser("run", parents=[common], help="run one workflow to completion")
     r.add_argument("workflow")
@@ -1450,6 +1663,7 @@ def main(argv: list[str] | None = None) -> int:
         "workflows": cmd_workflows,
         "demo": cmd_demo,
         "logout": cmd_logout,
+        "commands": cmd_commands,
         "run": cmd_run,
         None: cmd_repl,  # bare `alphaengine` opens a session
     }[args.command]
