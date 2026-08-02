@@ -751,7 +751,6 @@ def enter_key(which: str) -> bool:
         return False
 
     say(dim(f"  {what}"))
-    say(dim("  Held for this session only. Nothing is written to disk."))
     try:
         value = getpass.getpass("  paste it (input hidden): ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -769,7 +768,14 @@ def enter_key(which: str) -> bool:
     # into a shell profile or a committed .env, which is strictly worse than a
     # mode-0600 file this tool manages and can delete.
     try:
-        keep = input(bold("  Stay signed in on this machine? ") + dim("[Y/n] ")).strip().lower()
+        keep = (
+            input(
+                bold("  Stay signed in on this machine? ")
+                + dim("[Y/n]  (yes writes a 0600 file to your user profile) ")
+            )
+            .strip()
+            .lower()
+        )
     except (EOFError, KeyboardInterrupt):
         say("")
         keep = "n"
