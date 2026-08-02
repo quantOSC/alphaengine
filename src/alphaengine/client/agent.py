@@ -60,9 +60,14 @@ class Think(Protocol):
 
     Deliberately the weakest possible interface. Everything else in this module
     is built so that this is all a caller has to supply.
+
+    THE `/` IS LOad-BEARING. Without it the protocol requires the parameter to
+    be *named* `prompt`, so an ordinary `lambda p: ...` or a
+    `Callable[[str], str]` fails to satisfy it — mypy caught exactly that. We do
+    not care what the caller names their argument; positional-only says so.
     """
 
-    def __call__(self, prompt: str) -> str: ...
+    def __call__(self, prompt: str, /) -> str: ...
 
 
 class AgentRefusal(RuntimeError):
@@ -252,7 +257,6 @@ def _parse_choice(raw: str, n: int) -> tuple[int, str]:
 
     if not 0 <= idx < n:
         raise AgentRefusal(
-            f"the model chose step {idx}, which was not offered (0..{n - 1}). "
-            "It cannot invent a step."
+            f"the model chose step {idx}, which was not offered (0..{n - 1}). It cannot invent a step."
         )
     return idx, why

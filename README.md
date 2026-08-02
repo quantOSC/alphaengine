@@ -281,9 +281,19 @@ CI fails if a pinned value moves.
 ## Development
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e '.[factors]' pytest ruff
-.venv/bin/python -m pytest -q
-.venv/bin/python -m ruff check .
+python -m venv .venv && .venv/bin/pip install -e '.[dev,factors]'
+```
+
+CI runs five gates. Run all of them before pushing — `ruff check` and
+`ruff format` are different tools with different opinions, and passing one
+says nothing about the other:
+
+```bash
+python -m ruff check src tests
+python -m ruff format --check src tests
+python -m mypy src
+python -m pytest
+python -m pytest tests -m golden -q      # the frozen figures
 ```
 
 ## Licence

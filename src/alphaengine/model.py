@@ -81,11 +81,13 @@ def build_think(model: str | None = None) -> tuple[Callable[[str], str], str]:
 def _anthropic(key: str, model: str) -> Callable[[str], str]:
     def think(prompt: str) -> str:
         try:
-            import anthropic  # imported here: never at package import time
+            # `type: ignore` because the SDK is deliberately NOT a dependency —
+            # see the module docstring. mypy is right that it may be absent;
+            # the ImportError below is the handling.
+            import anthropic  # type: ignore[import-not-found]  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover - depends on the machine
             raise NoModelConfigured(
-                "ANTHROPIC_API_KEY is set but the SDK is not installed: "
-                "pip install anthropic"
+                "ANTHROPIC_API_KEY is set but the SDK is not installed: pip install anthropic"
             ) from exc
         client = anthropic.Anthropic(api_key=key)
         msg = client.messages.create(
@@ -101,7 +103,7 @@ def _anthropic(key: str, model: str) -> Callable[[str], str]:
 def _openai(key: str, model: str) -> Callable[[str], str]:
     def think(prompt: str) -> str:
         try:
-            import openai  # imported here: never at package import time
+            import openai  # type: ignore[import-not-found]  # noqa: PLC0415
         except ImportError as exc:  # pragma: no cover - depends on the machine
             raise NoModelConfigured(
                 "OPENAI_API_KEY is set but the SDK is not installed: pip install openai"
