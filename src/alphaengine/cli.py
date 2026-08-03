@@ -195,6 +195,53 @@ def say(*parts: str) -> None:
 _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if _UNICODE_OK else "|/-\\"
 
 
+class _Streamer:
+    """Print model tokens as they arrive, wrapped and indented.
+
+    A raw token feed writes past the right margin and interleaves badly with
+    every other line this file prints, so the text is buffered to word
+    boundaries and emitted a line at a time under the same `agent ·` gutter the
+    rest of the run uses. The result reads as part of the transcript rather than
+    as something escaping from underneath it.
+
+    Nothing is echoed when stdout is not a TTY: a CI log wants the decision and
+    the figures, not the deliberation that produced them.
+    """
+
+    def __init__(self, width: int = 74) -> None:
+        self.width = width
+        self._line = ""
+        self._on = False
+
+    def __enter__(self) -> _Streamer:
+        self._on = _tty()
+        self._line = ""
+        return self
+
+    def write(self, chunk: str) -> None:
+        if not self._on:
+            return
+        for piece in str(chunk).split("\n"):
+            if piece == "" and self._line:
+                self._flush()
+                continue
+            for word in piece.split(" "):
+                if not word:
+                    continue
+                if len(self._line) + len(word) + 1 > self.width:
+                    self._flush()
+                self._line = f"{self._line} {word}".strip()
+
+    def _flush(self) -> None:
+        if self._line:
+            say(f"  {dim('agent  ' + DOT)}  {dim(self._line)}")
+            self._line = ""
+
+    def __exit__(self, *exc: object) -> None:
+        self._flush()
+        self._on = False
+
+
 class Working:
     """An in-place status line for work that blocks, with the elapsed time.
 
@@ -643,8 +690,28 @@ def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, An
         # two flags fight where the user can see neither winning.
         data = data if data is not None else loaded
 
-    if getattr(args, "universe", None):
-        data = _narrow_to_universe(session, args.universe, data)
+    universe = getattr(args, "universe", None)
+
+    # ── A SLEEVE BRINGS ITS OWN DATA ───────────────────────────────────────
+    #
+    # `--sleeve macro` is enough; `--sleeve macro --universe "sp100 universe"`
+    # was the shape before this, and saying which book and which data as two
+    # separate arguments on every command is what kept them separate concepts.
+    # A sleeve IS a book plus what it runs on.
+    #
+    # AN EXPLICIT `--universe` STILL WINS, and silently is not an option — the
+    # line below says which universe was used and why, because a run that
+    # quietly substituted the sleeve's default for the one somebody typed is
+    # the kind of helpfulness nobody can debug.
+    if universe is None and getattr(args, "sleeve", None):
+        sleeve = _sleeve_row(session, args.sleeve) or {}
+        from_sleeve = sleeve.get("universe_id")
+        if from_sleeve:
+            universe = str(from_sleeve)
+            say(dim(f"  sleeve {sleeve.get('name')} {DOT} runs on its registered universe"))
+
+    if universe:
+        data = _narrow_to_universe(session, universe, data)
 
     return data, backtest_fn
 
@@ -750,7 +817,7 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
     return kept
 
 
-def _resolve_sleeve(session: Any, wanted: str | None) -> str | None:
+def _sleeve_row(session: Any, wanted: str | None) -> dict[str, Any] | None:
     """A sleeve name or id -> the workspace id a run is opened against.
 
     Resolved by NAME because that is what a person types. A pod calls it
@@ -792,7 +859,13 @@ def _resolve_sleeve(session: Any, wanted: str | None) -> str | None:
     if match is None:
         known = ", ".join(str(s.get("name")) for s in rows) or "none"
         raise DataShapeError(f"no sleeve called {wanted!r}. Yours: {known}")
-    return str(match.get("id"))
+    return dict(match)
+
+
+def _resolve_sleeve(session: Any, wanted: str | None) -> str | None:
+    """The workspace id a run is opened against, or None."""
+    row = _sleeve_row(session, wanted)
+    return str(row.get("id")) if row else None
 
 
 def _publish_signals(session: Any, run: Any, *, workspace_id: str | None, label: str | None) -> None:
@@ -981,10 +1054,7 @@ def _report(run: Any) -> int:
     say("")
     if run.status == "closed":
         say(green("Closed.") + " " + dim(str((run.artifact or {}).get("workflow", ""))))
-        art = run.artifact or {}
-        for k, v in art.items():
-            if k != "workflow" and not isinstance(v, (dict, list)):
-                say(f"  {k}: {bold(str(v))}")
+        _render_artifact(run.artifact or {})
         return 0
     if run.status == "stopped":
         stop = run.stopped or {}
@@ -998,6 +1068,163 @@ def _report(run: Any) -> int:
         return 1
     say(dim(f"Run left {run.status}. `alphaengine` can resume it: {run.run_id}"))
     return 1
+
+
+#: How many shortlist rows the terminal prints before saying how many it kept
+#: back. The whole list is on the account and in the signal file; a screen that
+#: scrolls a hundred names past somebody is not showing them more, it is showing
+#: them less of what matters.
+_SHOWN_ROWS = 15
+
+#: What a figure MEANS, and the unit it is in. A run reports `n_evaluated`; a
+#: quant reads "measured". Anything not named here prints under its own key
+#: rather than being guessed at — a wrong label on a right number is worse than
+#: no label, and this file already found one shipped ("Observations" on a count
+#: of names).
+_FIGURE_LABELS: dict[str, tuple[str, str]] = {
+    "universe_size": ("universe", "names"),
+    "n_evaluated": ("measured", "names"),
+    "n_passing": ("passed", "names"),
+    "n_insufficient": ("too little history", "names"),
+    "n_returned": ("returned", "names"),
+    "deflated_sharpe": ("deflated Sharpe", ""),
+    "sharpe_annualized": ("Sharpe (ann.)", ""),
+    "n_trials": ("trials", ""),
+    "pbo": ("PBO", ""),
+    "target_weight": ("target weight", "of capital"),
+    "cvar_pct": ("CVaR", "%"),
+}
+
+
+def _num(value: Any, places: int = 2) -> str:
+    """A number at the precision it actually carries.
+
+    The portal shipped `173.719419` and `50.1046` into a table a PM reads. Six
+    decimals on a percentage is not precision, it is noise wearing precision's
+    clothes — the underlying series has nothing like that resolution, and the
+    digits crowd out the two that matter.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, int) or float(value).is_integer():
+        return f"{int(value):,}"
+    return f"{float(value):,.{places}f}"
+
+
+def _head(key: str) -> str:
+    """A column head that fits without being amputated.
+
+    `volatility_pct` truncated to a fixed width reads `volatility_p`, which is
+    the same class of sloppiness as six-decimal percentages: the machine's field
+    name leaking through where a person's word belongs. The unit suffix carries
+    no information a quant needs in a header — every column here is a percent or
+    a price and the values say which.
+    """
+    for suffix in ("_pct", "_percent", "_ratio"):
+        if key.endswith(suffix):
+            key = key[: -len(suffix)]
+            break
+    return key.replace("_", " ")[:14]
+
+
+def _render_artifact(art: dict[str, Any]) -> None:
+    """Show what the run FOUND, not that it finished.
+
+    ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+
+    The previous version iterated the artifact and printed any value that was
+    not a dict or a list. The artifact is `{workflow, emits, figures,
+    citations}` — every value is a dict or a list — so it printed NOTHING. A
+    closed screen said `Closed. screen_universe@1.0.0` and stopped, while the
+    twenty names it had just ranked sat in the portal. The quant who ran it
+    could not see their own result without opening a browser.
+
+    ORDER IS THE RANKING, THEN WHAT QUALIFIES IT. The list is what was asked
+    for; the counts are what make it readable. Printing the counts first buries
+    the answer, and printing the list alone hands over a shortlist with no
+    denominator — which is the exact shape of a survivorship claim.
+    """
+    figures = art.get("figures") or {}
+    if not isinstance(figures, dict):
+        return
+
+    # Flatten one level: figures are keyed by stage (or by op), and a reader
+    # wants the values, not the graph. Later stages win, which is right — a
+    # stage that restates a figure is restating it more completely.
+    flat: dict[str, Any] = {}
+    for value in figures.values():
+        if isinstance(value, dict):
+            flat.update(value)
+
+    rows = flat.get("rows")
+    if isinstance(rows, list) and rows:
+        _render_rows(rows, flat)
+
+    shown = [
+        (label, flat[key], unit)
+        for key, (label, unit) in _FIGURE_LABELS.items()
+        if isinstance(flat.get(key), (int, float)) and not isinstance(flat.get(key), bool)
+    ]
+    if shown:
+        say("")
+        for label, value, unit in shown:
+            tail = f" {dim(unit)}" if unit else ""
+            say(f"  {dim(label.ljust(20))}{bold(_num(value))}{tail}")
+
+    # SAID EVEN THOUGH THE TABLE IS RIGHT THERE. A shortlist of 20 means one
+    # thing when 480 names were measured and rejected, and quite another when
+    # 480 could not be measured at all.
+    insufficient = flat.get("n_insufficient")
+    if isinstance(insufficient, int) and insufficient > 0:
+        say("")
+        say(
+            yellow(f"  {insufficient} names")
+            + dim(" had too little history to measure and are not in this ranking.")
+        )
+    if flat.get("truncated"):
+        say(dim("  More names passed than were returned; this is the top of them."))
+
+
+def _render_rows(rows: list[Any], flat: dict[str, Any]) -> None:
+    """The shortlist, as a table a person can read down.
+
+    The ranked metric is named in the header and NOT repeated as a second
+    column. The portal shipped `SCORE` and `RETURN PCT` side by side holding the
+    identical number, because `score` IS the ranked metric — two columns, one
+    fact, and a reader left wondering which one to trust.
+    """
+    rank_by = str(flat.get("rank_by") or "score")
+    metrics: list[str] = []
+    for row in rows:
+        if isinstance(row, dict):
+            for key, value in row.items():
+                if (
+                    key not in ("symbol", "ticker", "score", "_passed")
+                    and key not in metrics
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                ):
+                    metrics.append(key)
+    metrics = metrics[:3]
+
+    say("")
+    say("  " + dim(f"ranked by {rank_by}") + dim(f"  {DOT}  {len(rows)} names"))
+    head = f"  {'#':>3}  {'symbol':<8}{_head(rank_by):>14}"
+    for m in metrics:
+        head += f"{_head(m):>14}"
+    say(dim(head))
+
+    for i, row in enumerate(rows[:_SHOWN_ROWS], start=1):
+        if not isinstance(row, dict):
+            continue
+        symbol = str(row.get("symbol") or row.get("ticker") or "?")
+        line = f"  {i:>3}  {bold(symbol.ljust(8))}{_num(row.get('score')):>14}"
+        for m in metrics:
+            line += f"{_num(row.get(m)):>14}"
+        say(line)
+
+    if len(rows) > _SHOWN_ROWS:
+        say(dim(f"       … {len(rows) - _SHOWN_ROWS} more in the filed signal file"))
 
 
 NEWLINE = chr(10)
@@ -1499,6 +1726,41 @@ def account_data_lines(session: Any) -> list[str]:
     return out
 
 
+def account_sleeve_lines(session: Any) -> list[str]:
+    """The books this account can run against, if it is in a pod.
+
+    Listed beside the universes because they answer the same question — what
+    can I point this at — and because a sleeve carrying its own universe makes
+    the two ONE choice rather than two. An account with no pod gets nothing
+    here rather than an empty heading: working solo is the ordinary case, not a
+    setup step somebody skipped.
+    """
+    if session is None:
+        return []
+    try:
+        rows = session.sleeves()
+    except Exception:  # noqa: BLE001 - offline, or no pod: say nothing
+        return []
+    if not rows:
+        return []
+
+    out = ["  " + dim("Sleeves in your pod")]
+    for s in rows[:6]:
+        name = str(s.get("name") or "")
+        stage = str(s.get("stage") or "")
+        lit = bool(s.get("universe_id"))
+        shape = stage + (f" {DOT} brings its own data" if lit else "")
+        label = bold(name.ljust(22)) if lit else dim(name.ljust(22))
+        out.append(
+            f"  {green(ON) if lit else dim(OFF)} {label}"
+            + dim(shape.ljust(30))
+            + dim(f"--sleeve {_quoted(name)}")
+        )
+    if len(rows) > 6:
+        out.append("  " + dim(f"  and {len(rows) - 6} more"))
+    return out
+
+
 def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any = None) -> None:
     """The opening screen. State first, decoration second.
 
@@ -1561,11 +1823,11 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
     # from disk. A run that knows its data does not need a directory of the
     # account's, and the call is not worth making to print something ignorable.
     if keyed and data is None:
-        lines = account_data_lines(session)
-        if lines:
-            say("")
-            for line in lines:
-                say(line)
+        for lines in (account_data_lines(session), account_sleeve_lines(session)):
+            if lines:
+                say("")
+                for line in lines:
+                    say(line)
 
     say("")
     # THE ONE LINE THAT IS NOT STATUS. It is here because it is the thing most
@@ -1736,8 +1998,14 @@ def _ask(
     from .client import AgentDriver, AgentRefusal, Offline, ServerError
     from .model import NoModelConfigured, build_think
 
+    # THE REASONING ARRIVES AS IT IS WRITTEN. The model call is the longest
+    # pause in the product, and a spinner over it says only "still going". What
+    # a quant actually wants to see is the argument being made for the workflow
+    # about to run on their data — so the tokens go straight to the screen,
+    # dimmed and indented to read as the machine thinking rather than as output.
+    streamer = _Streamer()
     try:
-        think, label = build_think()
+        think, label = build_think(on_token=streamer.write)
     except NoModelConfigured as exc:
         say(yellow(str(exc)))
         return None
@@ -1767,11 +2035,7 @@ def _ask(
     )
     options = [{"op": w.get("name", "?"), "params": {"agency": w.get("agency")}} for w in catalogue]
     try:
-        # The single longest silence in the product: an inference call over the
-        # user's own key, with no streaming and nothing to report until it
-        # returns. Watched, because "is it thinking or is it hung" was
-        # unanswerable from the screen.
-        with Working(dim("reading the catalogue"), plain="reading the catalogue"):
+        with streamer:
             index = driver.pick(options)
         chosen = catalogue[index]
     except AgentRefusal as exc:
@@ -1868,6 +2132,11 @@ def _answer(request: str, run: Any, think: Callable[[str], str]) -> None:
         lines = "\n".join(f"  {k} = {v}" for k, v in sorted(figures.items()))
         return think(_ANSWER_PROMPT.format(question=question, figures=lines or "  (none)"))
 
+    # WATCHED, NOT STREAMED, and the asymmetry with the reasoning above is the
+    # point: an answer can be REFUSED after it is generated, when it cites a
+    # figure the run did not produce. Streaming it would put text on the screen
+    # that the guard then throws away, which is worse than a wait — a reader who
+    # saw it will remember the number whether or not we retracted it.
     try:
         with Working(dim("composing the answer"), plain="composing the answer"):
             answer = synthesize(request, run, write=write)

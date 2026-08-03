@@ -85,12 +85,39 @@ class Run:
     stopped: Figures | None = None
     artifact: Figures | None = None
 
+    #: WHAT THIS RUN HAS PRODUCED SO FAR, and it has to live here.
+    #:
+    #: Three consumers read `run.figures` — the agent's step choice
+    #: (`AgentDriver._ask`), the numbers an answer may cite (`figures_of`) and
+    #: the caveats attached to it (`caveats_of`) — and NOTHING DEFINED IT. All
+    #: three quietly received `{}` from `getattr(run, "figures", {})`. So the
+    #: agent chose every step blind, and the synthesis pass was handed no
+    #: numbers at all, reached for one in the question ("the s&p 500") and was
+    #: refused by the citation guard. The guard was the only part of that chain
+    #: working, and it read to the user as the product breaking.
+    #:
+    #: FILLED FROM THE STEPS THIS MACHINE EXECUTED, never from the server. The
+    #: directive deliberately carries no figures — `Directive`'s absences are
+    #: load-bearing, and figures are keyed by stage, which is the shape of the
+    #: graph. But the client COMPUTES these: `executor.execute` returns them.
+    #: Keying by `op` rather than by stage keeps it that way, because an op is
+    #: public vocabulary and a stage name is not.
+    figures: Figures = field(default_factory=dict)
+
     def _absorb(self, directive: Figures) -> None:
         self.status = directive.get("status", "open")
         self.permitted = list(directive.get("permitted") or [])
         self.selection = directive.get("selection") or "any"
         self.stopped = directive.get("stop")
         self.artifact = directive.get("artifact")
+        # The sealed artifact carries the run's figures as the SERVER assembled
+        # them — including values it derived that this machine never saw. Merged
+        # at close so the final answer cites the complete record rather than
+        # only the half this process happened to compute.
+        if isinstance(self.artifact, dict):
+            sealed = self.artifact.get("figures")
+            if isinstance(sealed, dict):
+                self.figures.update(sealed)
 
     def resume(self) -> Run:
         self._absorb(self.session._get(f"/api/harness/runs/{self.run_id}"))
@@ -106,6 +133,11 @@ class Run:
         attempt_id = uuid.uuid4().hex
         try:
             figures = self.executor.execute(step["op"], step.get("params"))
+            # RECORDED BEFORE THE ROUND TRIP, so an agent asked to choose the
+            # next step sees what the last one produced. That ordering is the
+            # whole point: a chooser handed an empty dict is not choosing.
+            if isinstance(figures, dict):
+                self.figures[str(step["op"])] = figures
             body = {"step_id": step["step_id"], "attempt_id": attempt_id, "figures": figures}
         except UnsupportedOp as exc:
             # Report the failure rather than dropping it. A silently skipped step

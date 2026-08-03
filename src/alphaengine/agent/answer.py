@@ -245,9 +245,31 @@ def _traceable(value: float, known: dict[str, float]) -> bool:
     return False
 
 
-def check_citations(text: str, known: dict[str, float]) -> None:
-    """Raise if the text quotes a number the run did not produce."""
-    invented = [v for v in _numbers_in(text) if not _traceable(v, known)]
+def check_citations(text: str, known: dict[str, float], question: str = "") -> None:
+    """Raise if the text quotes a number the run did not produce.
+
+    ── A NUMBER THE ASKER SUPPLIED IS NOT AN INVENTED FIGURE ───────────────────
+
+    Asked about "the s&p 500", a model naturally writes "the S&P 500" back, and
+    this refused the entire answer for citing 500. The guard was right that 500
+    was not a figure and wrong that it was a claim: repeating the name of the
+    thing you were asked about is not quoting a result.
+
+    So numbers appearing VERBATIM IN THE QUESTION are traceable to the question.
+    The guard stays exactly as strict for everything the model produced itself,
+    which is the only place it was ever protecting anything — an invented Sharpe
+    is a claim about the world, and "S&P 500" is a noun.
+
+    Deliberately the question's numbers and not a general allowlist of round
+    ones: 500 is a perfectly plausible fabricated observation count, and it
+    should still be refused when nobody asked about 500 of anything.
+    """
+    from_question = set(_numbers_in(question)) if question else set()
+    invented = [
+        v
+        for v in _numbers_in(text)
+        if not _traceable(v, known) and not any(abs(q - v) <= _TOLERANCE for q in from_question)
+    ]
     if invented:
         raise UncitedFigure(
             f"the answer cited {invented} and this run produced no such figure. "
@@ -293,5 +315,5 @@ def synthesize(question: str, run: Any, *, write: Writer) -> Answer:
         )
 
     text = str(write(question, dict(known)))
-    check_citations(text, known)
+    check_citations(text, known, question)
     return Answer(text=text, cited=known, caveats=caveats, verdict_ceiling=ceiling)

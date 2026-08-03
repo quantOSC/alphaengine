@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from typing import Any
 
 __all__ = ["available_models", "build_think", "NoModelConfigured"]
 
@@ -88,11 +89,27 @@ def _sdk_present(label: str) -> bool:
         return False
 
 
-def build_think(model: str | None = None) -> tuple[Callable[[str], str], str]:
+def build_think(
+    model: str | None = None,
+    on_token: Callable[[str], None] | None = None,
+) -> tuple[Callable[[str], str], str]:
     """Return `(think, label)` for the first provider that is actually USABLE.
 
     `think` is `(prompt) -> text` and nothing more, because that is the whole
     interface `AgentDriver` accepts.
+
+    ── `on_token` STREAMS, AND IT DOES NOT WIDEN THE SEAM ──────────────────
+
+    `on_token` is called with each chunk of text as it arrives. It is a
+    parameter of this BUILDER, not of `think`, on purpose: the public contract
+    is `(prompt: str, /) -> str` and it has to stay that, because a user's own
+    callable is passed straight into `AgentDriver` and adding a second parameter
+    would break every one of them. A model somebody else supplies simply does
+    not stream, which is correct — we cannot stream a function we do not own.
+
+    Streaming matters here beyond the animation: the call is the longest pause
+    in the product, and a non-streaming request with a large `max_tokens` risks
+    an HTTP timeout on exactly the long answers worth waiting for.
 
     ── THE BUG THIS SHAPE FIXES ────────────────────────────────────────────
 
@@ -126,9 +143,9 @@ def build_think(model: str | None = None) -> tuple[Callable[[str], str], str]:
             continue
         chosen = model or os.environ.get("ALPHAENGINE_MODEL") or default
         if label == "anthropic":
-            return _anthropic(key, chosen), f"{label}/{chosen}"
+            return _anthropic(key, chosen, on_token), f"{label}/{chosen}"
         if label == "openai":
-            return _openai(key, chosen), f"{label}/{chosen}"
+            return _openai(key, chosen, on_token), f"{label}/{chosen}"
 
     if unusable:
         which = " or ".join(f"pip install {_SDK[label]}" for label in unusable)
@@ -148,7 +165,7 @@ def build_think(model: str | None = None) -> tuple[Callable[[str], str], str]:
     )
 
 
-def _anthropic(key: str, model: str) -> Callable[[str], str]:
+def _anthropic(key: str, model: str, on_token: Callable[[str], None] | None = None) -> Callable[[str], str]:
     def think(prompt: str) -> str:
         try:
             # No inline ignore. The SDK is deliberately NOT a dependency, so on
@@ -163,11 +180,29 @@ def _anthropic(key: str, model: str) -> Callable[[str], str]:
                 "ANTHROPIC_API_KEY is set but the SDK is not installed: pip install anthropic"
             ) from exc
         client = anthropic.Anthropic(api_key=key)
-        msg = client.messages.create(
-            model=model,
-            max_tokens=512,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        # `Any` because the two calls return different concrete types that the
+        # SDK does not unify — `Message` and `ParsedMessage[None]` — and the
+        # only thing read off either is the text blocks, which both carry.
+        msg: Any
+        if on_token is not None:
+            # `messages.stream` accumulates the message for us, so the streamed
+            # chunks are a SIDE CHANNEL for the screen and never the source of
+            # the returned text. Rebuilding the reply from chunks would make a
+            # dropped chunk a silently wrong answer rather than a visible error.
+            with client.messages.stream(
+                model=model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+            ) as stream:
+                for chunk in stream.text_stream:
+                    on_token(chunk)
+                msg = stream.get_final_message()
+        else:
+            msg = client.messages.create(
+                model=model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+            )
         # `getattr` rather than `b.text`. A response block is a union of a dozen
         # types and only TextBlock carries `.text` — reading the attribute
         # directly is a type error on every other member, and the runtime filter
@@ -179,7 +214,7 @@ def _anthropic(key: str, model: str) -> Callable[[str], str]:
     return think
 
 
-def _openai(key: str, model: str) -> Callable[[str], str]:
+def _openai(key: str, model: str, on_token: Callable[[str], None] | None = None) -> Callable[[str], str]:
     def think(prompt: str) -> str:
         try:
             import openai  # noqa: PLC0415  # see the anthropic import above
@@ -188,6 +223,21 @@ def _openai(key: str, model: str) -> Callable[[str], str]:
                 "OPENAI_API_KEY is set but the SDK is not installed: pip install openai"
             ) from exc
         client = openai.OpenAI(api_key=key)
+        if on_token is not None:
+            # No accumulating helper here, so the chunks ARE the answer and the
+            # join is the return value rather than a second source of truth.
+            parts: list[str] = []
+            for event in client.chat.completions.create(
+                model=model,
+                max_tokens=512,
+                messages=[{"role": "user", "content": prompt}],
+                stream=True,
+            ):
+                piece = (event.choices[0].delta.content or "") if event.choices else ""
+                if piece:
+                    parts.append(piece)
+                    on_token(piece)
+            return "".join(parts)
         out = client.chat.completions.create(
             model=model,
             max_tokens=512,
