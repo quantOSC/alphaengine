@@ -40,7 +40,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from .executor import Figures, Handler, StepExecutor, UnsupportedOp
+from .executor import Figures, Handler, StepExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +104,11 @@ class Run:
     #: public vocabulary and a stage name is not.
     figures: Figures = field(default_factory=dict)
 
+    #: What the last failed step said, for a caller that renders failures.
+    #: Cleared on the next success — this is display state, not the record;
+    #: the record is the server-side trace, which keeps every attempt.
+    last_error: str | None = None
+
     def _absorb(self, directive: Figures) -> None:
         self.status = directive.get("status", "open")
         self.permitted = list(directive.get("permitted") or [])
@@ -139,15 +144,22 @@ class Run:
             if isinstance(figures, dict):
                 self.figures[str(step["op"])] = figures
             body = {"step_id": step["step_id"], "attempt_id": attempt_id, "figures": figures}
-        except UnsupportedOp as exc:
-            # Report the failure rather than dropping it. A silently skipped step
-            # is a gap the server cannot see and the trace cannot explain.
+            self.last_error = None
+        except Exception as exc:  # noqa: BLE001 — reported, never swallowed; see below
+            # Report the failure rather than dropping it — OR crashing. A
+            # silently skipped step is a gap the server cannot see, and an
+            # exception that unwinds the whole loop turns one bad step into a
+            # traceback where a directive belongs. `UnsupportedOp` is the
+            # designed refusal; anything else is the caller's own code failing
+            # (their backtest_fn, their data's shape) and gets the same honest
+            # treatment: named, recorded in the trace, and re-offered once.
             body = {
                 "step_id": step["step_id"],
                 "attempt_id": attempt_id,
                 "ok": False,
                 "error": str(exc),
             }
+            self.last_error = str(exc)
         directive = self.session._post(f"/api/harness/runs/{self.run_id}/steps", body)
         self._absorb(directive)
         return directive

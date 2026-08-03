@@ -90,6 +90,13 @@ def _schema_version() -> str:
 
 
 def _n_obs(data: Any) -> int:
+    # A mapping is a CONTAINER of series, not a series: {"close": [...]},
+    # {"returns": [...]}, {symbol: rows}. Its observation count is the longest
+    # series it holds. `len(dict)` is its KEY count — which read the demo's
+    # 1,200-observation close series as one observation, and the resolve gate
+    # then refused an honest series as too short.
+    if isinstance(data, dict):
+        return max((_n_obs(v) for v in data.values()), default=0)
     try:
         return int(np.asarray(data, dtype=float).shape[0])
     except (TypeError, ValueError, IndexError):
@@ -246,7 +253,18 @@ class StepExecutor:
                 "compute.sweep needs your backtest function. Pass backtest_fn to "
                 "StepExecutor: we orchestrate and measure, you simulate."
             )
-        result = run_sweep(self.backtest_fn, params.get("grid") or {}, data=self.data)
+        grid = params.get("grid") or {}
+        if not grid:
+            # The grid IS the trial count — the denominator every deflated
+            # figure divides by — so it must come from the caller's project,
+            # never be invented here. Refuse with the fix rather than letting
+            # `sweep` raise a bare ValueError up through the run loop.
+            raise UnsupportedOp(
+                "compute.sweep got an empty grid, and the grid is the trial count. "
+                'Declare one in your project module, e.g. GRID = {"fast": [5, 10, 20], '
+                '"slow": [50, 100, 200]}. Every combination is one trial.'
+            )
+        result = run_sweep(self.backtest_fn, grid, data=self.data)
         ws["sweep"] = result  # the trial matrix stays here
 
         surface = result.surface()

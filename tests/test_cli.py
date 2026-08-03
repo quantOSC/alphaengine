@@ -91,6 +91,33 @@ def test_no_project_is_a_valid_state():
     assert cli.load_project(None) == (None, None)
 
 
+def test_a_project_s_declared_grid_is_recorded_for_the_run(tmp_path, monkeypatch):
+    """The grid is the caller's parameter space and the trial count is derived
+    from it. Until it travelled, `validate_study` received `grid={}` and the
+    sweep failed on the built-in example."""
+    (tmp_path / "grid_proj.py").write_text(
+        "data = [1.0, 2.0]\nGRID = {'fast': [5, 10], 'slow': [50]}\n"
+        "def backtest_fn(*, data, fast=1, slow=2):\n    return data\n"
+    )
+    (tmp_path / "gridless_proj.py").write_text("data = [1.0, 2.0]\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    cli.load_project("grid_proj")
+    assert cli.project_grid() == {"fast": [5, 10], "slow": [50]}
+    # A gridless module CLEARS the record — a stale grid from the previous
+    # project would attach the wrong parameter space to the next run.
+    cli.load_project("gridless_proj")
+    assert cli.project_grid() is None
+
+
+def test_the_shipped_demo_declares_the_grid_the_readme_documents():
+    from alphaengine import demo
+
+    cli.load_project("alphaengine.demo")
+    assert cli.project_grid() == demo.GRID
+
+
 # ── exit codes carry meaning ───────────────────────────────────────────────
 
 

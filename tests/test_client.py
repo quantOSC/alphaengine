@@ -40,6 +40,31 @@ def test_resolve_identifies_data_without_disclosing_it():
     assert other["hash"] != out["hash"]
 
 
+def test_resolve_counts_observations_not_keys_in_a_mapping():
+    """A mapping is a container of series; its n_obs is the longest one.
+
+    `len(dict)` is a KEY count: `{"close": [1200 obs]}` — the demo's own
+    project data — resolved as ONE observation, and the resolve gate then
+    refused an honest series as too short.
+    """
+    out = StepExecutor(data={"close": list(range(300))}).execute("data.resolve", {})
+    assert out["n_obs"] == 300
+    rows = {
+        "AAPL": [{"date": "d", "close": 1.0}] * 250,
+        "MSFT": [{"date": "d", "close": 2.0}] * 240,
+    }
+    assert StepExecutor(data=rows).execute("data.resolve", {})["n_obs"] == 250
+
+
+def test_sweep_refuses_an_empty_grid_instead_of_crashing():
+    """The grid is the trial count. An empty one is refused with the fix named,
+    not raised as a bare ValueError that unwinds the whole run loop."""
+    with pytest.raises(UnsupportedOp, match="GRID"):
+        executor().execute("compute.sweep", {"grid": {}})
+    with pytest.raises(UnsupportedOp, match="GRID"):
+        executor().execute("compute.sweep", {})
+
+
 def test_sweep_reports_figures_and_keeps_the_matrix_local():
     ex = executor()
     out = ex.execute("compute.sweep", {"grid": {"fast": [5, 10, 15], "slow": [50, 100]}})

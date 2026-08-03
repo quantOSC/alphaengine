@@ -94,6 +94,7 @@ from __future__ import annotations
 
 import argparse
 import importlib
+import json
 import os
 import pathlib
 import sys
@@ -183,6 +184,8 @@ ARROW = "→" if _UNICODE_OK else "->"
 #: yet" use the same pair, because they are answering the same question.
 ON = "●" if _UNICODE_OK else "*"
 OFF = "○" if _UNICODE_OK else "-"
+#: A failed step's marker.
+CROSS = "×" if _UNICODE_OK else "x"
 
 
 def say(*parts: str) -> None:
@@ -391,13 +394,31 @@ class ProjectError(RuntimeError):
     """The project module could not be loaded, or does not expose what a run needs."""
 
 
+#: The parameter grid the loaded project declared, if any. Set by
+#: `load_project`, read by `project_grid()` at the three places a run opens.
+#: The grid is the CALLER'S input — their parameter space, the thing the trial
+#: count is derived from — and until this existed it never left the module:
+#: `validate_study` received `grid={}` and the sweep crashed on it.
+_PROJECT_GRID: dict[str, Any] | None = None
+
+
+def project_grid() -> dict[str, Any] | None:
+    """The grid the last-loaded project module declared, or None."""
+    return _PROJECT_GRID
+
+
 def load_project(spec: str | None) -> tuple[Any, Any]:
     """Import the caller's module and take `data` / `backtest_fn` off it.
 
     The current directory goes on `sys.path` first, because the module being
     imported is the user's own project and not something installed. That is the
     normal shape of "run this against my repo".
+
+    A `GRID` (or `grid`) attribute is recorded too — see `project_grid`. It is
+    not part of the return shape because five call sites unpack a pair, and the
+    grid is consumed in exactly one place: opening a run.
     """
+    global _PROJECT_GRID
     if not spec:
         return None, None
 
@@ -414,6 +435,8 @@ def load_project(spec: str | None) -> tuple[Any, Any]:
 
     data = getattr(mod, "data", None)
     backtest_fn = getattr(mod, "backtest_fn", None)
+    grid = getattr(mod, "GRID", None) or getattr(mod, "grid", None)
+    _PROJECT_GRID = dict(grid) if isinstance(grid, dict) and grid else None
     if data is None and backtest_fn is None:
         raise ProjectError(
             f"{spec} exposes neither `data` nor `backtest_fn`.\n"
@@ -1036,10 +1059,22 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                 key = str(step.get("step_id"))
                 failures[key] = failures.get(key, 0) + 1
                 if not quiet:
-                    say(f"  {red('local  ' + DOT)}  {op} could not be executed here  {took}")
+                    # THE REASON, NOT JUST THE OP. "could not be executed here"
+                    # with no why sent people to the traceback that no longer
+                    # prints. The message came from the executor and was written
+                    # to be read.
+                    say(f"  {red('failed ' + CROSS)}  {bold(op)}  {took}")
+                    why = getattr(run, "last_error", None)
+                    if why:
+                        for line in str(why).splitlines():
+                            say(red(f"    {line}"))
                 if failures[key] >= 2:
                     run.status = "abandoned"
-                    run.stopped = {"reason": "step_failed", "op": op}
+                    run.stopped = {
+                        "reason": "step_failed",
+                        "op": op,
+                        "error": getattr(run, "last_error", None),
+                    }
                     return
             elif not quiet:
                 say(f"  {dim('server ' + ARROW)}  {bold(op)}  {took}")
@@ -1065,7 +1100,16 @@ def cmd_run(args: argparse.Namespace) -> int:
             say(red(f"--input expects key=value, got {pair!r}"))
             return 2
         k, v = pair.split("=", 1)
-        inputs[k] = v
+        # A value that reads as JSON travels as the STRUCTURE it spells, so
+        # `tolerances={"max_drawdown_pct": 20}` reaches the workflow as a
+        # mapping rather than a string it silently treats as no tolerances.
+        if v[:1] in "{[":
+            try:
+                inputs[k] = json.loads(v)
+            except ValueError:
+                inputs[k] = v
+        else:
+            inputs[k] = v
     if args.label:
         inputs["label"] = args.label
 
@@ -1078,6 +1122,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             say("")
             say(yellow(gap))
             return 2
+        # The project's declared grid travels as a run input unless the caller
+        # named one explicitly. Without this, a sweep received `grid={}`.
+        if "grid" not in inputs and project_grid():
+            inputs["grid"] = project_grid()
         run = session.open(
             args.workflow,
             data=data,
@@ -1114,19 +1162,47 @@ def _report(run: Any) -> int:
     if run.status == "closed":
         say(green("Closed.") + " " + dim(str((run.artifact or {}).get("workflow", ""))))
         _render_artifact(run.artifact or {})
+        _where_it_lives(run)
         return 0
     if run.status == "stopped":
         stop = run.stopped or {}
         say(yellow("Stopped.") + " " + str(stop.get("reason", "")))
         say(dim("  A stop is a result. The run did what it was built to do."))
+        _where_it_lives(run)
         return 0
     if run.status == "abandoned":
         stop = run.stopped or {}
-        say(red("Abandoned.") + f" {stop.get('op')} could not be executed by this build.")
-        say(dim("  Supply a handler for it, or upgrade alphaengine."))
+        error = stop.get("error")
+        say(red("Abandoned.") + f" {stop.get('op')} failed twice, identically.")
+        if error:
+            for line in str(error).splitlines():
+                say(f"  {line}")
+        else:
+            say(dim("  Supply a handler for it, or upgrade alphaengine."))
         return 1
     say(dim(f"Run left {run.status}. `alphaengine` can resume it: {run.run_id}"))
     return 1
+
+
+def _where_it_lives(run: Any) -> None:
+    """The bridge to the portal, printed on every RECORDED outcome.
+
+    A run that ends only in the terminal is a notebook cell with better
+    logging. The record is on the account — every step, including the failed
+    ones — and the portal's Work screen renders it with the honesty controls
+    attached. Stops are recorded too, which is the point: the dead ends are
+    the majority of a week's output and the part that evaporates everywhere
+    else.
+    """
+    run_id = getattr(run, "run_id", None)
+    if not run_id:
+        return
+    say("")
+    say(
+        dim(f"  Recorded {DOT} ")
+        + f"{run_id}"
+        + dim(f" {DOT} on your account. Open Work in the portal to see it rendered.")
+    )
 
 
 #: How many shortlist rows the terminal prints before saying how many it kept
@@ -1152,6 +1228,11 @@ _FIGURE_LABELS: dict[str, tuple[str, str]] = {
     "pbo": ("PBO", ""),
     "target_weight": ("target weight", "of capital"),
     "cvar_pct": ("CVaR", "%"),
+    "var_pct": ("VaR", "%"),
+    "max_drawdown_pct": ("max drawdown", "%"),
+    "volatility_annualized_pct": ("volatility (ann.)", "%"),
+    "min_track_record_length": ("min track record", "obs"),
+    "n_obs": ("observations", ""),
 }
 
 
@@ -1215,6 +1296,13 @@ def _render_artifact(art: dict[str, Any]) -> None:
         if isinstance(value, dict):
             flat.update(value)
 
+    # A MONITOR'S STATUS LEADS. It is four-way on purpose — `breaches: []`
+    # reading as "all clear" when the truth is "nobody was watching" is this
+    # product's own failure mode, and until this rendered, the terminal
+    # committed it: the demo monitor closed `unchecked` and printed a Sharpe.
+    if str(flat.get("status")) in ("ok", "breached", "undetermined", "unchecked"):
+        _render_monitor_status(flat)
+
     rows = flat.get("rows")
     if isinstance(rows, list) and rows:
         _render_rows(rows, flat)
@@ -1244,6 +1332,49 @@ def _render_artifact(art: dict[str, Any]) -> None:
         say(dim("  More names passed than were returned; this is the top of them."))
 
 
+def _render_monitor_status(flat: dict[str, Any]) -> None:
+    """The four-way answer, in the words each state deserves.
+
+    A breach LEADS and is itemised — observed against tolerance, because "which
+    line, by how much" is the entire content of a breach. `unchecked` gets a
+    sentence rather than a green blank: nothing was being watched, and that is
+    a fact about the run, not an absence of news.
+    """
+    status = str(flat.get("status"))
+    n_checked = flat.get("n_checked")
+    say("")
+    if status == "breached":
+        breaches = [b for b in (flat.get("breaches") or []) if isinstance(b, dict)]
+        say(red(f"  BREACHED {DOT} {len(breaches)} of {n_checked} limits checked"))
+        for b in breaches:
+            word = "above" if b.get("direction") == "above" else "below"
+            say(
+                red(f"    {b.get('limit')}")
+                + f"  {_num(b.get('observed'))}, {word} its tolerance of {_num(b.get('tolerance'))}"
+            )
+        say(dim("  A monitor reports rather than stops: the artifact exists because something crossed."))
+    elif status == "ok":
+        say(
+            green(f"  ok {DOT} ")
+            + dim(f"{n_checked} limit{'s' if n_checked != 1 else ''} checked, none crossed")
+        )
+    elif status == "undetermined":
+        names = ", ".join(
+            str(u.get("limit")) for u in (flat.get("undetermined") or []) if isinstance(u, dict)
+        )
+        say(yellow(f"  undetermined {DOT} {names or 'some limits'} could not be measured on this data."))
+    else:
+        say(
+            yellow(f"  unchecked {DOT} ")
+            + "no tolerances were stated, so nothing was being watched. Not a green light."
+        )
+        say(dim('  State some:  --input tolerances={"max_drawdown_pct": 20, "var_pct": 3}'))
+    unknown = flat.get("unknown_limits") or []
+    if unknown:
+        names = ", ".join(map(str, unknown))
+        say(yellow(f"  named and not understood: {names}. Not watched, said rather than dropped."))
+
+
 def _render_rows(rows: list[Any], flat: dict[str, Any]) -> None:
     """The shortlist, as a table a person can read down.
 
@@ -1268,9 +1399,12 @@ def _render_rows(rows: list[Any], flat: dict[str, Any]) -> None:
 
     say("")
     say("  " + dim(f"ranked by {rank_by}") + dim(f"  {DOT}  {len(rows)} names"))
+    # A two-space gutter between fields, on headers and values alike. Without
+    # it, a header that exactly fills its field abuts its neighbour — the live
+    # run printed `returnn observations`, one column's name welded to the next.
     head = f"  {'#':>3}  {'symbol':<8}{_head(rank_by):>14}"
     for m in metrics:
-        head += f"{_head(m):>14}"
+        head += f"  {_head(m):>14}"
     say(dim(head))
 
     for i, row in enumerate(rows[:_SHOWN_ROWS], start=1):
@@ -1279,7 +1413,7 @@ def _render_rows(rows: list[Any], flat: dict[str, Any]) -> None:
         symbol = str(row.get("symbol") or row.get("ticker") or "?")
         line = f"  {i:>3}  {bold(symbol.ljust(8))}{_num(row.get('score')):>14}"
         for m in metrics:
-            line += f"{_num(row.get(m)):>14}"
+            line += f"  {_num(row.get(m)):>14}"
         say(line)
 
     if len(rows) > _SHOWN_ROWS:
@@ -2132,7 +2266,13 @@ def _ask(
     )
 
     try:
-        run = session.open(name, data=data, backtest_fn=backtest_fn, workspace_id=workspace_id)
+        run = session.open(
+            name,
+            data=data,
+            backtest_fn=backtest_fn,
+            workspace_id=workspace_id,
+            **({"grid": project_grid()} if project_grid() else {}),
+        )
         driver.drive(run)
     except Offline:
         _explain_offline(url)
@@ -2421,7 +2561,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
 
         if verb == "run" and rest and (" " not in rest) and _is_workflow(session, rest):
             try:
-                last = session.open(rest, data=data, backtest_fn=backtest_fn)
+                last = session.open(
+                    rest,
+                    data=data,
+                    backtest_fn=backtest_fn,
+                    **({"grid": project_grid()} if project_grid() else {}),
+                )
                 _drive(last)
                 _report(last)
             except Offline:
