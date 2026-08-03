@@ -1048,8 +1048,12 @@ def test_a_browser_only_universe_says_what_is_missing():
     session = _Portal(_SP, status=404)
     with pytest.raises(ValueError) as e:
         cli.resolve_data(_args(universe="sp500"), session)
-    assert "without its prices" in str(e.value)
-    assert "--data" in str(e.value)
+    message = str(e.value)
+    assert "names on your account and not its prices" in message
+    # BOTH REPAIRS, because they are for two different people: the one who can
+    # fix it on the portal in a click, and the one who has the CSV right here.
+    assert "Store on my account" in message
+    assert "--data" in message
 
 
 def test_a_server_error_that_is_not_a_404_is_not_swallowed():

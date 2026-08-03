@@ -84,6 +84,7 @@ FLAGS: dict[str, Flag] = {
     "project": Flag("--project", "MODULE", "a module exposing `data` and `backtest_fn`"),
     "data": Flag("--data", "FILE", "a local CSV: wide, long, or a single series"),
     "universe": Flag("--universe", "NAME", "a universe registered in the portal, with its stored closes"),
+    "sleeve": Flag("--sleeve", "NAME", "the sleeve this run belongs to, and the budget it is bound by"),
     "label": Flag("--label", "TEXT", "what to call the artifact this run produces"),
     "input": Flag("--input", "K=V", "a workflow input; repeatable"),
     "quiet": Flag("--quiet", "", "only the result, no step narration"),
@@ -213,8 +214,9 @@ COMMANDS: tuple[Command, ...] = (
         body=(
             "Brings the closes you stored with it. That is your own upload, "
             "decrypted back to your own account, not us fetching market data.\n\n"
-            "Registered without prices? Then it holds symbols only and there is "
-            "nothing to fetch; use `data` with a file instead.\n\n"
+            "Holds its names and not its prices? The portal's Data page marks it "
+            '"this browser only"; press "Store on my account" there and it loads '
+            "here. Or use `data` with a file instead.\n\n"
             "This verb exists because `project` was the only way to load anything "
             "mid-session, so somebody with a universe in the portal had to quit and "
             "restart with a flag to reach it."

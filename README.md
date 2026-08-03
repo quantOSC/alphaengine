@@ -140,6 +140,7 @@ distinction is the whole of the data boundary below.
 | `--project MODULE` | a module exposing `data` and `backtest_fn` |
 | `--data FILE` | a local CSV: wide, long, or a single series |
 | `--universe NAME` | a universe registered in the portal, with its stored closes |
+| `--sleeve NAME` | the sleeve this run belongs to, and the budget it is bound by |
 | `--label TEXT` | what to call the artifact this run produces |
 | `--input K=V` | a workflow input; repeatable |
 | `--quiet` | only the result, no step narration |
@@ -169,9 +170,9 @@ from alphaengine import sweep
 
 r = sweep(backtest_fn, {"fast": [5, 10, 20], "slow": [50, 100, 200]}, data=prices)
 
-r.surface()    # is the result a broad plateau or a single lucky configuration?
-r.verdict()    # deflated for the 9 trials that were actually run
-r.save()       # study.json, on your disk
+r.surface()  # is the result a broad plateau or a single lucky configuration?
+r.verdict()  # deflated for the 9 trials that were actually run
+r.save()  # study.json, on your disk
 ```
 
 The trial count is **derived from the grid that ran**, never asserted. Omit it
@@ -195,7 +196,8 @@ correspond. In practice: pick a warm-up long enough for the slowest window in
 your grid and start every configuration there.
 
 ```python
-WARMUP = 200   # covers the slowest `slow` in the grid
+WARMUP = 200  # covers the slowest `slow` in the grid
+
 
 def backtest_fn(*, data, fast, slow):
     close = data["close"]
@@ -258,10 +260,10 @@ the PM who will act on it, `report()` sends the study — and only the study.
 import os
 from alphaengine import Study, sweep
 
-os.environ["QUANTOS_API_KEY"] = "ae_live_..."   # created in the portal
+os.environ["QUANTOS_API_KEY"] = "ae_live_..."  # created in the portal
 
 r = sweep(backtest_fn, grid, data=prices)
-r.save()                                        # yours, on your disk, always
+r.save()  # yours, on your disk, always
 
 Study.from_sweep(r, label="momentum, 9 configs").report()
 ```
