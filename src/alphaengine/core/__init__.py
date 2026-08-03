@@ -33,8 +33,11 @@ everyone who does not need them:
 
 from .backtest import run_backtest, score_backtest
 from .performance import performance_report
+from .profile import profile_data
 from .risk import compute_var_cvar
 from .screen import screen_universe
+from .signals import information_coefficient, quantile_returns, signal_decay
+from .stress import cost_ladder, drawdown_anatomy, overlap_stats, subperiod_stability
 from .technical import technical_features
 from .validation import (
     cpcv_score,
@@ -63,4 +66,16 @@ __all__ = [
     "technical_features",
     # selection: rank a supplied universe, return a bounded shortlist
     "screen_universe",
+    # signal evaluation: does a supplied signal carry information at all
+    "information_coefficient",
+    "quantile_returns",
+    "signal_decay",
+    # stress and overlap: where a validated result breaks, and whether an
+    # idea is the book again
+    "subperiod_stability",
+    "cost_ladder",
+    "drawdown_anatomy",
+    "overlap_stats",
+    # data hygiene: what is wrong with the file, before anything runs on it
+    "profile_data",
 ]

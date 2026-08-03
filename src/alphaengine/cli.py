@@ -564,6 +564,12 @@ def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest
         # prevent, arriving one level finer.
         "universe": _looks_like_universe(data),
         "returns": _looks_like_returns(data),
+        "signal": (
+            isinstance(data, dict)
+            and isinstance(data.get("signal"), dict)
+            and isinstance(data.get("prices"), dict)
+        ),
+        "book_returns": isinstance(data, dict) and data.get("book_returns") is not None,
     }
     missing = [r for r in (row.get("requires") or []) if not have.get(str(r), True)]
     if not missing:
@@ -620,6 +626,14 @@ _SHAPES = {
         "`returns`, or one name out of a loaded universe via --symbol."
     ),
     "backtest_fn": "`backtest_fn` is your own simulator; we orchestrate and measure, you simulate.",
+    "signal": (
+        "`data` is {'signal': {symbol: values}, 'prices': {symbol: closes}} -- the "
+        "panel and what it is scored against. A --project module is the door."
+    ),
+    "book_returns": (
+        "`data` carries both series: {'returns': [...], 'book_returns': [...]} -- "
+        "the candidate and what the book already holds."
+    ),
 }
 
 
@@ -1288,6 +1302,24 @@ _FIGURE_LABELS: dict[str, tuple[str, str]] = {
     "volatility_annualized_pct": ("volatility (ann.)", "%"),
     "min_track_record_length": ("min track record", "obs"),
     "n_obs": ("observations", ""),
+    # The modeling-week artifacts (QUANTOS.md Phase 6.5).
+    "mean_ic": ("mean IC", ""),
+    "ic_t_stat": ("IC t-stat", ""),
+    "spread_pct": ("top minus bottom", "% per period"),
+    "half_life_periods": ("half-life", "periods"),
+    "dies_at_bps": ("dies at", "bps"),
+    "worst_segment_sharpe": ("worst segment Sharpe", ""),
+    "share_of_pnl_in_best_segment": ("best segment's P&L share", ""),
+    "longest_underwater_periods": ("longest underwater", "periods"),
+    "time_underwater_share": ("time underwater", "share"),
+    "correlation": ("correlation to book", ""),
+    "beta_to_book": ("beta to book", ""),
+    "n_names": ("names measured", ""),
+    "usable": ("usable", "names"),
+    "n_unreadable": ("unreadable", "names"),
+    "n_ragged": ("ragged history", "names"),
+    "n_spike_names": ("split candidates", "names"),
+    "n_stale_names": ("stale", "names"),
 }
 
 
@@ -1357,6 +1389,26 @@ def _render_artifact(art: dict[str, Any]) -> None:
     # committed it: the demo monitor closed `unchecked` and printed a Sharpe.
     if str(flat.get("status")) in ("ok", "breached", "undetermined", "unchecked"):
         _render_monitor_status(flat)
+
+    # THE OVERLAP VERDICT IS A STRING and the figure block below prints only
+    # numbers, so without this the one conclusion the run reached would be the
+    # one thing its output omitted.
+    verdict = flat.get("verdict")
+    if verdict == "the_book_again":
+        say("")
+        say(
+            red(f"  the book again {DOT} ")
+            + "this candidate is substantially the bet the book already holds."
+        )
+    elif verdict == "diversifier":
+        say("")
+        say(green(f"  diversifier {DOT} ") + dim("low correlation to the book on their shared history."))
+    elif verdict == "related":
+        say("")
+        say(
+            yellow(f"  related {DOT} ")
+            + "meaningfully correlated to the book; size it as an add, not a hedge."
+        )
 
     rows = flat.get("rows")
     if isinstance(rows, list) and rows:

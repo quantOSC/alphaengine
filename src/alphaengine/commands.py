@@ -120,7 +120,10 @@ COMMANDS: tuple[Command, ...] = (
         args="",
         purpose="what the server offers, what each needs, and which reproduce",
         body=(
-            "Four questions a desk asks, and only one of them wants your simulator.\n\n"
+            "The modeling week as questions: can I trust this data, what is worth "
+            "a look, does this signal carry information, is it real, where does it "
+            "break, is it new or my book again, how much, is it still inside the "
+            "lines. Only `validate_study` wants your simulator.\n\n"
             "`reproducible` is not decoration. A SCRIPTED workflow reaches the same "
             "place twice over the same data; an EXPLORATORY one may not, and its "
             "artifact must never be read as though it does. Knowing which BEFORE you "

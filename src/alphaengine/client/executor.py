@@ -35,11 +35,19 @@ import numpy as np
 
 from ..core import (
     compute_var_cvar,
+    cost_ladder,
     deflated_sharpe,
+    drawdown_anatomy,
+    information_coefficient,
     min_track_record_length,
+    overlap_stats,
     pbo_cscv,
     performance_report,
+    profile_data,
+    quantile_returns,
     screen_universe,
+    signal_decay,
+    subperiod_stability,
     technical_features,
 )
 from ..sweep import sweep as run_sweep
@@ -187,6 +195,17 @@ class StepExecutor:
             "compute.compute_var_cvar": self._var,
             "compute.technical_features": self._technical,
             "compute.screen": self._screen,
+            # The modeling week beyond the sweep: signal evaluation, data
+            # hygiene, stress, and overlap. Same contract as everything above:
+            # figures out, series stay here.
+            "compute.signal_ic": self._signal_ic,
+            "compute.signal_quantiles": self._signal_quantiles,
+            "compute.signal_decay": self._signal_decay,
+            "data.profile": self._profile,
+            "compute.subperiods": self._subperiods,
+            "compute.cost_ladder": self._cost_ladder,
+            "compute.drawdown_anatomy": self._drawdown_anatomy,
+            "compute.overlap": self._overlap,
             # `emit.*` and `record.*` were vocabulary strings the server could
             # issue and this executor had no handler for, so a run that reached
             # one could never produce the artifact it existed to produce. The
@@ -195,6 +214,10 @@ class StepExecutor:
             "emit.screen": self._emit_echo,
             "emit.monitor": self._emit_echo,
             "emit.sizing_decision": self._emit_echo,
+            "emit.signal_report": self._emit_echo,
+            "emit.health": self._emit_echo,
+            "emit.stress": self._emit_echo,
+            "emit.overlap": self._emit_echo,
             "record.note": self._record,
             "record.decision": self._record,
             "record.approval": self._record,
@@ -428,6 +451,94 @@ class StepExecutor:
         point — a feature table grows with the universe, a shortlist does not.
         """
         return dict(screen_universe(self._universe(), **params))
+
+    # ── the modeling week beyond the sweep ─────────────────────────────────
+
+    def _signal_panels(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The `{signal, prices}` pair a signal evaluation runs on.
+
+        A signal is scored AGAINST something, so the data for these ops is a
+        mapping carrying both panels. Anything else is refused with the shape
+        named — a panel guessed out of position ranks the wrong thing silently.
+        """
+        data = self.data
+        if (
+            isinstance(data, dict)
+            and isinstance(data.get("signal"), dict)
+            and isinstance(data.get("prices"), dict)
+        ):
+            return data["signal"], data["prices"]
+        raise UnsupportedOp(
+            "signal evaluation needs `data` shaped {'signal': {symbol: values}, "
+            "'prices': {symbol: closes}} — the signal panel and what it is "
+            "scored against. Expose both from a --project module."
+        )
+
+    def _signal_ic(self, params: Figures, ws: Workspace) -> Figures:
+        signal, prices = self._signal_panels()
+        return dict(information_coefficient(signal, prices, horizon=int(params.get("horizon") or 21)))
+
+    def _signal_quantiles(self, params: Figures, ws: Workspace) -> Figures:
+        signal, prices = self._signal_panels()
+        return dict(
+            quantile_returns(
+                signal,
+                prices,
+                horizon=int(params.get("horizon") or 21),
+                quantiles=int(params.get("quantiles") or 5),
+            )
+        )
+
+    def _signal_decay(self, params: Figures, ws: Workspace) -> Figures:
+        signal, prices = self._signal_panels()
+        horizons = params.get("horizons") or (1, 5, 21, 63)
+        return dict(signal_decay(signal, prices, horizons=tuple(int(h) for h in horizons)))
+
+    def _profile(self, params: Figures, ws: Workspace) -> Figures:
+        """Health-check the loaded universe. Reports; repairs nothing."""
+        data = self.data
+        if isinstance(data, dict) and isinstance(data.get("prices"), dict):
+            data = data["prices"]
+        if not isinstance(data, dict):
+            raise UnsupportedOp(
+                "data.profile inspects a universe: {symbol: closes}. Load one with --universe or --data."
+            )
+        return dict(profile_data(data))
+
+    def _subperiods(self, params: Figures, ws: Workspace) -> Figures:
+        return dict(subperiod_stability(self._returns_column(ws), segments=int(params.get("segments") or 4)))
+
+    def _cost_ladder(self, params: Figures, ws: Workspace) -> Figures:
+        # Turnover is the CALLER'S number; absent, every rung is None. A
+        # guessed turnover would produce a confident curve about a strategy
+        # nobody runs.
+        turnover = params.get("turnover")
+        return dict(
+            cost_ladder(
+                self._returns_column(ws),
+                turnover=None if turnover is None else float(turnover),
+            )
+        )
+
+    def _drawdown_anatomy(self, params: Figures, ws: Workspace) -> Figures:
+        return dict(drawdown_anatomy(self._returns_column(ws)))
+
+    def _overlap(self, params: Figures, ws: Workspace) -> Figures:
+        """The candidate against the book. Both series are the caller's own."""
+        book = self.data.get("book_returns") if isinstance(self.data, dict) else None
+        if book is None:
+            raise UnsupportedOp(
+                "compute.overlap needs `data` carrying both series: {'returns': "
+                "[...], 'book_returns': [...]} — the candidate and what the book "
+                "already holds."
+            )
+        candidate = _as_returns(self.data)
+        if candidate is None:
+            raise UnsupportedOp(
+                "compute.overlap found `book_returns` but no candidate. Put the "
+                "idea's own series under `returns`."
+            )
+        return dict(overlap_stats(candidate, book))
 
     # ── emit / record ──────────────────────────────────────────────────────
     #
