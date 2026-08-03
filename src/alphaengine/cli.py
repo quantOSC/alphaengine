@@ -1421,9 +1421,13 @@ def _render_artifact(art: dict[str, Any]) -> None:
     ]
     if shown:
         say("")
+        # Two spaces after the pad, so a label that fills its field still
+        # separates from its value — "worst segment Sharpe-3.20" welded a
+        # 20-character label straight into a negative number.
+        width = max(20, max(len(label) for label, _, _ in shown))
         for label, value, unit in shown:
             tail = f" {dim(unit)}" if unit else ""
-            say(f"  {dim(label.ljust(20))}{bold(_num(value))}{tail}")
+            say(f"  {dim(label.ljust(width))}  {bold(_num(value))}{tail}")
 
     # SAID EVEN THOUGH THE TABLE IS RIGHT THERE. A shortlist of 20 means one
     # thing when 480 names were measured and rejected, and quite another when
