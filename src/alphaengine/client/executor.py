@@ -291,7 +291,7 @@ class StepExecutor:
         ws["sweep"] = result  # the trial matrix stays here
 
         surface = result.surface()
-        return {
+        figures: Figures = {
             "n_trials": result.n_trials,
             "n_trials_source": "derived_from_grid",
             "data_hash": result.data_hash,
@@ -301,6 +301,21 @@ class StepExecutor:
             "n_ok": surface["n_ok"],
             "n_failed": surface["n_failed"],
         }
+
+        # The parameter surface, per trial — the artifact a sweep exists to
+        # produce, and a derived statistic per configuration, so recording it
+        # crosses no data boundary. Sent only when the WHOLE grid fits the
+        # wire's 64-element cap: a sampled surface would read as the full one,
+        # which is exactly the misrepresentation the cap exists to prevent.
+        # Failed trials are omitted so a configuration that did not run renders
+        # as a hole in the surface, never as a number.
+        if result.n_trials <= 64:
+            figures["trials"] = [
+                {**t.params, "sharpe": t.sharpe_annualized} for t in result.trials if t.failed is None
+            ]
+        else:
+            figures["trials_recorded"] = False
+        return figures
 
     def _best_column(self, ws: Workspace) -> list[float]:
         result = ws.get("sweep")

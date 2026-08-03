@@ -78,6 +78,30 @@ def test_sweep_reports_figures_and_keeps_the_matrix_local():
     assert ex.workspace["sweep"].matrix.shape[1] == 6
 
 
+def test_sweep_records_the_parameter_surface_when_the_grid_fits():
+    """One derived Sharpe per configuration IS the surface a quant shows. It
+    travels only when the whole grid fits the wire's 64-element cap; failed
+    trials are omitted so a hole stays a hole."""
+    ex = executor()
+    out = ex.execute("compute.sweep", {"grid": {"fast": [5, 10, 15], "slow": [50, 100]}})
+    trials = out["trials"]
+    assert len(trials) == out["n_ok"]
+    assert {t["fast"] for t in trials} <= {5, 10, 15}
+    assert all(set(t) == {"fast", "slow", "sharpe"} for t in trials)
+    assert "trials_recorded" not in out
+
+
+def test_an_oversized_grid_records_the_absence_not_a_sample():
+    ex = executor()
+    out = ex.execute(
+        "compute.sweep",
+        {"grid": {"fast": list(range(2, 15)), "slow": list(range(20, 40, 2))}},
+    )
+    assert out["n_trials"] == 130
+    assert "trials" not in out
+    assert out["trials_recorded"] is False
+
+
 def test_downstream_readings_use_the_sweeps_own_trial_count():
     """A count supplied from outside is a count somebody could flatter, so the
     executor uses the sweep that actually ran and ignores the parameter."""
