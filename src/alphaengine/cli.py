@@ -186,6 +186,19 @@ ON = "●" if _UNICODE_OK else "*"
 OFF = "○" if _UNICODE_OK else "-"
 #: A failed step's marker.
 CROSS = "×" if _UNICODE_OK else "x"
+
+#: The questions, as commands: what a quant TYPES maps to what the server
+#: RUNS. One table, read by the parser, the dispatcher and the shell alike.
+QUESTION_VERBS: dict[str, str] = {
+    "diagnose": "diagnose_data",
+    "screen": "screen_universe",
+    "signal": "evaluate_signal",
+    "validate": "validate_study",
+    "stress": "stress_study",
+    "overlap": "check_overlap",
+    "size": "size_position",
+    "monitor": "monitor_sleeve",
+}
 #: The held-back-rows marker. Probed like the rest: cp1252 renders a literal
 #: ellipsis as mojibake in exactly the place a user reads their result.
 ELLIPSIS = "…" if _UNICODE_OK else "..."
@@ -1232,6 +1245,7 @@ def _report(run: Any) -> int:
         say(green("Closed.") + " " + dim(str((run.artifact or {}).get("workflow", ""))))
         _render_artifact(run.artifact or {})
         _where_it_lives(run)
+        _say_next(run)
         return 0
     if run.status == "stopped":
         stop = run.stopped or {}
@@ -1251,6 +1265,56 @@ def _report(run: Any) -> int:
         return 1
     say(dim(f"Run left {run.status}. `alphaengine` can resume it: {run.run_id}"))
     return 1
+
+
+def _say_next(run: Any) -> None:
+    """The next verb, derived from what the run actually produced.
+
+    A result that names its successor is what makes a catalogue a WEEK instead
+    of eight drawers. This is guidance to the HUMAN, printed after the record —
+    the loop itself still contains no workflow knowledge, and an agent never
+    reads these lines.
+    """
+    figures = (run.artifact or {}).get("figures") or {}
+    flat: dict[str, Any] = {}
+    for value in figures.values():
+        if isinstance(value, dict):
+            flat.update(value)
+
+    line: str | None = None
+    rows = flat.get("rows")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        top = rows[0].get("symbol") or rows[0].get("ticker")
+        if top:
+            line = f"size the top name: run size_position --symbol {top}"
+    elif flat.get("verdict") == "the_book_again":
+        line = "nothing to size: the book already holds this bet."
+    elif flat.get("verdict") in ("diversifier", "related"):
+        line = "size it: run size_position with the candidate's returns"
+    elif "dies_at_bps" in flat:
+        line = (
+            "size it: run size_position"
+            if flat.get("dies_at_bps") is not None
+            else "rerun with --input turnover=<one-way per period> to get the cost curve"
+        )
+    elif flat.get("deflated_sharpe") is not None:
+        line = "find where it breaks: run stress_study --input turnover=<one-way per period>"
+    elif flat.get("target_weight") is not None:
+        line = "record the fill against your Book in the portal."
+    elif flat.get("mean_ic") is not None:
+        line = "it carries information; give it a simulator: run validate_study --project <module>"
+    elif "usable" in flat:
+        dirty = any(int(flat.get(k) or 0) for k in ("n_spike_names", "n_stale_names", "n_unreadable"))
+        line = (
+            "the named names need looking at before anything runs on them."
+            if dirty
+            else "the data is clean: run screen_universe"
+        )
+    elif flat.get("status") == "breached":
+        line = "the sleeve page shows the breach against its budget."
+
+    if line:
+        say(dim(f"  next {DOT} ") + line)
 
 
 def _where_it_lives(run: Any) -> None:
@@ -2703,6 +2767,11 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 continue
 
         verb, _, rest = line.partition(" ")
+        # THE QUESTIONS ARE COMMANDS HERE TOO. `screen` alone runs the
+        # workflow; `screen my tech universe` stays a sentence for the agent —
+        # a bare verb is an instruction, a verb in a sentence is a question.
+        if verb in QUESTION_VERBS and not rest:
+            verb, rest = "run", QUESTION_VERBS[verb]
         rest = rest.strip()
 
         if verb in ("quit", "exit"):
@@ -2945,6 +3014,18 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--label", help="what to call the artifact")
     r.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
     r.add_argument("--quiet", action="store_true", help="only the result")
+
+    # THE QUESTIONS ARE THE COMMANDS. `run screen_universe` is the machine's
+    # spelling; `alphaengine screen` is the person's. Each verb is the full
+    # `run` command with the workflow pre-chosen — same flags, same behaviour,
+    # one implementation — so the intuitive door and the explicit door cannot
+    # drift.
+    for verb, workflow in QUESTION_VERBS.items():
+        q = sub.add_parser(verb, parents=[common], help=f"run {workflow}")
+        q.add_argument("--label", help="what to call the artifact")
+        q.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
+        q.add_argument("--quiet", action="store_true", help="only the result")
+        q.set_defaults(workflow=workflow)
     return p
 
 
@@ -2988,7 +3069,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_stored()
 
     args = build_parser().parse_args(argv)
-    handler = {
+    handlers: dict[str | None, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
         "workflows": cmd_workflows,
         "demo": cmd_demo,
@@ -2996,7 +3077,10 @@ def main(argv: list[str] | None = None) -> int:
         "commands": cmd_commands,
         "run": cmd_run,
         None: cmd_repl,  # bare `alphaengine` opens a session
-    }[args.command]
+    }
+    for verb in QUESTION_VERBS:
+        handlers[verb] = cmd_run
+    handler = handlers[args.command]
     try:
         return handler(args)
     except KeyboardInterrupt:

@@ -95,7 +95,85 @@ FLAGS: dict[str, Flag] = {
 }
 
 
-COMMANDS: tuple[Command, ...] = (
+#: The questions, as commands. Each is `run <workflow>` with the workflow
+#: pre-chosen: same flags, same behaviour, one implementation. Declared from
+#: one table so the parser, the docs and the shell cannot drift.
+_QUESTIONS: tuple[tuple[str, str, str, str], ...] = (
+    (
+        "diagnose",
+        "diagnose_data",
+        "can I trust this data?",
+        "Coverage, unadjusted-split candidates, stale and ragged series, named not dropped. "
+        "Reports and never stops: a dirty file closing with its problems named IS the artifact.",
+    ),
+    (
+        "screen",
+        "screen_universe",
+        "what is worth a look?",
+        "Rank a universe, get a bounded shortlist, and the ranked file is FILED: dated, "
+        "versioned, diffable against tomorrow's.",
+    ),
+    (
+        "signal",
+        "evaluate_signal",
+        "does this signal carry information?",
+        "IC with its t-stat, quantile spread, decay half-life. An implausibly high IC STOPS "
+        "the run naming lookahead, because a leaked edge is worse than an overfit one.",
+    ),
+    (
+        "validate",
+        "validate_study",
+        "is this real?",
+        "Your simulator, our referee: the sweep, the deflated Sharpe, PBO, and a trial count "
+        "that was counted rather than claimed.",
+    ),
+    (
+        "stress",
+        "stress_study",
+        "where does it break?",
+        "The cost ladder (the bps where it dies), Sharpe by subperiod, drawdown anatomy. "
+        "Pass --input turnover=<one-way per period> or the cost curve reports absences.",
+    ),
+    (
+        "overlap",
+        "check_overlap",
+        "is it new, or my book again?",
+        "Correlation and beta of a candidate to the book, with the verdict said plainly: "
+        "diversifier, related, or the book again.",
+    ),
+    (
+        "size",
+        "size_position",
+        "how much?",
+        "A target weight of capital with CVaR, drawdown and the minimum track record beside "
+        "it. A record too short to size is refused, not sized small.",
+    ),
+    (
+        "monitor",
+        "monitor_sleeve",
+        "still inside the lines?",
+        "Four-way status: ok, breached, undetermined, unchecked. Nothing checked never reads as all clear.",
+    ),
+)
+
+
+def _question_commands() -> tuple[Command, ...]:
+    return tuple(
+        Command(
+            verb=verb,
+            group="run",
+            args="",
+            purpose=purpose,
+            body=body + f"\n\nThe long spelling is `run {workflow}`; the flags are identical.",
+            examples=(f"alphaengine {verb} --universe <name>",)
+            if verb in ("diagnose", "screen")
+            else (f"alphaengine {verb}",),
+        )
+        for verb, workflow, purpose, body in _QUESTIONS
+    )
+
+
+COMMANDS: tuple[Command, ...] = _question_commands() + (
     # ── get started ────────────────────────────────────────────────────────
     Command(
         verb="demo",

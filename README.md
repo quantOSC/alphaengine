@@ -102,6 +102,14 @@ distinction is the whole of the data boundary below.
 
 | Command | Does | Where |
 |---|---|---|
+| `diagnose` | can I trust this data? | shell + session |
+| `screen` | what is worth a look? | shell + session |
+| `signal` | does this signal carry information? | shell + session |
+| `validate` | is this real? | shell + session |
+| `stress` | where does it break? | shell + session |
+| `overlap` | is it new, or my book again? | shell + session |
+| `size` | how much? | shell + session |
+| `monitor` | still inside the lines? | shell + session |
 | `run <workflow>` | run one workflow exactly as written | shell + session |
 | `<anything else>` | ask in plain English; your model picks a workflow and drives it | session |
 | `status` | the current run, and what is loaded | session |
@@ -150,6 +158,14 @@ distinction is the whole of the data boundary below.
 ### Examples
 
 ```bash
+alphaengine diagnose --universe <name>
+alphaengine screen --universe <name>
+alphaengine signal
+alphaengine validate
+alphaengine stress
+alphaengine overlap
+alphaengine size
+alphaengine monitor
 alphaengine demo
 alphaengine workflows
 alphaengine commands
