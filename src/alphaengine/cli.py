@@ -186,6 +186,9 @@ ON = "●" if _UNICODE_OK else "*"
 OFF = "○" if _UNICODE_OK else "-"
 #: A failed step's marker.
 CROSS = "×" if _UNICODE_OK else "x"
+#: The held-back-rows marker. Probed like the rest: cp1252 renders a literal
+#: ellipsis as mojibake in exactly the place a user reads their result.
+ELLIPSIS = "…" if _UNICODE_OK else "..."
 
 
 def say(*parts: str) -> None:
@@ -351,7 +354,7 @@ def _fit(s: str, room: int) -> str:
     """
     if _visible_len(s) <= room:
         return s
-    ell = "…" if _UNICODE_OK else "..."
+    ell = ELLIPSIS
     keep = room - len(ell)
     head, tail = keep // 2, keep - keep // 2
     plain, out, seen, i = "", [], 0, 0
@@ -566,6 +569,19 @@ def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest
     if not missing:
         return None
 
+    # THE ANSWER THE LOADED DATA MAKES POSSIBLE, before the generic doors. A
+    # user with a universe loaded who is told "load a universe" is in a loop
+    # with no exit — the real move is naming which of their names to measure.
+    if "returns" in missing and _looks_like_universe(data) and isinstance(data, dict):
+        example = next(iter(sorted(str(k) for k in data)), "MU")
+        return (
+            f"{name} runs on ONE return series, and a universe of {len(data)} names "
+            "is loaded.\n"
+            "  Name the one to measure:\n"
+            f"      run {name} --symbol {example}\n"
+            "  Its closes become the return series the measurement runs on."
+        )
+
     what = " and ".join(f"`{m}`" for m in missing)
     shapes = "\n".join(f"  {_SHAPES[m]}" for m in missing if m in _SHAPES)
     # THE DOORS, EASIEST FIRST. This named `--project` and nothing else, so
@@ -600,7 +616,8 @@ def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest
 _SHAPES = {
     "universe": "`data` is a universe: {symbol: prices}, prices being closes, {date: close}, or OHLC rows.",
     "returns": (
-        "`data` is a return series: a sequence of per-period returns, or a mapping with them under `returns`."
+        "`data` is a return series: per-period returns, a mapping with them under "
+        "`returns`, or one name out of a loaded universe via --symbol."
     ),
     "backtest_fn": "`backtest_fn` is your own simulator; we orchestrate and measure, you simulate.",
 }
@@ -688,6 +705,28 @@ def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, An
 
     if universe:
         data = _narrow_to_universe(session, universe, data)
+
+    # ── ONE NAME OUT OF MANY ───────────────────────────────────────────────
+    #
+    # `--symbol MU` turns a loaded universe into the single return series the
+    # sizing and monitoring workflows measure. Without this rung the ladder had
+    # a hole a user actually fell into: told "size_position needs returns",
+    # they loaded their universe, passed it again, and got the same refusal —
+    # a loop with no exit, because a universe of closes could not become one
+    # series of returns.
+    symbol = getattr(args, "symbol", None)
+    if symbol:
+        from .loaders import DataShapeError
+
+        derived = _returns_from_universe(data, str(symbol))
+        if derived is None:
+            names = ", ".join(sorted(k for k in data)[:8]) if isinstance(data, dict) else "none loaded"
+            raise DataShapeError(
+                f"--symbol {symbol} needs that name in a loaded universe with at least "
+                f"two closes. Loaded: {names}"
+            )
+        say(dim(f"  {str(symbol).upper()} {DOT} {len(derived)} returns {DOT} derived from its closes"))
+        data = derived
 
     return data, backtest_fn
 
@@ -787,7 +826,7 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
         # SAID, NOT SWALLOWED. A universe of 500 screened against a file holding
         # 40 of them is a different result from a universe of 40, and this is the
         # last place that difference is visible.
-        shown = ", ".join(missing[:8]) + ("…" if len(missing) > 8 else "")
+        shown = ", ".join(missing[:8]) + (ELLIPSIS if len(missing) > 8 else "")
         say(yellow(f"  {len(missing)} of {len(symbols)} names are not in your file: {shown}"))
     say(dim(f"  universe {wanted} {DOT} {len(kept)} of {len(symbols)} names loaded"))
     return kept
@@ -1115,12 +1154,28 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     try:
         say(f"{bold(args.workflow)} {dim(DOT + ' ' + url)}")
+        catalogue = session.workflows()
+        # THE ACCOUNT IS REACHED FOR BEFORE REFUSING — same courtesy as the
+        # agent path. `alphaengine run screen_universe`, signed in, with one
+        # stored universe on the account, should run on it and say so.
+        ready: list[str] = []
+        row = next((r for r in catalogue if r.get("name") == args.workflow), None)
+        if data is None and row is not None and "universe" in (row.get("requires") or []):
+            wanted, ready = _stored_universes(session)
+            if wanted:
+                try:
+                    data = _narrow_to_universe(session, wanted, None)
+                except Exception as exc:  # noqa: BLE001 - reachable and unloadable: refuse below
+                    say(yellow(f"  {wanted} is on your account and could not be loaded: {exc}"))
         # ASK WHAT IT NEEDS BEFORE STARTING IT. One extra GET against a run that
         # would otherwise fail twice and abandon.
-        gap = preflight(session.workflows(), args.workflow, data=data, backtest_fn=backtest_fn)
+        gap = preflight(catalogue, args.workflow, data=data, backtest_fn=backtest_fn)
         if gap:
             say("")
             say(yellow(gap))
+            if len(ready) > 1:
+                say(yellow(f"  Your account holds {len(ready)} stored universes: {', '.join(ready)}."))
+                say(dim("  Pass --universe <name> to say which."))
             return 2
         # The project's declared grid travels as a run input unless the caller
         # named one explicitly. Without this, a sweep received `grid={}`.
@@ -1417,7 +1472,7 @@ def _render_rows(rows: list[Any], flat: dict[str, Any]) -> None:
         say(line)
 
     if len(rows) > _SHOWN_ROWS:
-        say(dim(f"       … {len(rows) - _SHOWN_ROWS} more in the filed signal file"))
+        say(dim(f"       {ELLIPSIS} {len(rows) - _SHOWN_ROWS} more in the filed signal file"))
 
 
 NEWLINE = chr(10)
@@ -1430,7 +1485,7 @@ def _extract_flags(line: str) -> tuple[str, list[str]]:
     `screen my book --universe sp100` asks about the book and loads sp100,
     rather than asking a model to interpret a flag as part of a question.
 
-    Only the three data flags. Anything else stays in the prose: a sentence
+    Only the four data flags. Anything else stays in the prose: a sentence
     containing "--" is more likely to be a sentence than a mistyped flag, and
     stripping tokens a user meant to say is worse than passing one through.
     """
@@ -1440,7 +1495,7 @@ def _extract_flags(line: str) -> tuple[str, list[str]]:
     i = 0
     while i < len(parts):
         tok = parts[i]
-        if tok in ("--data", "--universe", "--project") and i + 1 < len(parts):
+        if tok in ("--data", "--universe", "--project", "--symbol") and i + 1 < len(parts):
             flags += [tok, parts[i + 1]]
             i += 2
             continue
@@ -1474,6 +1529,85 @@ def _universe_named_in(question: str, session: Any) -> str | None:
     return max(hits, key=len) if hits else None
 
 
+def _returns_from_universe(data: Any, symbol: str) -> list[float] | None:
+    """One name's closes, as the per-period return series a sizing runs on.
+
+    THE MISSING RUNG OF THE DATA LADDER. A user loaded their universe, was told
+    `size_position needs returns`, passed the universe again, and got the same
+    refusal — a loop with no exit, because nothing could turn 100 names' closes
+    into the ONE series the workflow measures. Deriving returns from a named
+    symbol's closes is data shaping, not workflow knowledge: the same job the
+    CSV loader does when it reads a wide file.
+
+    Handles both series shapes a universe arrives in: bare floats (the portal's
+    stored closes) and `{date, close}` rows (a wide/long CSV).
+    """
+    if not isinstance(data, dict):
+        return None
+    series = data.get(symbol.upper())
+    if not isinstance(series, list):
+        return None
+    closes: list[float] = []
+    for row in series:
+        if isinstance(row, dict):
+            value = row.get("close")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                closes.append(float(value))
+        elif isinstance(row, (int, float)) and not isinstance(row, bool):
+            closes.append(float(row))
+    if len(closes) < 2 or any(c == 0 for c in closes[:-1]):
+        return None
+    return [round(closes[i] / closes[i - 1] - 1.0, 8) for i in range(1, len(closes))]
+
+
+def _symbol_in(question: str, data: Any) -> str | None:
+    """The ONE universe name a question mentions, or None.
+
+    Deterministic, matched against the loaded universe's own keys — "size MU"
+    can only ever resolve to a name the caller supplied. Two matches is a real
+    ambiguity and returns None rather than a guess.
+    """
+    if not isinstance(data, dict):
+        return None
+    tokens = {t.strip(".,!?:;()'\"").upper() for t in question.split()}
+    hits = [k for k in data if isinstance(k, str) and k.upper() in tokens]
+    return hits[0] if len(hits) == 1 else None
+
+
+def _stored_universes(session: Any, question: str = "") -> tuple[str | None, list[str]]:
+    """Which stored universe this run can reach for, and everything it could.
+
+    "Run deep analysis on the given universe" was refused with "load some data"
+    while the account held exactly one universe WITH stored closes — from where
+    the user stands, the data IS given, and the refusal reads as the product
+    being broken. Signed in, the portal's stored universes are the caller's
+    own; reaching for one is the data-follows-you promise kept.
+
+    Deterministic ladder, no model call: a universe the question NAMES wins
+    (longest match); otherwise the account's ONLY stored universe; otherwise
+    nothing — several candidates is a real ambiguity, and running on data
+    nobody chose is worse than asking. The full list travels back so the
+    refusal can name the choices.
+
+    Only universes carrying `cache_id` qualify: names-without-closes cannot
+    feed a run, and offering one would move the error two steps later.
+    """
+    try:
+        rows = session.universes()
+    except Exception:  # noqa: BLE001 - offline or unauthenticated; nothing to reach for
+        return None, []
+    ready = [
+        str(u.get("name"))
+        for u in rows
+        if str(u.get("name") or "") and (u.get("definition") or {}).get("cache_id")
+    ]
+    low = question.lower()
+    named = [n for n in ready if n.lower() in low]
+    if named:
+        return max(named, key=len), ready
+    return (ready[0] if len(ready) == 1 else None), ready
+
+
 def _split_run(rest: str) -> tuple[str, list[str]]:
     """`screen_universe --universe sp100` -> ("screen_universe", [...]).
 
@@ -1494,13 +1628,13 @@ def _apply_flags(flags: list[str], session: Any, data: Any, backtest_fn: Any) ->
     `--universe sp100` must mean the same thing wherever it is read. Anything
     else is a tool teaching two dialects of itself.
     """
-    ns = argparse.Namespace(project=None, data=None, universe=None)
+    ns = argparse.Namespace(project=None, data=None, universe=None, symbol=None)
     i = 0
     unknown: list[str] = []
     while i < len(flags):
         f = flags[i]
         value = flags[i + 1] if i + 1 < len(flags) else None
-        if f in ("--data", "--universe", "--project") and value:
+        if f in ("--data", "--universe", "--project", "--symbol") and value:
             setattr(ns, f[2:], value)
             i += 2
             continue
@@ -1509,14 +1643,32 @@ def _apply_flags(flags: list[str], session: Any, data: Any, backtest_fn: Any) ->
     if unknown:
         raise ValueError(
             f"I do not know {' '.join(unknown)} in a session. "
-            "Here `run` takes --data, --universe and --project."
+            "Here `run` takes --data, --universe, --project and --symbol."
         )
+    # `--symbol` narrows whatever the SESSION holds, so it is applied after the
+    # merge below — inside `resolve_data` it saw only this line's own loads,
+    # and `run size_position --symbol MU` against an already-loaded universe
+    # answered "none loaded" about data sitting right there.
+    symbol, ns.symbol = ns.symbol, None
     loaded, fn = resolve_data(ns, session)
-    return (loaded if loaded is not None else data), (fn or backtest_fn)
+    merged = loaded if loaded is not None else data
+    if symbol:
+        derived = _returns_from_universe(merged, str(symbol))
+        if derived is None:
+            names = (
+                ", ".join(sorted(str(k) for k in merged)[:8]) if isinstance(merged, dict) else "none loaded"
+            )
+            raise ValueError(
+                f"--symbol {symbol} needs that name in a loaded universe with at "
+                f"least two closes. Loaded: {names}"
+            )
+        say(dim(f"  {str(symbol).upper()} {DOT} {len(derived)} returns {DOT} derived from its closes"))
+        merged = derived
+    return merged, (fn or backtest_fn)
 
 
 def _describe_source(flags: list[str]) -> str | None:
-    for key in ("--universe", "--data", "--project"):
+    for key in ("--universe", "--data", "--project", "--symbol"):
         if key in flags:
             i = flags.index(key)
             if i + 1 < len(flags):
@@ -1536,6 +1688,12 @@ def _repl_gap(gap: str, name: str) -> str:
     A tool that answers a refusal with instructions it cannot itself accept has
     stopped being a tool.
     """
+    # A message that already names the exact next line — `run x --symbol MU` —
+    # is right as it stands; wrapping it in "load it first" told somebody with
+    # a universe loaded to go and load a universe, which is the same loop this
+    # function exists to break, reintroduced one level up.
+    if "--symbol" in gap:
+        return NEWLINE.join(f"  {line}" if line.strip() else "" for line in gap.splitlines())
     head = gap.splitlines()[0]
     return (
         f"  {head}"
@@ -2242,6 +2400,35 @@ def _ask(
 
     name = str(chosen.get("name"))
 
+    # THE ACCOUNT IS REACHED FOR BEFORE REFUSING. A signed-in user whose portal
+    # holds a stored universe was told to "load some" data — a refusal that
+    # reads as the OS being broken, because from where they stand the data IS
+    # given. If the chosen workflow wants a universe and none is loaded, the
+    # one the question names — or the account's only one — is fetched, with
+    # the usual line saying which data ran. Several candidates stay a refusal
+    # that names them: running on data nobody chose is the worse failure.
+    requires = [str(r) for r in (chosen.get("requires") or [])]
+    ready: list[str] = []
+    if data is None and ("universe" in requires or "returns" in requires):
+        wanted, ready = _stored_universes(session, request)
+        if wanted:
+            try:
+                data = _narrow_to_universe(session, wanted, None)
+            except Exception as exc:  # noqa: BLE001 - reachable and unloadable: say so, refuse below
+                say(yellow(f"  {wanted} is on your account and could not be loaded: {exc}"))
+
+    # "size MU" against a loaded universe is a complete instruction: the name
+    # the question mentions picks the series out of the caller's own data.
+    # One match only — two is a real ambiguity and the refusal below names the
+    # move rather than this code guessing between them.
+    if "returns" in requires and not _looks_like_returns(data):
+        sym = _symbol_in(request, data)
+        if sym:
+            derived = _returns_from_universe(data, sym)
+            if derived:
+                say(dim(f"  {sym} {DOT} {len(derived)} returns {DOT} derived from its closes"))
+                data = derived
+
     # PREFLIGHT ON THIS PATH TOO. It was called only from `cmd_run`, so the
     # guard built to say "this workflow needs X and none was loaded" BEFORE a
     # run churns did not run on the path people actually type into.
@@ -2257,6 +2444,10 @@ def _ask(
         say(yellow(f"  {name} is the right workflow for that, and it cannot start yet."))
         for line in gap.splitlines()[1:]:
             say(dim(line) if line.strip() else "")
+        if len(ready) > 1:
+            say("")
+            say(yellow(f"  Your account holds {len(ready)} stored universes: {', '.join(ready)}."))
+            say(dim('  Name one in the question ("screen my s&p universe") or pass --universe <name>.'))
         return None
 
     repro = chosen.get("reproducible")
@@ -2613,9 +2804,14 @@ def cmd_repl(args: argparse.Namespace) -> int:
         # A QUESTION MAY NAME ITS OWN DATA. "screen my sp100 universe" is a
         # complete instruction: the workflow is inferable and so is the data.
         # Requiring the user to load it first, in a separate command, is the
-        # fork this whole change exists to remove.
+        # fork this whole change exists to remove. And a question that names
+        # nothing — "run deep analysis on the given universe" — still reaches
+        # the account's ONLY stored universe, because from where the signed-in
+        # user stands, that data is given.
         if data is None:
             named = _universe_named_in(line, session)
+            if not named:
+                named, _ready = _stored_universes(session)
             if named:
                 try:
                     data, backtest_fn = _apply_flags(["--universe", named], session, data, backtest_fn)
@@ -2661,6 +2857,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument(
         "--universe", help="name or id of a universe registered in the portal; narrows --data to it"
+    )
+    common.add_argument(
+        "--symbol",
+        help="one name out of a loaded universe; its closes become the return series sizing runs on",
     )
     common.add_argument(
         "--sleeve",

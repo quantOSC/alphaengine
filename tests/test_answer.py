@@ -125,6 +125,31 @@ def test_a_thousands_separator_does_not_smuggle_a_number_through():
         check_citations("4,321 observations.", known)
 
 
+def test_quoting_a_figure_at_coarser_precision_is_quoting_the_run():
+    """The live refusal that motivated this: a screen recorded 146.76 and the
+    model wrote "146" — the run's own figure at integer precision — and the
+    whole answer was refused. Round and trunc at the CITED precision both count
+    as quotes; a nearby number that is neither still fails."""
+    known = figures_of(Run({"screen": {"best_return_pct": 146.76}}))
+    check_citations("The top name returned 146 percent.", known)
+    check_citations("The top name returned 147 percent.", known)  # round up
+    with pytest.raises(UncitedFigure):
+        check_citations("The top name returned 145 percent.", known)
+    with pytest.raises(UncitedFigure):
+        # A one-decimal token claims one decimal, and 146.76 is 146.8 there.
+        check_citations("The top name returned 146.0 percent.", known)
+
+
+def test_a_range_dash_is_not_a_minus_sign():
+    """ "returns ranged 146-124" cited a -124 nobody wrote, and the true
+    sentence was refused for it. A "-" straight after a digit is a range."""
+    known = figures_of(Run({"screen": {"hi_pct": 146.76, "lo_pct": 124.32}}))
+    check_citations("Returns ranged from 146-124 percent across the top names.", known)
+    with pytest.raises(UncitedFigure):
+        # A genuinely negative invented figure is still refused.
+        check_citations("The worst name returned -320 percent.", known)
+
+
 # ── caveats are derived, never requested ───────────────────────────────────
 
 

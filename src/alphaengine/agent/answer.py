@@ -49,6 +49,7 @@ YOUR MODEL, YOUR KEY, STILL
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -207,7 +208,11 @@ def caveats_of(run: Any) -> tuple[list[str], str | None]:
 #: gap — a fabricated "12 trials" passes — and the gap is named here rather than
 #: papered over, because a guard whose limits are undocumented gets trusted past
 #: them.
-_NUMBER = re.compile(r"-?\d[\d,]*\.?\d*")
+#:
+#: The "-" is a SIGN only when it does not follow a digit or a dot: in
+#: "returns ranged 146-124" the dash is a range, and reading it as negation
+#: refused a true sentence for citing a -124 nobody wrote.
+_NUMBER = re.compile(r"(?<![\d.])-?\d[\d,]*\.?\d*")
 _BARE_INT_FLOOR = 100
 
 #: Rounding slack. A model quoting 0.55 for a figure recorded as 0.5478 is
@@ -216,8 +221,15 @@ _BARE_INT_FLOOR = 100
 _TOLERANCE = 0.005
 
 
-def _numbers_in(text: str) -> list[float]:
-    out: list[float] = []
+def _numbers_in(text: str) -> list[tuple[float, int]]:
+    """Each number in the text, with the DECIMALS THE TOKEN ITSELF CLAIMS.
+
+    The precision travels because quoting is lossy on purpose: "146" for a
+    recorded 146.76 is the run's own figure at integer precision, and telling
+    it apart from an invented 146 requires knowing the writer claimed no
+    decimals.
+    """
+    out: list[tuple[float, int]] = []
     for match in _NUMBER.finditer(text or ""):
         token = match.group().rstrip(".").replace(",", "")
         if not token or token in ("-",):
@@ -228,21 +240,38 @@ def _numbers_in(text: str) -> list[float]:
             continue
         if "." not in token and abs(value) < _BARE_INT_FLOOR:
             continue
-        out.append(value)
+        decimals = len(token.split(".")[1]) if "." in token else 0
+        out.append((value, decimals))
     return out
 
 
-def _traceable(value: float, known: dict[str, float]) -> bool:
-    for recorded in known.values():
-        if abs(recorded - value) <= _TOLERANCE:
+def _quotes(cited: float, decimals: int, recorded: float) -> bool:
+    """Is `cited` the recorded figure, quoted at the cited token's precision?
+
+    A model that writes "146" for a recorded 146.76 rounded or truncated a
+    figure it was quoting — refusing that teaches callers to turn the check
+    off, which is strictly worse than admitting precision-lossy quotes of REAL
+    figures. What is admitted is exactly that and nothing wider: the cited
+    value must equal the recorded one under round or trunc at the precision
+    the token claims, so a cited 145 still fails against 146.76, and a figure
+    the run never produced still fails against everything.
+
+    Percent and fraction are the same figure wearing different units, and both
+    spellings appear across these figures by design.
+    """
+    for rec in (recorded, recorded * 100.0, recorded / 100.0):
+        if abs(rec - cited) <= _TOLERANCE:
             return True
-        # Percent and fraction are the same figure wearing different units, and
-        # both spellings appear across these figures by design.
-        if abs(recorded * 100.0 - value) <= _TOLERANCE:
+        scale = 10.0**decimals
+        if abs(round(rec, decimals) - cited) <= _TOLERANCE:
             return True
-        if abs(recorded / 100.0 - value) <= _TOLERANCE:
+        if abs(math.trunc(rec * scale) / scale - cited) <= _TOLERANCE:
             return True
     return False
+
+
+def _traceable(value: float, decimals: int, known: dict[str, float]) -> bool:
+    return any(_quotes(value, decimals, recorded) for recorded in known.values())
 
 
 def check_citations(text: str, known: dict[str, float], question: str = "") -> None:
@@ -264,11 +293,11 @@ def check_citations(text: str, known: dict[str, float], question: str = "") -> N
     ones: 500 is a perfectly plausible fabricated observation count, and it
     should still be refused when nobody asked about 500 of anything.
     """
-    from_question = set(_numbers_in(question)) if question else set()
+    from_question = {v for v, _ in _numbers_in(question)} if question else set()
     invented = [
         v
-        for v in _numbers_in(text)
-        if not _traceable(v, known) and not any(abs(q - v) <= _TOLERANCE for q in from_question)
+        for v, decimals in _numbers_in(text)
+        if not _traceable(v, decimals, known) and not any(abs(q - v) <= _TOLERANCE for q in from_question)
     ]
     if invented:
         raise UncitedFigure(

@@ -140,6 +140,7 @@ distinction is the whole of the data boundary below.
 | `--project MODULE` | a module exposing `data` and `backtest_fn` |
 | `--data FILE` | a local CSV: wide, long, or a single series |
 | `--universe NAME` | a universe registered in the portal, with its stored closes |
+| `--symbol TICKER` | one name out of a loaded universe; its closes become the return series |
 | `--sleeve NAME` | the sleeve this run belongs to, and the budget it is bound by |
 | `--thesis ID` | a draft thesis to propose this run's shortlist as a sleeve for |
 | `--label TEXT` | what to call the artifact this run produces |

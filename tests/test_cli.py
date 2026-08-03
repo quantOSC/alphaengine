@@ -118,6 +118,42 @@ def test_the_shipped_demo_declares_the_grid_the_readme_documents():
     assert cli.project_grid() == demo.GRID
 
 
+# ── one name out of a loaded universe ──────────────────────────────────────
+
+
+def test_a_symbol_turns_a_universe_into_its_return_series():
+    """The loop with no exit: told `size_position needs returns`, the user
+    loaded their universe, passed it again, and got the same refusal. A named
+    symbol's closes become the one series the workflow measures."""
+    prices = {"MU": [100.0, 110.0, 99.0], "AMD": [50.0, 55.0]}
+    got = cli._returns_from_universe(prices, "mu")
+    assert got == [0.1, -0.1]
+    # {date, close} rows — the shape a wide CSV loads as — work identically.
+    rows = {"MU": [{"date": "a", "close": 100.0}, {"date": "b", "close": 110.0}]}
+    assert cli._returns_from_universe(rows, "MU") == [0.1]
+    assert cli._returns_from_universe(prices, "TSLA") is None
+    assert cli._returns_from_universe([1.0, 2.0], "MU") is None
+
+
+def test_a_question_naming_one_symbol_picks_it_and_two_is_ambiguity():
+    data = {"MU": [1.0], "AMD": [1.0]}
+    assert cli._symbol_in("size a position in MU for me", data) == "MU"
+    assert cli._symbol_in("compare MU and AMD", data) is None
+    assert cli._symbol_in("size something", data) is None
+
+
+def test_preflight_with_a_universe_loaded_names_the_symbol_move():
+    """The refusal must not send somebody to load the thing they loaded."""
+    catalogue = [{"name": "size_position", "requires": ["returns"]}]
+    prices = {"MU": [100.0, 110.0], "AMD": [50.0, 55.0]}
+    gap = cli.preflight(catalogue, "size_position", data=prices, backtest_fn=None)
+    assert gap is not None
+    assert "--symbol AMD" in gap
+    # The generic "Load some" doors are the loop with no exit; they must not
+    # render when a universe is already loaded.
+    assert "Load some" not in gap
+
+
 # ── exit codes carry meaning ───────────────────────────────────────────────
 
 
@@ -627,10 +663,13 @@ def test_a_return_series_pointed_at_a_screen_is_refused_up_front():
 
 
 def test_a_universe_pointed_at_a_sizing_workflow_is_refused_up_front():
+    """And the refusal names the MOVE, not a re-load of the thing already
+    loaded — "load a universe" to somebody with a universe loaded was a loop
+    with no exit, which is how this message read in production."""
     universe = {"AAPL": [1.0, 2.0], "MSFT": [3.0, 4.0]}
     gap = cli.preflight(_SHAPED, "size_position", data=universe, backtest_fn=None)
-    assert gap and "returns" in gap
-    assert "per-period returns" in gap
+    assert gap and "ONE return series" in gap
+    assert "--symbol AAPL" in gap
 
 
 def test_the_right_shape_passes_without_comment():

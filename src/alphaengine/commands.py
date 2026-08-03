@@ -84,6 +84,9 @@ FLAGS: dict[str, Flag] = {
     "project": Flag("--project", "MODULE", "a module exposing `data` and `backtest_fn`"),
     "data": Flag("--data", "FILE", "a local CSV: wide, long, or a single series"),
     "universe": Flag("--universe", "NAME", "a universe registered in the portal, with its stored closes"),
+    "symbol": Flag(
+        "--symbol", "TICKER", "one name out of a loaded universe; its closes become the return series"
+    ),
     "sleeve": Flag("--sleeve", "NAME", "the sleeve this run belongs to, and the budget it is bound by"),
     "thesis": Flag("--thesis", "ID", "a draft thesis to propose this run's shortlist as a sleeve for"),
     "label": Flag("--label", "TEXT", "what to call the artifact this run produces"),
@@ -175,7 +178,7 @@ COMMANDS: tuple[Command, ...] = (
             "alphaengine run size_position --data returns.csv",
             "alphaengine run validate_study --project research.momentum",
         ),
-        flags=("project", "data", "universe", "label", "input", "quiet", "url", "key"),
+        flags=("project", "data", "universe", "symbol", "label", "input", "quiet", "url", "key"),
     ),
     Command(
         verb="<anything else>",
