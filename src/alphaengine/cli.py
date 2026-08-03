@@ -195,53 +195,6 @@ def say(*parts: str) -> None:
 _SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if _UNICODE_OK else "|/-\\"
 
 
-class _Streamer:
-    """Print model tokens as they arrive, wrapped and indented.
-
-    A raw token feed writes past the right margin and interleaves badly with
-    every other line this file prints, so the text is buffered to word
-    boundaries and emitted a line at a time under the same `agent ·` gutter the
-    rest of the run uses. The result reads as part of the transcript rather than
-    as something escaping from underneath it.
-
-    Nothing is echoed when stdout is not a TTY: a CI log wants the decision and
-    the figures, not the deliberation that produced them.
-    """
-
-    def __init__(self, width: int = 74) -> None:
-        self.width = width
-        self._line = ""
-        self._on = False
-
-    def __enter__(self) -> _Streamer:
-        self._on = _tty()
-        self._line = ""
-        return self
-
-    def write(self, chunk: str) -> None:
-        if not self._on:
-            return
-        for piece in str(chunk).split("\n"):
-            if piece == "" and self._line:
-                self._flush()
-                continue
-            for word in piece.split(" "):
-                if not word:
-                    continue
-                if len(self._line) + len(word) + 1 > self.width:
-                    self._flush()
-                self._line = f"{self._line} {word}".strip()
-
-    def _flush(self) -> None:
-        if self._line:
-            say(f"  {dim('agent  ' + DOT)}  {dim(self._line)}")
-            self._line = ""
-
-    def __exit__(self, *exc: object) -> None:
-        self._flush()
-        self._on = False
-
-
 class Working:
     """An in-place status line for work that blocks, with the elapsed time.
 
@@ -1998,14 +1951,19 @@ def _ask(
     from .client import AgentDriver, AgentRefusal, Offline, ServerError
     from .model import NoModelConfigured, build_think
 
-    # THE REASONING ARRIVES AS IT IS WRITTEN. The model call is the longest
-    # pause in the product, and a spinner over it says only "still going". What
-    # a quant actually wants to see is the argument being made for the workflow
-    # about to run on their data — so the tokens go straight to the screen,
-    # dimmed and indented to read as the machine thinking rather than as output.
-    streamer = _Streamer()
+    # ── NOT STREAMED, AND THE REASON IS WHAT THE CALL RETURNS ──────────────
+    #
+    # `pick` asks the model for a STRUCTURED answer — `{"choice": n, "why":
+    # "..."}` — and streaming it printed the raw JSON to the user's terminal,
+    # code fence and all, wrapped at 74 columns, immediately followed by
+    # `on_thought` printing the parsed `why` again. Two renderings of one
+    # sentence, one of them machine format.
+    #
+    # The lesson generalises: stream a call whose output is PROSE, never one
+    # whose output is a wire format. `on_thought` already narrates this one, in
+    # the words a person wrote it in.
     try:
-        think, label = build_think(on_token=streamer.write)
+        think, label = build_think()
     except NoModelConfigured as exc:
         say(yellow(str(exc)))
         return None
@@ -2035,7 +1993,7 @@ def _ask(
     )
     options = [{"op": w.get("name", "?"), "params": {"agency": w.get("agency")}} for w in catalogue]
     try:
-        with streamer:
+        with Working(dim("reading the catalogue"), plain="reading the catalogue"):
             index = driver.pick(options)
         chosen = catalogue[index]
     except AgentRefusal as exc:
