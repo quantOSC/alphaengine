@@ -204,13 +204,22 @@ class Session:
         data: Any = None,
         backtest_fn: Any = None,
         handlers: dict[str, Handler] | None = None,
+        workspace_id: str | None = None,
         **inputs: Any,
     ) -> Run:
-        """Open a run. `data` and `backtest_fn` stay on this machine."""
-        directive = self._post(
-            "/api/harness/runs",
-            {"workflow": workflow, "version": version, "inputs": inputs},
-        )
+        """Open a run. `data` and `backtest_fn` stay on this machine.
+
+        `workspace_id` names the SLEEVE this run belongs to. Optional, and
+        supplying it is what connects a run to the object model: the server
+        resolves the risk budget that binds the sleeve, and the result rolls
+        into the pod's book. Without it the run is complete, correct, and
+        attached to nothing — which is why several finished mechanisms on the
+        platform had never once received input.
+        """
+        body: Figures = {"workflow": workflow, "version": version, "inputs": inputs}
+        if workspace_id:
+            body["workspace_id"] = workspace_id
+        directive = self._post("/api/harness/runs", body)
         run = Run(
             session=self,
             run_id=directive["run_id"],
@@ -258,6 +267,68 @@ class Session:
         if window:
             path += f"?window={int(window)}"
         return self._get(path)
+
+    def save_signals(
+        self,
+        *,
+        asof: str,
+        rows: list[Figures],
+        label: str = "signals",
+        workspace_id: str | None = None,
+        engine_version: str | None = None,
+        notes: list[str] | None = None,
+        source_run_id: str | None = None,
+    ) -> Figures:
+        """Record a ranked file: ticker, rank, score, target weight. Dated.
+
+        ── THE ONLY THING THIS PACKAGE WRITES, AND THAT IS THE POINT ───────────
+
+        Everything else here reads. This is the one call that leaves an object
+        behind, and it exists because a run that produces a shortlist and then
+        prints it has produced nothing: the desk that wanted the list has to
+        copy it out of a terminal, and next week nobody can say what yesterday's
+        looked like or what moved.
+
+        WHAT MAY BE IN A ROW, AND WHAT MAY NEVER BE. Ticker, rank, score, target
+        weight. Never a share count, never a per-account quantity, never an
+        order. That boundary is permanent and it is enforced on the server by an
+        allowlist rather than by this docstring — a row carrying `shares` is
+        REFUSED, not quietly stripped, because a caller who sent quantities
+        believes they were stored.
+
+        `notes` travels WITH the file on purpose. A ranked list read without the
+        caveats the run attached to it is the exact failure every honesty control
+        in this product exists to prevent, and the caveats are least likely to
+        survive the step where the list gets handed to somebody else.
+
+        Idempotent on (label, asof): re-running a screen on the same day
+        REPLACES that day's file and bumps its version rather than accumulating
+        near-duplicates that leave a reader choosing between versions of the
+        truth.
+        """
+        body: Figures = {"asof": asof, "rows": rows, "label": label}
+        if workspace_id:
+            body["workspace_id"] = workspace_id
+        if engine_version:
+            body["engine_version"] = engine_version
+        if notes:
+            body["notes"] = notes
+        if source_run_id:
+            body["source_run_id"] = source_run_id
+        return self._post("/api/me/signals", body)
+
+    def sleeves(self) -> list[Figures]:
+        """The sleeves you can run against, if your account is in a pod.
+
+        A sleeve is a workspace with a pod, a stage and a PM. Naming one on a
+        run is what lets the platform resolve the risk budget that binds it and
+        roll the result into the pod's book — without it every run is orphaned
+        from the object model and every sleeve reports zero.
+
+        An account with no pod has no sleeves, and that is a working product
+        rather than an error: a solo quant is a first-class user here.
+        """
+        return list(self._get("/api/me/sleeves").get("sleeves") or [])
 
     # ── transport ──────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Figures | None = None) -> Figures:

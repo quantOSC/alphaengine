@@ -97,6 +97,8 @@ import importlib
 import os
 import pathlib
 import sys
+import threading
+import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -177,10 +179,97 @@ _UNICODE_OK = _stream_handles("·→")
 DOT = "·" if _UNICODE_OK else "-"
 #: Rightwards arrow, or the ASCII spelling.
 ARROW = "→" if _UNICODE_OK else "->"
+#: A lit and an unlit marker. Both surfaces that rank things by "can you do this
+#: yet" use the same pair, because they are answering the same question.
+ON = "●" if _UNICODE_OK else "*"
+OFF = "○" if _UNICODE_OK else "-"
 
 
 def say(*parts: str) -> None:
     print(*parts, flush=True)
+
+
+#: Spinner frames. Braille where the stream takes it, ASCII where it does not —
+#: the same degradation `DOT` and `ARROW` get, for the same reason: a Windows
+#: cp1252 console rendered the pretty version as mojibake.
+_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if _UNICODE_OK else "|/-\\"
+
+
+class Working:
+    """An in-place status line for work that blocks, with the elapsed time.
+
+    ── WHY THIS EXISTS ────────────────────────────────────────────────────────
+
+    Every narration in this file was `print()`, which meant that each of the
+    three things that actually take time — the model call, the network round
+    trip, and the in-process compute of a step — ran in total silence. The
+    screen showed the line BEFORE a step and then nothing until the step
+    returned, so a thirty-second sweep and a hung process looked identical.
+
+    For a product whose claim is that the research loop got shorter, being
+    unable to show the loop running is not a cosmetic gap. The owner's words
+    were "no animation going on showing status of work being done".
+
+    ── WHAT IT DOES NOT DO ────────────────────────────────────────────────────
+
+    It never invents progress. There is no percentage and no bar, because
+    nothing here knows how long a step will take and a bar that fills at a
+    guessed rate is a lie told smoothly. It reports two true things: that work
+    is still running, and how long it has been running.
+
+    NOT A TTY, NOT A SPINNER. A CI log or a piped run gets one plain line at the
+    start and the ordinary completion line at the end — carriage returns in a
+    transcript are noise, and the transcript is the artifact there.
+    """
+
+    def __init__(self, label: str, *, plain: str = "") -> None:
+        self.label = label
+        #: The label with no escape codes, so the line can be erased by writing
+        #: spaces over it. Deliberately not derived by stripping ANSI: the caller
+        #: knows what it wrote, and a regex that misses one sequence leaves
+        #: fragments on screen.
+        self.plain = plain or label
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = 0.0
+        self._painted = 0
+
+    @property
+    def elapsed(self) -> float:
+        return time.monotonic() - self._started
+
+    def __enter__(self) -> Working:
+        self._started = time.monotonic()
+        if not _tty():
+            return self
+        self._thread = threading.Thread(target=self._animate, daemon=True)
+        self._thread.start()
+        return self
+
+    def _animate(self) -> None:
+        i = 0
+        # A first frame immediately, then every 100ms. Waiting out the first
+        # interval before drawing anything makes a fast step flash a blank line.
+        while True:
+            text = f"  {_SPIN[i % len(_SPIN)]} {self.label}  {self.elapsed:.1f}s"
+            plain_len = len(f"  {_SPIN[0]} {self.plain}  {self.elapsed:.1f}s")
+            sys.stdout.write("\r" + text)
+            sys.stdout.flush()
+            self._painted = max(self._painted, plain_len)
+            if self._stop.wait(0.1):
+                return
+            i += 1
+
+    def __exit__(self, *exc: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+            # Erased with spaces rather than an ANSI erase-line: this runs on
+            # consoles old enough that colour is the only escape sequence worth
+            # assuming, and a stray `[2K` printed literally is worse than a
+            # slightly wider blank.
+            sys.stdout.write("\r" + " " * (self._painted + 2) + "\r")
+            sys.stdout.flush()
 
 
 def cyan(t: str) -> str:
@@ -622,9 +711,10 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
         except ServerError as exc:
             if exc.status == 404:
                 raise DataShapeError(
-                    f"{wanted!r} was registered without its prices (symbols only), so "
-                    "there is nothing stored to run on. Add --data with the closes, or "
-                    "re-register the universe with them."
+                    f"{wanted!r} holds its names on your account and not its prices, "
+                    "so there is nothing stored to run on. On the portal's Data page "
+                    'it will say "this browser only" — press "Store on my account" '
+                    "and it will load here. Or pass --data with the closes."
                 ) from exc
             raise
         prices = fetched.get("prices") or {}
@@ -660,6 +750,128 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
     return kept
 
 
+def _resolve_sleeve(session: Any, wanted: str | None) -> str | None:
+    """A sleeve name or id -> the workspace id a run is opened against.
+
+    Resolved by NAME because that is what a person types. A pod calls it
+    "Systematic Macro", not a uuid, and requiring the uuid is how a correct
+    mechanism ends up never receiving input — which is what happened here: no
+    caller ever sent `workspace_id`, so the risk budget resolved to nothing and
+    every sleeve's P&L reported zero.
+
+    A miss NAMES what is available rather than failing bare, and an account with
+    no pod is told that plainly instead of being shown an empty list.
+    """
+    if not wanted or session is None:
+        return None
+    from .loaders import DataShapeError
+
+    try:
+        rows = session.sleeves()
+    except Exception as exc:  # noqa: BLE001 - offline or refused, said plainly
+        raise DataShapeError(f"--sleeve needs the portal, and it could not be reached: {exc}") from exc
+
+    if not rows:
+        raise DataShapeError(
+            "your account is not in a pod, so it has no sleeves. Drop --sleeve "
+            "and the run works exactly the same; a sleeve only adds the budget "
+            "it is bound by and the book it rolls into."
+        )
+    # THE KEY IS `id`, NOT `workspace_id`. The server's sleeve serializer returns
+    # `{id, pod_id, name, stage, benchmark, initial_capital, pm_user_id, ...}` —
+    # the workspace IS the sleeve, so its primary key is `id`, and the name
+    # `workspace_id` only appears on the routes that TAKE one. Reading the
+    # parameter name off the route and assuming it names the response field is
+    # the same mistake that made `--universe` read a top-level `symbols` key the
+    # server has never sent. Pinned by a contract test in the platform repo that
+    # imports this function and the real serializer together.
+    match = next(
+        (s for s in rows if wanted in (str(s.get("id")), str(s.get("name")))),
+        None,
+    )
+    if match is None:
+        known = ", ".join(str(s.get("name")) for s in rows) or "none"
+        raise DataShapeError(f"no sleeve called {wanted!r}. Yours: {known}")
+    return str(match.get("id"))
+
+
+def _publish_signals(session: Any, run: Any, *, workspace_id: str | None, label: str | None) -> None:
+    """Turn a closed screen into a dated, versioned, diffable ranked file.
+
+    ── WHY A RUN HAS TO LEAVE SOMETHING BEHIND ────────────────────────────────
+
+    The platform had no machine-produced artifact. Every durable object began as
+    a human typing into a form, so the permission layer, the freeze layer and
+    the merge layer all governed a flow whose source was a text box — which is
+    why the product read as disconnected pieces even though the connective
+    tissue had been built. Nothing flowed through it.
+
+    A screen produced a ranking and printed it. This writes it: ticker, rank,
+    score, dated, versioned, and diffable against yesterday's. The diff is the
+    part that matters to a desk — nobody reads a hundred ranked names every
+    morning, they read what moved — and it was already implemented on the
+    platform with nothing to read.
+
+    THE CAVEATS TRAVEL WITH IT. `n_insufficient` and `truncated` are exactly the
+    facts that make a shortlist honest, and a list handed on without them is the
+    failure every control in this product exists to prevent. They are attached
+    to the object, not printed beside it, because the terminal is not where this
+    gets read.
+
+    A FAILURE HERE NEVER FAILS THE RUN. The figures are already on screen and
+    the run's own record is already sealed server-side; losing the file costs a
+    convenience, and taking the run down with it would trade the result for the
+    receipt.
+    """
+    figures = (run.artifact or {}).get("figures") or {}
+    package = figures.get("package") or {}
+    rows = package.get("rows") or []
+    if not rows:
+        return
+
+    ranked = [
+        {"ticker": str(r.get("symbol") or r.get("ticker") or ""), "rank": i + 1, "score": r.get("score")}
+        for i, r in enumerate(rows)
+    ]
+    notes: list[str] = []
+    n_insufficient = package.get("n_insufficient")
+    if n_insufficient:
+        notes.append(
+            f"{n_insufficient} names in the universe had too little history to "
+            "be measured on this metric and are absent from this ranking."
+        )
+    if package.get("truncated"):
+        notes.append(f"More names passed than were returned; this is the top {len(ranked)} of them.")
+    universe_size, n_evaluated = package.get("universe_size"), package.get("n_evaluated")
+    if universe_size and n_evaluated is not None and n_evaluated < universe_size:
+        notes.append(f"{n_evaluated} of {universe_size} names were evaluated.")
+
+    import datetime
+
+    try:
+        saved = session.save_signals(
+            asof=datetime.date.today().isoformat(),
+            rows=ranked,
+            label=label or "signals",
+            workspace_id=workspace_id,
+            engine_version=package.get("engine_version"),
+            notes=notes or None,
+            source_run_id=getattr(run, "run_id", None),
+        )
+    except Exception as exc:  # noqa: BLE001 - named, never fatal; see the docstring
+        say(dim(f"  The ranking could not be filed: {exc}"))
+        return
+
+    version = saved.get("version")
+    say("")
+    say(
+        f"  {green('Filed.')} {len(ranked)} names {DOT} "
+        + dim(f"{saved.get('label')} {DOT} {saved.get('asof')}")
+        + (dim(f" {DOT} v{version}") if version else "")
+    )
+    say(dim("  It is on your account, dated and versioned. Tomorrow's run diffs against it."))
+
+
 def _drive(run: Any, *, quiet: bool = False) -> None:
     """Execute the run, narrating each step.
 
@@ -678,24 +890,28 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
         batch = run.permitted if run.selection == "all" else run.permitted[:1]
         for step in batch:
             op = step.get("op", "?")
-            if not quiet:
-                say(f"  {dim('server ' + ARROW)}  {bold(op)}")
             before = run.status
-            run.step(step)
+            # THE STEP IS WATCHED WHILE IT RUNS, not announced and then silent.
+            # `compute.*` executes in-process against the caller's own frames, so
+            # this is the one place in the product where a long wait is entirely
+            # local and entirely invisible.
+            with Working(f"{dim('running ' + ARROW)}  {bold(op)}", plain=f"running {ARROW}  {op}") as w:
+                run.step(step)
             n += 1
+            took = dim(f"{w.elapsed:.1f}s")
 
             still = any(p.get("step_id") == step.get("step_id") for p in run.permitted)
             if still and before == "open" and run.status == "open":
                 key = str(step.get("step_id"))
                 failures[key] = failures.get(key, 0) + 1
                 if not quiet:
-                    say(f"  {red('local  ' + DOT)}  {op} could not be executed here")
+                    say(f"  {red('local  ' + DOT)}  {op} could not be executed here  {took}")
                 if failures[key] >= 2:
                     run.status = "abandoned"
                     run.stopped = {"reason": "step_failed", "op": op}
                     return
             elif not quiet:
-                say(f"  {dim('local  ' + DOT)}  done")
+                say(f"  {dim('server ' + ARROW)}  {bold(op)}  {took}")
 
             if run.status != "open":
                 return
@@ -707,6 +923,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     session, url = _session(args.url, args.key)
     try:
         data, backtest_fn = resolve_data(args, session)
+        workspace_id = _resolve_sleeve(session, getattr(args, "sleeve", None))
     except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
         return 2
@@ -730,7 +947,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             say("")
             say(yellow(gap))
             return 2
-        run = session.open(args.workflow, data=data, backtest_fn=backtest_fn, **inputs)
+        run = session.open(
+            args.workflow,
+            data=data,
+            backtest_fn=backtest_fn,
+            workspace_id=workspace_id,
+            **inputs,
+        )
         _drive(run, quiet=args.quiet)
     except Offline:
         _explain_offline(url)
@@ -741,7 +964,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             say(dim("  Key set. Run that again."))
         return 2
 
-    return _report(run)
+    code = _report(run)
+    if run.status == "closed":
+        _publish_signals(session, run, workspace_id=workspace_id, label=args.label)
+    return code
 
 
 def _report(run: Any) -> int:
@@ -1135,8 +1361,7 @@ def ladder_lines(*, keyed: bool) -> list[str]:
     # different sentence. "Add your own model key" told somebody who already had
     # one to go and get one, which reads as the product being broken.
     stranded = keys_without_sdk()
-    on = "●" if _UNICODE_OK else "*"
-    off = "○" if _UNICODE_OK else "-"
+    on, off = ON, OFF
 
     rungs = [
         (
@@ -1203,7 +1428,78 @@ def ladder_lines(*, keyed: bool) -> list[str]:
     return out
 
 
-def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
+def _quoted(name: str) -> str:
+    """A universe name as it must be TYPED. Names contain spaces."""
+    return f'"{name}"' if " " in name else name
+
+
+def account_data_lines(session: Any) -> list[str]:
+    """What this account has registered in the portal, and which of it can run.
+
+    ── WHY THE BOOT SCREEN MAKES A NETWORK CALL AT ALL ────────────────────────
+
+    It said `data  none  ·  pass --project to load yours` to a user signed in to
+    an account holding a registered universe, and never mentioned `--universe`.
+    Both halves of the product were working and the screen that exists to say
+    where you are could not see one of them. "The OS cannot answer a question
+    about data it cannot reach" was the diagnosis; being unable to NAME the data
+    is the same failure one step earlier.
+
+    ONE REQUEST, AND ONLY WHEN IT HELPS. The caller checks that we are signed in
+    and that nothing was loaded from disk first, so this never fires on a run
+    that already knows its data. A failure returns nothing: an offline boot
+    screen is a normal boot screen, not an error.
+
+    IT ALSO NAMES THE HALF-REGISTERED CASE, which is the one that cost the most
+    time — a universe whose names reached the account and whose prices did not
+    looks identical to a healthy one from every surface except the run that
+    fails on it.
+    """
+    if session is None:
+        return []
+    try:
+        rows = session.universes()
+    except Exception:  # noqa: BLE001 - offline, refused, or slow: say nothing
+        return []
+    if not rows:
+        return []
+
+    ready: list[tuple[str, int, int]] = []
+    unstored: list[tuple[str, int]] = []
+    for u in rows:
+        definition = u.get("definition") or {}
+        name = str(u.get("name") or "")
+        symbols = definition.get("symbols") or []
+        n_obs = definition.get("n_obs")
+        if definition.get("cache_id"):
+            ready.append((name, len(symbols), int(n_obs or 0)))
+        else:
+            unstored.append((name, len(symbols)))
+
+    out = ["  " + dim("Registered in the portal")]
+    for name, n_names, n_obs in ready[:6]:
+        shape = f"{n_names} names" + (f" {DOT} {n_obs} obs" if n_obs else "")
+        out.append(
+            f"  {green(ON)} {bold(name.ljust(22))}{dim(shape.ljust(26))}" + dim(f"--universe {_quoted(name)}")
+        )
+    for name, n_names in unstored[:6]:
+        out.append(
+            f"  {dim(OFF)} {dim(name.ljust(22))}{dim(f'{n_names} names'.ljust(26))}"
+            + yellow("prices not stored")
+        )
+    hidden = (len(ready) - 6) + (len(unstored) - 6)
+    if hidden > 0:
+        out.append("  " + dim(f"  and {hidden} more"))
+    if unstored:
+        # SAID HERE BECAUSE HERE IS WHERE IT IS ACTIONABLE. The alternative is
+        # discovering it from a run that refuses, which reads as the run's fault.
+        out.append("")
+        out.append("  " + dim("A universe with no stored prices holds names only. Open it on the "))
+        out.append("  " + dim("portal's Data page and store them to run on it from here."))
+    return out
+
+
+def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any = None) -> None:
     """The opening screen. State first, decoration second.
 
     Suppressed entirely when stdout is not a TTY: a CI log wants a transcript.
@@ -1260,6 +1556,17 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool) -> None:
     say("")
     for line in ladder_lines(keyed=keyed):
         say(line)
+
+    # ONLY WHEN IT CHANGES THE ANSWER: signed in, and nothing already loaded
+    # from disk. A run that knows its data does not need a directory of the
+    # account's, and the call is not worth making to print something ignorable.
+    if keyed and data is None:
+        lines = account_data_lines(session)
+        if lines:
+            say("")
+            for line in lines:
+                say(line)
+
     say("")
     # THE ONE LINE THAT IS NOT STATUS. It is here because it is the thing most
     # often forgotten and the thing that makes the rest make sense.
@@ -1409,7 +1716,15 @@ def _is_workflow(session: Any, name: str) -> bool:
         return False
 
 
-def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -> Any:
+def _ask(
+    session: Any,
+    url: str,
+    request: str,
+    *,
+    data: Any,
+    backtest_fn: Any,
+    workspace_id: str | None = None,
+) -> Any:
     """Natural language → a workflow chosen and driven by the user's own model.
 
     THE PART THAT IS EASY TO GET WRONG: the model picks the WORKFLOW from the
@@ -1452,7 +1767,13 @@ def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -
     )
     options = [{"op": w.get("name", "?"), "params": {"agency": w.get("agency")}} for w in catalogue]
     try:
-        chosen = catalogue[driver.pick(options)]
+        # The single longest silence in the product: an inference call over the
+        # user's own key, with no streaming and nothing to report until it
+        # returns. Watched, because "is it thinking or is it hung" was
+        # unanswerable from the screen.
+        with Working(dim("reading the catalogue"), plain="reading the catalogue"):
+            index = driver.pick(options)
+        chosen = catalogue[index]
     except AgentRefusal as exc:
         say(red(f"The model did not choose a workflow: {exc}"))
         return None
@@ -1483,7 +1804,7 @@ def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -
     )
 
     try:
-        run = session.open(name, data=data, backtest_fn=backtest_fn)
+        run = session.open(name, data=data, backtest_fn=backtest_fn, workspace_id=workspace_id)
         driver.drive(run)
     except Offline:
         _explain_offline(url)
@@ -1496,6 +1817,8 @@ def _ask(session: Any, url: str, request: str, *, data: Any, backtest_fn: Any) -
         return None
 
     _report(run)
+    if run.status == "closed":
+        _publish_signals(session, run, workspace_id=workspace_id, label=None)
     _answer(request, run, think)
     # SAID AT THE END, WHERE IT TRAVELS WITH THE RESULT. A study whose path was
     # chosen by a model is a different object from one whose path was fixed in
@@ -1546,7 +1869,8 @@ def _answer(request: str, run: Any, think: Callable[[str], str]) -> None:
         return think(_ANSWER_PROMPT.format(question=question, figures=lines or "  (none)"))
 
     try:
-        answer = synthesize(request, run, write=write)
+        with Working(dim("composing the answer"), plain="composing the answer"):
+            answer = synthesize(request, run, write=write)
     except UncitedFigure as exc:
         # NAMED, NOT SWALLOWED. This is the guard working, and a user who sees
         # nothing cannot tell it from a model that had nothing to say.
@@ -1592,11 +1916,18 @@ def cmd_repl(args: argparse.Namespace) -> int:
     session, url = _session(args.url, args.key)
     try:
         data, backtest_fn = resolve_data(args, session)
+        workspace_id = _resolve_sleeve(session, getattr(args, "sleeve", None))
     except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
         return 2
 
-    boot(url, project=args.project, data=data, keyed=bool(args.key or os.environ.get(_ENV_KEY)))
+    boot(
+        url,
+        project=args.project,
+        data=data,
+        keyed=bool(args.key or os.environ.get(_ENV_KEY)),
+        session=session,
+    )
 
     # Named on the status line so "is my data in, and from where" is answerable
     # without running a command. `--universe` and `--data` are recorded too,
@@ -1814,7 +2145,17 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 except Exception as exc:  # noqa: BLE001
                     say(dim(f"  ({named} is registered and could not be loaded: {exc})"))
 
-        last = _ask(session, url, line, data=data, backtest_fn=backtest_fn) or last
+        last = (
+            _ask(
+                session,
+                url,
+                line,
+                data=data,
+                backtest_fn=backtest_fn,
+                workspace_id=workspace_id,
+            )
+            or last
+        )
 
 
 # ── entry point ────────────────────────────────────────────────────────────
@@ -1842,6 +2183,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument(
         "--universe", help="name or id of a universe registered in the portal; narrows --data to it"
+    )
+    common.add_argument(
+        "--sleeve",
+        help="name or id of a sleeve this run belongs to; binds it to that sleeve's risk budget",
     )
 
     p = argparse.ArgumentParser(
