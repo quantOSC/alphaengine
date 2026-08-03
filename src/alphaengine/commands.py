@@ -85,6 +85,7 @@ FLAGS: dict[str, Flag] = {
     "data": Flag("--data", "FILE", "a local CSV: wide, long, or a single series"),
     "universe": Flag("--universe", "NAME", "a universe registered in the portal, with its stored closes"),
     "sleeve": Flag("--sleeve", "NAME", "the sleeve this run belongs to, and the budget it is bound by"),
+    "thesis": Flag("--thesis", "ID", "a draft thesis to propose this run's shortlist as a sleeve for"),
     "label": Flag("--label", "TEXT", "what to call the artifact this run produces"),
     "input": Flag("--input", "K=V", "a workflow input; repeatable"),
     "quiet": Flag("--quiet", "", "only the result, no step narration"),

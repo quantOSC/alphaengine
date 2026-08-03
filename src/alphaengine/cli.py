@@ -821,6 +821,111 @@ def _resolve_sleeve(session: Any, wanted: str | None) -> str | None:
     return str(row.get("id")) if row else None
 
 
+def _offer_sleeve(session: Any, run: Any, wanted: str | None) -> None:
+    """Resolve `--thesis` and propose, or say why it cannot.
+
+    BY TITLE AS WELL AS BY ID, because a person types a name. The same reasoning
+    as `--sleeve` and `--universe`: requiring a uuid is how a correct mechanism
+    ends up never receiving input.
+    """
+    if not wanted or session is None:
+        return
+    try:
+        rows = session.theses()
+    except Exception as exc:  # noqa: BLE001 - offline or refused, said plainly
+        say(dim(f"  Could not read your theses: {exc}"))
+        return
+
+    match = next((t for t in rows if wanted in (str(t.get("id")), str(t.get("title")))), None)
+    if match is None:
+        known = ", ".join(str(t.get("title")) for t in rows[:6]) or "none"
+        say(yellow(f"  No thesis called {wanted!r}. Yours: {known}"))
+        return
+    if match.get("workspace_id"):
+        say(yellow(f"  {match.get('title')!r} already belongs to a sleeve."))
+        say(dim("  A thesis expresses one claim in one book. Write a new draft."))
+        return
+
+    _propose_sleeve(session, run, match)
+
+
+def _propose_sleeve(session: Any, run: Any, thesis: dict[str, Any]) -> None:
+    """Offer the closed screen as a sleeve for the thesis it was run against.
+
+    ── THE VERB, FROM THE QUANT'S DESK ────────────────────────────────────────
+
+    The screen ran here, against data that never left this machine. What crosses
+    is the shortlist and the argument for it — as a PROPOSAL, which creates no
+    sleeve and no position. A person decides in the portal, because deciding is
+    the human act the whole object exists to require.
+
+    That split is the product: the quant runs the research where the data is,
+    the PM decides where the authority is, and something durable travels between
+    them instead of a screenshot.
+
+    A FAILURE HERE NEVER FAILS THE RUN. The figures are already on screen and
+    the run is sealed server-side; losing the proposal costs a hand-off, and
+    taking the run down with it would trade the work for the paperwork.
+    """
+    figures = (run.artifact or {}).get("figures") or {}
+    flat: dict[str, Any] = {}
+    for value in figures.values():
+        if isinstance(value, dict):
+            flat.update(value)
+    rows = flat.get("rows") or []
+    if not rows:
+        return
+
+    ranked = [
+        {
+            "ticker": str(r.get("symbol") or r.get("ticker") or ""),
+            "rank": i + 1,
+            "score": r.get("score"),
+            "target_weight": round(1.0 / min(len(rows), 25), 6),
+        }
+        for i, r in enumerate(rows[:25])
+    ]
+    caveats: list[str] = []
+    universe, evaluated = flat.get("universe_size"), flat.get("n_evaluated")
+    if isinstance(universe, int) and isinstance(evaluated, int) and evaluated < universe:
+        caveats.append(
+            f"{evaluated} of {universe} names could be measured; the rest had too "
+            "little history and are absent from this ranking, which flatters it."
+        )
+    if flat.get("truncated") or len(rows) > len(ranked):
+        caveats.append(
+            f"{len(rows)} names cleared the screen and the {len(ranked)} highest are "
+            "proposed. The cut is a position-count decision, not a quality one."
+        )
+
+    title = str(thesis.get("title") or "this thesis")
+    try:
+        filed = session.propose_sleeve(
+            thesis_id=str(thesis.get("id")),
+            rows=ranked,
+            rationale=(
+                f"{len(ranked)} names express {title!r}, ranked by "
+                f"{flat.get('rank_by') or 'score'}. Equal weight across the shortlist."
+            ),
+            caveats=caveats,
+            payload={
+                "rank_by": flat.get("rank_by"),
+                "n_ranked": len(rows),
+                "universe_size": universe,
+                "n_evaluated": evaluated,
+            },
+            run_id=getattr(run, "run_id", None),
+        )
+    except Exception as exc:  # noqa: BLE001 - named, never fatal
+        say(dim(f"  The sleeve could not be proposed: {exc}"))
+        return
+
+    say("")
+    say(f"  {green('Proposed.')} {len(ranked)} names for {bold(title)}")
+    say(dim("  Nothing exists yet. Open it in the portal to accept or change it."))
+    say(dim(f"  proposal {filed.get('id')}"))
+
+
 def _publish_signals(session: Any, run: Any, *, workspace_id: str | None, label: str | None) -> None:
     """Turn a closed screen into a dated, versioned, diffable ranked file.
 
@@ -993,6 +1098,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     code = _report(run)
     if run.status == "closed":
         _publish_signals(session, run, workspace_id=workspace_id, label=args.label)
+        _offer_sleeve(session, run, getattr(args, "thesis", None))
     return code
 
 
@@ -2414,6 +2520,10 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--sleeve",
         help="name or id of a sleeve this run belongs to; binds it to that sleeve's risk budget",
+    )
+    common.add_argument(
+        "--thesis",
+        help="a draft thesis to propose this run's shortlist as a sleeve for",
     )
 
     p = argparse.ArgumentParser(

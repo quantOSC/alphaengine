@@ -349,6 +349,56 @@ class Session:
             body["source_run_id"] = source_run_id
         return self._post("/api/me/signals", body)
 
+    def theses(self) -> list[Figures]:
+        """The claims on your account, including drafts with no sleeve yet.
+
+        A draft is a thesis somebody wrote and has not acted on. It is the input
+        to the only verb in this package that creates anything, so the CLI has
+        to be able to see one.
+        """
+        return list(self._get("/api/me/theses").get("theses") or [])
+
+    def propose_sleeve(
+        self,
+        *,
+        thesis_id: str,
+        rows: list[Figures],
+        rationale: str,
+        caveats: list[str] | None = None,
+        payload: Figures | None = None,
+        run_id: str | None = None,
+        book_id: str | None = None,
+    ) -> Figures:
+        """File a proposed sleeve for a thesis. THE ONLY THING THIS MAKES.
+
+        ── WHAT THIS IS AND IS NOT ────────────────────────────────────────────
+
+        It creates a PROPOSAL, never a sleeve and never a position. The screen
+        ran here, on this machine, against data that never moved; what crosses
+        is the shortlist and the argument for it. Somebody then reads it and
+        decides — in the portal, because deciding is a human act and a
+        long-lived key pressing accept would be the machine approving its own
+        work through one extra hop.
+
+        THE CAVEATS ARE NOT OPTIONAL. They travel with the proposal because the
+        handoff is exactly where they get dropped, and a shortlist read without
+        what the run could not establish is the failure every control in this
+        product exists to prevent.
+        """
+        body: Figures = {
+            "thesis_id": thesis_id,
+            "rows": rows,
+            "rationale": rationale,
+            "caveats": list(caveats or []),
+        }
+        if payload:
+            body["payload"] = payload
+        if run_id:
+            body["source_run_id"] = run_id
+        if book_id:
+            body["book_id"] = book_id
+        return self._post("/api/me/proposals/from-os", body)
+
     def sleeves(self) -> list[Figures]:
         """The sleeves you can run against, if your account is in a pod.
 
