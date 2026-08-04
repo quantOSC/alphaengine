@@ -11,19 +11,32 @@ alphaengine demo          # the whole offline half, no account, no data of your 
 
 ## What it answers
 
-Four questions, four workflows, and only one of them needs your simulator.
+Eight questions, in the order a research week actually asks them. The command
+IS the question; only two of them need code of yours.
 
-| Ask | Workflow | Needs |
-|---|---|---|
-| What in my universe is worth a look? | `screen_universe` | prices |
-| Does this result hold up once you count the tries? | `validate_study` | prices + your backtest |
-| How much of it should I hold? | `size_position` | a return series |
-| Has anything crossed a line? | `monitor_sleeve` | a return series |
+| Ask | Command | Workflow | Needs |
+|---|---|---|---|
+| Can I trust this data? | `diagnose` | `diagnose_data` | prices |
+| What is worth a look? | `screen` | `screen_universe` | prices |
+| Does this signal carry information? | `signal` | `evaluate_signal` | a signal panel + prices |
+| Is this real, once you count the tries? | `validate` | `validate_study` | prices + your backtest |
+| Where does it break? | `stress` | `stress_study` | a return series |
+| Is it new, or my book again? | `overlap` | `check_overlap` | the candidate + the book |
+| How much should I hold? | `size` | `size_position` | a return series |
+| Still inside the lines? | `monitor` | `monitor_sleeve` | a return series |
 
 ```bash
-alphaengine run screen_universe --universe sp500
-alphaengine run size_position --data returns.csv
+alphaengine diagnose --data prices.csv     # before anything runs on it
+alphaengine screen --universe sp500
+alphaengine size --data returns.csv
 ```
+
+**The refusals are the point.** A screen over a universe that mostly could not
+be measured is refused as a survivorship artifact rather than ranked. A size on
+a record shorter than its own minimum track length is refused outright, because
+a small position is still a claim and the caveat does not travel with it into a
+book. A monitor with no stated tolerances reports `unchecked` — never a green
+light. A stop exits 0: "this did not clear the bar" is the system working.
 
 Or say it in plain English and let your own model pick:
 
@@ -74,7 +87,8 @@ an error: it is a screen that ranked returns as prices and produced a shortlist
 nobody can tell is wrong.
 
 `--project` is the only door that can carry a **simulator**, because a simulator
-is code. That is why `validate_study` needs it and the other three do not.
+is code. That is why `validate_study` needs it — and `evaluate_signal` needs it
+for the scores it measures — while the rest run on prices alone.
 
 `--universe` brings the closes you stored with it in the portal. That is your own
 upload decrypted back to your own account, not us fetching market data, and the
