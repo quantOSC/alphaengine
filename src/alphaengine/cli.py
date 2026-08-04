@@ -1906,6 +1906,29 @@ def _signature(c: Command) -> str:
     return f"{c.verb} {c.args}".strip()
 
 
+def _shape_phrase(data: Any) -> str | None:
+    """`100 series` for a panel, `499 obs` for one series — never the values.
+
+    A bare `len()` called a single symbol's returns "499 series" and a wide
+    DataFrame's rows the same: the count was right and the noun was wrong,
+    and a wrong noun on a right number teaches a reader to distrust the one
+    line that exists to be re-read.
+    """
+    cols = getattr(data, "columns", None)
+    if cols is not None:
+        try:
+            return f"{len(cols)} series"
+        except TypeError:
+            return None
+    if isinstance(data, dict):
+        return f"{len(data)} series"
+    try:
+        n = len(data)
+    except TypeError:
+        return None
+    return f"{n} obs"
+
+
 def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str:
     """One dim line above the prompt: what is loaded, and what can run.
 
@@ -1926,12 +1949,9 @@ def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str
     if data is None:
         bits.append(dim("no data"))
     else:
-        try:
-            n = len(data)
-        except TypeError:
-            n = None
+        phrase = _shape_phrase(data)
         label = project or "loaded"
-        bits.append(green(f"{label}" + (f" {DOT} {n} series" if n is not None else "")))
+        bits.append(green(label + (f" {DOT} {phrase}" if phrase else "")))
 
     bits.append(green("signed in") if keyed else dim("not signed in"))
 
@@ -2265,11 +2285,8 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
     if data is None:
         loaded = dim("none") + dim(f"  {DOT}  pass --project to load yours")
     else:
-        try:
-            n = len(data)  # dict of series, DataFrame, or sequence
-        except TypeError:
-            n = None
-        loaded = green("ready") + dim(f"  {DOT}  {n} series" if n is not None else "")
+        phrase = _shape_phrase(data)  # dict of series, DataFrame, or one sequence
+        loaded = green("ready") + (dim(f"  {DOT}  {phrase}") if phrase else "")
 
     # SIGNED IN IS A FACT THE USER SHOULD SEE, not infer from things working.
     # It also disambiguates the two ways a key can be present: one survives a

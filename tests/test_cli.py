@@ -1196,6 +1196,23 @@ def test_the_source_is_named_so_the_status_line_can_show_it():
     assert cli._describe_source([]) is None
 
 
+def test_the_noun_follows_the_shape_of_what_is_loaded():
+    """`symbol:MU · 499 series` shipped — the count was right and the noun was
+    wrong. A panel holds series; one series holds obs; a frame's series are its
+    columns, not its rows."""
+    assert cli._shape_phrase({"AAPL": [1.0], "MSFT": [2.0]}) == "2 series"
+    assert cli._shape_phrase([0.01] * 499) == "499 obs"
+
+    class _Frame:
+        columns = ("AAPL", "MSFT", "NVDA")
+
+        def __len__(self) -> int:
+            return 500
+
+    assert cli._shape_phrase(_Frame()) == "3 series"
+    assert cli._shape_phrase(object()) is None
+
+
 # ── language and commands are one input, not two modes ────────────────────
 #
 # The prompt FORKED: a known verb ran a command, anything else went to the
