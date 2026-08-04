@@ -11,6 +11,7 @@ import pytest
 
 from alphaengine.agent import AgentDriver, RefusedChoice
 from alphaengine.client import MAX_FIGURE_LIST, Offline, StepExecutor, UnsupportedOp, connect
+from alphaengine.client.executor import COST_POINTS, CURVE_POINTS, IC_POINTS, _bucketed, _last, _mean
 from alphaengine.client.session import Session
 
 
@@ -604,3 +605,107 @@ def test_emit_does_not_second_guess_the_workflow():
     out = ex.execute("emit.screen", {"rank_by": "return_pct", "n_passing": 99})
     assert out["rank_by"] == "return_pct"
     assert out["n_passing"] == 99
+
+
+# ── the story figures: bounded shapes, never a series ──────────────────────
+#
+# The run page can only draw what travels, and what travels must be a SHAPE.
+# These figures are bucketed HERE, before anything crosses, to at-or-under the
+# wire's 64-element bound — the same bargain profile.py strikes with
+# `live_by_period`.
+
+
+def test_bucketing_passes_a_short_series_through():
+    """Fewer points than buckets means one point per bucket: reported exactly,
+    never resampled into something it is not."""
+    assert _bucketed([1.0, 2.0, 3.0], 64, _last) == [(0, 1.0), (1, 2.0), (2, 3.0)]
+
+
+def test_bucketing_matches_a_hand_computed_case():
+    values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    # bounds at [0, 2, 4, 6]: three slices of two points each.
+    assert _bucketed(values, 3, _last) == [(1, 2.0), (3, 4.0), (5, 6.0)]
+    assert _bucketed(values, 3, min) == [(1, 1.0), (3, 3.0), (5, 5.0)]
+    assert _bucketed(values, 3, _mean) == [(1, 1.5), (3, 3.5), (5, 5.5)]
+
+
+def test_bucketing_never_exceeds_its_cap_and_keeps_the_endpoint():
+    out = _bucketed([float(i) for i in range(600)], CURVE_POINTS, _last)
+    assert len(out) == CURVE_POINTS
+    assert out[-1] == (599, 599.0)
+    assert _bucketed([], CURVE_POINTS, _last) == []
+
+
+def test_a_sweep_emits_the_best_configurations_path_bounded():
+    ex = executor()
+    out = ex.execute("compute.sweep", {"grid": {"fast": [5, 10, 15], "slow": [50, 100]}})
+
+    curve = out["best_curve"]
+    dd = out["drawdown_curve"]
+    assert len(curve) == CURVE_POINTS <= MAX_FIGURE_LIST  # 600 obs → the full cap
+    assert len(dd) == CURVE_POINTS
+    assert all(set(p) == {"i", "v"} for p in curve)
+    assert [p["i"] for p in curve] == sorted(p["i"] for p in curve)
+    # The path ends where the best trial's own record says it ends.
+    best = ex.workspace["sweep"].best
+    assert curve[-1]["v"] == pytest.approx(best.total_return_pct / 100.0, abs=1e-4)
+    # A drawdown is never a gain, and each bucket keeps its WORST reading —
+    # sampling across a trough would flatter.
+    assert all(p["v"] <= 0 for p in dd)
+    assert min(p["v"] for p in dd) == pytest.approx(
+        -ex.execute("compute.drawdown_anatomy", {})["max_drawdown_pct"] / 100.0, abs=1e-4
+    )
+
+
+def test_the_curves_read_the_best_trials_own_column_even_after_failures():
+    """A failed trial records no matrix column, so a TRIAL index must be mapped
+    through the survivors. `matrix[:, best.index]` read the wrong column — or
+    fell off the end — the moment any earlier trial failed."""
+
+    def flaky(data=None, fast: int = 10, slow: int = 50):
+        if fast == 1:
+            raise RuntimeError("bad corner of the grid")
+        return ma_cross(data=data, fast=fast, slow=slow)
+
+    ex = StepExecutor(data=prices(), backtest_fn=flaky)
+    out = ex.execute("compute.sweep", {"grid": {"fast": [1, 10], "slow": [50]}})
+    assert out["n_failed"] == 1
+
+    expected = float(np.prod(1.0 + np.asarray(ma_cross(data=prices(), fast=10, slow=50))) - 1.0)
+    assert out["best_curve"][-1]["v"] == pytest.approx(expected, abs=1e-5)
+    # And every reading downstream of `_best_column` survives the same mapping.
+    assert ex.execute("compute.deflated_sharpe", {})["n_trials"] == 2
+
+
+def test_signal_ic_emits_a_bucketed_story_not_a_series():
+    rng = np.random.default_rng(11)
+    n_names, n_obs = 12, 260
+    data = {
+        "signal": {f"N{i}": rng.normal(size=n_obs).tolist() for i in range(n_names)},
+        "prices": {
+            f"N{i}": (100 * np.cumprod(1 + rng.normal(0.0004, 0.01, n_obs))).tolist() for i in range(n_names)
+        },
+    }
+    out = StepExecutor(data=data).execute("compute.signal_ic", {"horizon": 5})
+
+    story = out["ic_by_period"]
+    assert len(story) <= IC_POINTS < MAX_FIGURE_LIST
+    assert all(set(p) == {"p", "ic"} for p in story)
+    # `p` is the end-of-bucket period ordinal, so the axis reads as time and
+    # the last bucket closes on the last period measured.
+    assert [p["p"] for p in story] == sorted(p["p"] for p in story)
+    assert story[-1]["p"] == out["n_periods"]
+
+
+def test_cost_ladder_emits_the_curve_only_when_it_was_measured():
+    ex = StepExecutor(data=returns())
+    out = ex.execute("compute.cost_ladder", {"turnover": 0.2})
+    curve = out["cost_curve"]
+    assert 0 < len(curve) <= COST_POINTS
+    assert all(set(p) == {"bps", "sharpe"} for p in curve)
+    assert [p["bps"] for p in curve] == out["bps_levels"]
+
+    # No turnover means no rung was measured: the honest record is the key's
+    # ABSENCE, never a flat line at zero.
+    bare = ex.execute("compute.cost_ladder", {})
+    assert "cost_curve" not in bare

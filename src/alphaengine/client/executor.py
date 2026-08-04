@@ -65,6 +65,60 @@ Handler = Callable[[Figures, Workspace], Figures]
 # leaves" should not depend on the other end remembering to check.
 MAX_FIGURE_LIST = 64
 
+# ── the story figures, bounded by construction ─────────────────────────────
+# A run's detail page can only draw what travels, and what travels must be a
+# SHAPE, never a series — the same bargain profile.py strikes with
+# `live_by_period`. So the paths below are bucketed HERE, from data this
+# machine already holds, to at-or-under the wire's 64-element bound: a derived
+# summary of the caller's own backtest, not the backtest.
+CURVE_POINTS = 64  # the best configuration's path, and its drawdown
+IC_POINTS = 48  # per-period ICs
+COST_POINTS = 24  # cost rungs — it is a handful of levels
+
+
+def _bucketed(
+    values: list[float], max_points: int, agg: Callable[[list[float]], float]
+) -> list[tuple[int, float]]:
+    """Contiguous, near-equal slices by POSITION — profile.py's bucketing.
+
+    Returns (end-of-bucket index, aggregated value) per bucket. Fewer points
+    than buckets means one point per bucket: a passthrough, so a short series
+    is reported exactly rather than resampled into something it is not.
+    """
+    n = len(values)
+    if n == 0:
+        return []
+    k = min(max_points, n)
+    bounds = [round(i * n / k) for i in range(k + 1)]
+    out: list[tuple[int, float]] = []
+    for lo, hi in zip(bounds[:-1], bounds[1:], strict=True):
+        if hi <= lo:
+            continue
+        out.append((hi - 1, float(agg(values[lo:hi]))))
+    return out
+
+
+def _last(segment: list[float]) -> float:
+    return segment[-1]
+
+
+def _mean(segment: list[float]) -> float:
+    return sum(segment) / len(segment)
+
+
+def _trial_column(result: Any, trial_index: int) -> list[float]:
+    """The matrix column for a TRIAL index.
+
+    The matrix holds only the trials that RAN — a failed trial records no
+    column — so a trial index has to be mapped through the survivors before it
+    can address the matrix. `matrix[:, best.index]` read the wrong
+    configuration's returns (or fell off the end) the moment any earlier trial
+    failed, which is exactly the run where nobody is double-checking.
+    """
+    survivors = [t.index for t in result.trials if t.failed is None]
+    column: list[float] = result.matrix[:, survivors.index(trial_index)].tolist()
+    return column
+
 
 class UnsupportedOp(LookupError):
     """This build cannot execute that operation.
@@ -330,14 +384,29 @@ class StepExecutor:
             ]
         else:
             figures["trials_recorded"] = False
+
+        # THE STORY FIGURES. The best configuration's own path, and where it
+        # drew down — computed from the column the sweep already holds, bucketed
+        # to the wire's bound BEFORE anything travels. A Sharpe is believed with
+        # its path; the drawdown is the risk that number hides. The drawdown
+        # takes each bucket's WORST reading rather than its endpoint, because
+        # sampling across a trough understates the risk in exactly the
+        # direction that flatters.
+        best = _trial_column(result, result.best.index)
+        equity = np.cumprod(1.0 + np.asarray(best, dtype=float))
+        cum: list[float] = (equity - 1.0).tolist()
+        figures["best_curve"] = [{"i": i, "v": round(v, 6)} for i, v in _bucketed(cum, CURVE_POINTS, _last)]
+        peak = np.maximum.accumulate(equity)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            dd: list[float] = np.where(peak > 0, equity / peak - 1.0, 0.0).tolist()
+        figures["drawdown_curve"] = [{"i": i, "v": round(v, 6)} for i, v in _bucketed(dd, CURVE_POINTS, min)]
         return figures
 
     def _best_column(self, ws: Workspace) -> list[float]:
         result = ws.get("sweep")
         if result is None:
             raise UnsupportedOp("no sweep in this run's workspace; that figure has nothing to read.")
-        column: list[float] = result.matrix[:, result.best.index].tolist()
-        return column
+        return _trial_column(result, result.best.index)
 
     def _returns_column(self, ws: Workspace) -> list[float]:
         """The return series this run is measuring.
@@ -506,7 +575,18 @@ class StepExecutor:
 
     def _signal_ic(self, params: Figures, ws: Workspace) -> Figures:
         signal, prices = self._signal_panels()
-        return dict(information_coefficient(signal, prices, horizon=int(params.get("horizon") or 21)))
+        out = dict(information_coefficient(signal, prices, horizon=int(params.get("horizon") or 21)))
+        # The story figure: the per-period sequence, bucketed. `p` is the
+        # end-of-bucket period ordinal (1-based, oldest first) so the axis
+        # reads as time; the value is the bucket's MEAN, because a stretch of
+        # periods is a claim about its average sign, not its endpoint.
+        ics = out.get("ic_by_period")
+        if isinstance(ics, list):
+            out["ic_by_period"] = [
+                {"p": p + 1, "ic": round(v, 6)}
+                for p, v in _bucketed([float(x) for x in ics], IC_POINTS, _mean)
+            ]
+        return out
 
     def _signal_quantiles(self, params: Figures, ws: Workspace) -> Figures:
         signal, prices = self._signal_panels()
@@ -543,12 +623,23 @@ class StepExecutor:
         # guessed turnover would produce a confident curve about a strategy
         # nobody runs.
         turnover = params.get("turnover")
-        return dict(
+        out = dict(
             cost_ladder(
                 self._returns_column(ws),
                 turnover=None if turnover is None else float(turnover),
             )
         )
+        # The story figure: the descent itself, level by level. Only the rungs
+        # that were MEASURED — with no turnover every rung is None, and the
+        # honest record of that is the key's absence, never a flat line.
+        curve = [
+            {"bps": float(b), "sharpe": round(float(s), 6)}
+            for b, s in zip(out.get("bps_levels") or [], out.get("sharpe_at_bps") or [], strict=True)
+            if s is not None
+        ][:COST_POINTS]
+        if curve:
+            out["cost_curve"] = curve
+        return out
 
     def _drawdown_anatomy(self, params: Figures, ws: Workspace) -> Figures:
         return dict(drawdown_anatomy(self._returns_column(ws)))
