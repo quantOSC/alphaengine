@@ -1345,10 +1345,12 @@ def _where_it_lives(run: Any) -> None:
 _SHOWN_ROWS = 15
 
 #: What a figure MEANS, and the unit it is in. A run reports `n_evaluated`; a
-#: quant reads "measured". Anything not named here prints under its own key
-#: rather than being guessed at — a wrong label on a right number is worse than
-#: no label, and this file already found one shipped ("Observations" on a count
-#: of names).
+#: quant reads "measured". Anything not named here IS NOT PRINTED — a wrong
+#: label on a right number is worse than no label, and this file already found
+#: one shipped ("Observations" on a count of names). The cost of that rule is
+#: the flip side: a figure a workflow emits and nobody labels here is a figure
+#: the terminal silently withholds, which is how a run's own headline finding
+#: can fail to reach the person who ran it.
 _FIGURE_LABELS: dict[str, tuple[str, str]] = {
     "universe_size": ("universe", "names"),
     "n_evaluated": ("measured", "names"),
@@ -1382,8 +1384,14 @@ _FIGURE_LABELS: dict[str, tuple[str, str]] = {
     "usable": ("usable", "names"),
     "n_unreadable": ("unreadable", "names"),
     "n_ragged": ("ragged history", "names"),
+    # SURVIVORSHIP, SEPARATED FROM RAGGEDNESS — same distinction the portal
+    # draws. Ragged is a length test; this counts the names that LEFT, which
+    # is the half that biases a study rather than merely weakening it.
+    "n_ends_early": ("end before the panel", "names"),
+    "n_nonpositive": ("zero or negative closes", "names"),
     "n_spike_names": ("split candidates", "names"),
     "n_stale_names": ("stale", "names"),
+    "n_dates": ("panel length", "dates"),
 }
 
 

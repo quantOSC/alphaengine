@@ -23,6 +23,7 @@ from alphaengine.core import (
     signal_decay,
     subperiod_stability,
 )
+from alphaengine.core.profile import MAX_BINS, MAX_NAMED
 from alphaengine.core.signals import PanelShapeError
 
 
@@ -182,3 +183,96 @@ def test_row_shaped_series_report_dates_supplied():
     out = profile_data(prices)
     assert out["dates_supplied"] is True
     assert out["usable"] == 1
+
+
+def test_a_date_keyed_mapping_is_readable_data():
+    """THE SHAPE THE PORTAL'S OWN CACHE STORES AND SERVES. It fell through to
+    "unreadable", so a well-formed dated universe profiled as one hundred
+    percent corrupt — the most expensive direction for a health check to be
+    wrong in, because the file was fine and the report said it was not."""
+    prices = {
+        "A": {"2026-01-02": 101.0, "2026-01-01": 100.0, "2026-01-03": 102.0},
+        "B": {"2026-01-01": 50.0, "2026-01-02": 50.5, "2026-01-03": 51.0},
+    }
+    out = profile_data(prices)
+    assert out["usable"] == 2
+    assert out["n_unreadable"] == 0
+    assert out["dates_supplied"] is True
+    # Sorted by key, not by insertion: A's out-of-order mapping still spans
+    # the same calendar as B's ordered one.
+    assert out["panel_first"] == "2026-01-01"
+    assert out["panel_last"] == "2026-01-03"
+
+
+def test_a_name_that_leaves_the_panel_is_named_as_such():
+    """`n_ragged` is a LENGTH test and cannot tell "starts late" from "ends
+    early". Only the second is survivorship, and only dates separate them."""
+    prices = {
+        "STAYS": {f"2026-01-{d:02d}": 100.0 + d for d in range(1, 11)},
+        "LEAVES": {f"2026-01-{d:02d}": 50.0 + d for d in range(1, 6)},
+        "ARRIVES_LATE": {f"2026-01-{d:02d}": 70.0 + d for d in range(6, 11)},
+    }
+    out = profile_data(prices)
+    assert out["n_ends_early"] == 1
+    assert out["ends_early"] == ["LEAVES"]
+    # Both short names are ragged; only one of them left.
+    assert out["n_ragged"] == 2
+
+
+def test_the_survivorship_count_falls_where_names_leave():
+    prices = {
+        f"N{i}": {f"2026-01-{d:02d}": 100.0 + d for d in range(1, 11 if i < 3 else 6)} for i in range(6)
+    }
+    live = profile_data(prices)["live_by_period"]
+    assert live is not None
+    # Six names at the start, three at the end — the shape survivorship makes.
+    assert live[0]["n_live"] == 6
+    assert live[-1]["n_live"] == 3
+
+
+def test_bare_closes_buy_no_calendar_figures_at_all():
+    """The flag has to be earned. No dates means the date-derived keys are
+    ABSENT, not null and not zero — a zero here would read as "nothing ends
+    early", which is a finding nobody made."""
+    out = profile_data({"A": [100.0, 101.0, 102.0]})
+    assert out["dates_supplied"] is False
+    for key in ("panel_first", "panel_last", "n_ends_early", "live_by_period"):
+        assert key not in out
+
+
+def test_the_shapes_are_summaries_and_stay_inside_the_protocol_bound():
+    """Every list the profile returns must survive `reject_series`'s 64-element
+    limit, whatever the universe's size — that bound is what keeps a chart a
+    summary of the panel rather than a copy of it."""
+    prices = {f"N{i}": [100.0 + j * 0.1 for j in range(200 + i)] for i in range(120)}
+    out = profile_data(prices)
+    assert len(out["obs_deciles"]) == 10
+    assert len(out["obs_hist"]["counts"]) <= MAX_BINS
+    assert len(out["obs_hist"]["edges"]) <= MAX_BINS + 1
+    assert len(out["spike_worst"]) <= MAX_NAMED
+    # Deciles rise with length and end at the longest series.
+    assert out["obs_deciles"] == sorted(out["obs_deciles"])
+    assert out["obs_deciles"][-1] == out["n_obs_max"]
+
+
+def test_an_aligned_panel_draws_a_flat_line_and_no_histogram():
+    """A one-bar histogram is not a chart. The deciles say "aligned" better
+    than a single column would, and they say it as a result rather than as an
+    absence."""
+    out = profile_data({f"N{i}": [100.0 + j * 0.1 for j in range(500)] for i in range(20)})
+    assert out["obs_hist"] is None
+    assert set(out["obs_deciles"]) == {500.0}
+
+
+def test_split_candidates_carry_their_severity_worst_first():
+    """A count cannot tell a 45 percent day from a 400 percent one, and the
+    difference is the whole judgement: one may be real, the other is a split
+    nobody adjusted."""
+    prices = {
+        "MILD": [100.0] * 5 + [55.0] * 5,
+        "SEVERE": [100.0] * 5 + [10.0] * 5,
+        "FINE": [100.0 + i for i in range(10)],
+    }
+    worst = profile_data(prices)["spike_worst"]
+    assert [w["name"] for w in worst] == ["SEVERE", "MILD"]
+    assert worst[0]["move_pct"] == pytest.approx(90.0)
