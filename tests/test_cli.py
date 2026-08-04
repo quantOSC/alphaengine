@@ -691,6 +691,27 @@ def test_nothing_loaded_still_names_every_gap():
     assert gap and "universe" in gap and "--project" in gap
 
 
+def test_a_signal_gap_with_a_universe_loaded_names_the_module_not_the_loader():
+    """THE PRODUCTION LOOP, requirement two. Status line: `universe:s&p`.
+    Refusal: "load a universe". The universe covers the price half; a signal
+    is the caller's own scores and lives in their code — the message must say
+    that, and must not prescribe re-loading the thing already loaded."""
+    cat = [{"name": "evaluate_signal", "version": "1.0.0", "requires": ["signal"]}]
+    universe = {"AAPL": [1.0, 2.0], "MSFT": [3.0, 4.0]}
+    gap = cli.preflight(cat, "evaluate_signal", data=universe, backtest_fn=None)
+    assert gap and "--project" in gap
+    assert "alphaengine.demo_signal" in gap
+    assert "--universe" not in gap and "--data" not in gap
+
+    # And inside the session, the same message speaks the session's language
+    # and keeps its own door — the old rewrite replaced requirement-specific
+    # doors with `universe <name> / data <file.csv>` for every gap.
+    inside = cli._repl_gap(gap, "evaluate_signal")
+    assert "alphaengine run" not in inside
+    assert "run evaluate_signal --project" in inside
+    assert "universe <name>" not in inside
+
+
 # ── the run answers the question it was asked ──────────────────────────────
 #
 # Before this the agentic path produced step narration and a verdict and NO

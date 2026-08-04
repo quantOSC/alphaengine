@@ -601,6 +601,21 @@ def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest
             "  Its closes become the return series the measurement runs on."
         )
 
+    # THE SAME LOOP, ONE REQUIREMENT OVER. A signal gap answered with "load a
+    # universe" told somebody whose universe was ALREADY loaded to load it
+    # again — the status line said `universe:s&p` while the refusal prescribed
+    # exactly that. The universe covers the PRICE half; the signal half is the
+    # caller's own scores, and scores live in their code, not the portal.
+    if "signal" in missing and _looks_like_universe(data):
+        return (
+            f"{name} measures a SIGNAL against prices, and what is loaded is prices alone.\n"
+            f"  {_SHAPES['signal']}\n"
+            "  Your universe covers the prices; bring the scores from a module:\n"
+            f"      alphaengine run {name} --project your_pkg.your_signal\n"
+            "  See the shape working first:\n"
+            f"      alphaengine run {name} --project alphaengine.demo_signal"
+        )
+
     what = " and ".join(f"`{m}`" for m in missing)
     shapes = "\n".join(f"  {_SHAPES[m]}" for m in missing if m in _SHAPES)
     # THE DOORS, EASIEST FIRST. This named `--project` and nothing else, so
@@ -1816,12 +1831,18 @@ def _repl_gap(gap: str, name: str) -> str:
     A tool that answers a refusal with instructions it cannot itself accept has
     stopped being a tool.
     """
-    # A message that already names the exact next line — `run x --symbol MU` —
-    # is right as it stands; wrapping it in "load it first" told somebody with
-    # a universe loaded to go and load a universe, which is the same loop this
-    # function exists to break, reintroduced one level up.
-    if "--symbol" in gap:
-        return NEWLINE.join(f"  {line}" if line.strip() else "" for line in gap.splitlines())
+    # A message that already names the exact next line — `run x --symbol MU`,
+    # or a --project door for a gap loaders cannot fill — is right as it
+    # stands; wrapping it in "load it first" told somebody with a universe
+    # loaded to go and load a universe, which is the same loop this function
+    # exists to break, reintroduced one level up. Only the words change for
+    # the session: `alphaengine run` is not a line this prompt accepts.
+    speaks_for_itself = "--symbol" in gap or (
+        "--project" in gap and "--data" not in gap and "--universe" not in gap
+    )
+    if speaks_for_itself:
+        text = gap.replace("alphaengine run ", "run ").replace("alphaengine demo", "demo")
+        return NEWLINE.join(f"  {line}" if line.strip() else "" for line in text.splitlines())
     head = gap.splitlines()[0]
     return (
         f"  {head}"
