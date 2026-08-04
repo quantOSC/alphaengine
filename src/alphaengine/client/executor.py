@@ -46,6 +46,7 @@ from ..core import (
     profile_data,
     quantile_returns,
     screen_universe,
+    series_values,
     signal_decay,
     subperiod_stability,
     technical_features,
@@ -103,7 +104,14 @@ def _n_obs(data: Any) -> int:
     # series it holds. `len(dict)` is its KEY count — which read the demo's
     # 1,200-observation close series as one observation, and the resolve gate
     # then refused an honest series as too short.
+    #
+    # UNLESS the mapping IS a series: {date: close}, the shape a dated universe
+    # carries per symbol. Its values are scalars, so the recursion below scored
+    # every dated symbol as zero observations — the same bug, one level down.
     if isinstance(data, dict):
+        dated = series_values(data)[0]
+        if dated.size:
+            return int(dated.size)
         return max((_n_obs(v) for v in data.values()), default=0)
     try:
         return int(np.asarray(data, dtype=float).shape[0])
@@ -130,6 +138,13 @@ def _as_returns(data: Any) -> list[float] | None:
             inner = data.get(key)
             if inner is not None:
                 return _as_returns(inner)
+        # A {date: value} mapping is a dated return series, not a container:
+        # the shared reader sorts it by key. A universe ({symbol: series})
+        # still reads as empty here and stays refused.
+        dated = series_values(data)[0]
+        if dated.ndim == 1 and dated.size:
+            dated_out: list[float] = dated.tolist()
+            return dated_out
         return None
     try:
         arr = np.asarray(data, dtype=float)

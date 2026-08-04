@@ -42,20 +42,23 @@ SERIES = """date,close
 # ── the three shapes ───────────────────────────────────────────────────────
 
 
-def test_a_wide_file_is_a_universe():
+def test_a_wide_file_is_a_universe_and_keeps_its_dates():
+    """`{symbol: {date: close}}`, not `{symbol: [closes]}`. Dropping the dates
+    here made a dated file profile as undated two steps later — a capability
+    the caller paid for, thrown away in transit."""
     got = load_delimited(WIDE)
     assert set(got) == {"AAPL", "MSFT", "NVDA"}
-    assert got["AAPL"][0] == {"date": "2026-01-01", "close": 100.0}
+    assert got["AAPL"]["2026-01-01"] == 100.0
     assert len(got["NVDA"]) == 3
 
 
 def test_a_long_file_is_a_universe_and_is_sorted_by_date():
     """The file's row order is the file's business. Every metric downstream
-    reads the LAST element as the most recent."""
+    reads the mapping sorted by its date key, latest last."""
     got = load_delimited(LONG)
     assert set(got) == {"AAPL", "MSFT"}
-    assert [r["date"] for r in got["AAPL"]] == ["2026-01-01", "2026-01-02"]
-    assert got["AAPL"][-1]["close"] == 101.0
+    assert list(got["AAPL"]) == ["2026-01-01", "2026-01-02"]
+    assert got["AAPL"]["2026-01-02"] == 101.0
 
 
 def test_a_two_column_file_is_a_single_series():
@@ -66,6 +69,32 @@ def test_one_bare_column_of_numbers_is_a_series():
     """No header, because a returns file exported from a notebook often has
     none. The first row being a number is what says so."""
     assert load_delimited("0.01\n-0.02\n0.03\n") == [0.01, -0.02, 0.03]
+
+
+# ── the dates survive the load ─────────────────────────────────────────────
+
+
+def test_a_dated_universe_profiles_with_its_calendar_intact():
+    """End to end at the unit level: the loader keeps the dates, and
+    `profile_data` can therefore run the checks that need a calendar —
+    `dates_supplied` is EARNED, not defaulted."""
+    from alphaengine.core import profile_data
+
+    out = profile_data(load_delimited(WIDE))
+    assert out["dates_supplied"] is True
+    assert out["usable"] == 3
+    assert out["panel_first"] == "2026-01-01"
+    assert out["panel_last"] == "2026-01-03"
+
+
+def test_a_dateless_file_keeps_the_old_list_shape_byte_for_byte():
+    """A bare series has no dates to keep, and inventing a calendar for it
+    would be the loader guessing. The list shape is the contract."""
+    assert load_delimited("0.01\n-0.02\n0.03\n") == [0.01, -0.02, 0.03]
+    assert load_delimited("returns\n0.01\n-0.02\n") == [0.01, -0.02]
+    # A dated SINGLE series also stays a list: one series feeds the
+    # return-measuring workflows, which read values, not calendars.
+    assert load_delimited(SERIES) == [0.004, -0.002, 0.011]
 
 
 def test_a_named_single_column_drops_its_header():
@@ -123,14 +152,14 @@ def test_thousands_separators_and_whitespace_survive():
     """Quoted, because an unquoted `1,200.50` in a comma-delimited file is three
     fields and no parser can rescue it. Excel quotes them; this handles that."""
     got = load_delimited('date,AAPL\n2026-01-01," 1,200.50 "\n')
-    assert got["AAPL"][0]["close"] == 1200.50
+    assert got["AAPL"]["2026-01-01"] == 1200.50
 
 
 def test_a_single_name_file_is_a_universe_of_one_not_a_series():
     """`date,AAPL` is ambiguous until you look at the second header. A series
     file names that column `close` or `returns`; anything else is a ticker."""
     assert load_delimited("date,AAPL\n2026-01-01,100\n2026-01-02,101\n") == {
-        "AAPL": [{"date": "2026-01-01", "close": 100.0}, {"date": "2026-01-02", "close": 101.0}]
+        "AAPL": {"2026-01-01": 100.0, "2026-01-02": 101.0}
     }
     assert load_delimited("date,close\n2026-01-01,100\n") == [100.0]
 

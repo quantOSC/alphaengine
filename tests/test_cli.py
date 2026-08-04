@@ -128,9 +128,13 @@ def test_a_symbol_turns_a_universe_into_its_return_series():
     prices = {"MU": [100.0, 110.0, 99.0], "AMD": [50.0, 55.0]}
     got = cli._returns_from_universe(prices, "mu")
     assert got == [0.1, -0.1]
-    # {date, close} rows — the shape a wide CSV loads as — work identically.
+    # {date, close} rows work identically.
     rows = {"MU": [{"date": "a", "close": 100.0}, {"date": "b", "close": 110.0}]}
     assert cli._returns_from_universe(rows, "MU") == [0.1]
+    # {date: close} mappings — the shape a dated wide/long CSV loads as — too,
+    # sorted by date key however the mapping arrived.
+    dated = {"MU": {"2026-01-02": 110.0, "2026-01-01": 100.0}}
+    assert cli._returns_from_universe(dated, "MU") == [0.1]
     assert cli._returns_from_universe(prices, "TSLA") is None
     assert cli._returns_from_universe([1.0, 2.0], "MU") is None
 
@@ -839,6 +843,17 @@ def test_a_csv_becomes_the_runs_data(tmp_path):
     assert backtest_fn is None
 
 
+def test_a_symbol_sizes_from_a_dated_csv_universe(tmp_path, capsys):
+    """The whole ladder in one step: a dated wide file loads as `{symbol:
+    {date: close}}`, and `--symbol` still turns one name into the return
+    series a sizing runs on. The mapping shape must not break the rung."""
+    p = tmp_path / "prices.csv"
+    p.write_text("date,AAPL,MSFT\n2026-01-02,110,201\n2026-01-01,100,200\n", encoding="utf-8")
+    data, _ = cli.resolve_data(_args(data=str(p), symbol="aapl"))
+    # Rows arrived out of order; the mapping is read sorted by date key.
+    assert data == [0.1]
+
+
 def test_a_universe_narrows_the_file_to_the_names_it_lists(tmp_path, capsys):
     p = tmp_path / "prices.csv"
     p.write_text("date,AAPL,MSFT,NVDA\n2026-01-01,100,200,300\n", encoding="utf-8")
@@ -1126,7 +1141,7 @@ def test_a_local_file_still_wins_over_the_stored_copy(tmp_path):
     data, _ = cli.resolve_data(_args(data=str(p), universe="sp500"), session)
 
     assert session.series_calls == 0, "it fetched when a local file was supplied"
-    assert data["AAPL"][0]["close"] == 1.0, "the stored copy overwrote the local file"
+    assert data["AAPL"]["2026-01-01"] == 1.0, "the stored copy overwrote the local file"
 
 
 def test_a_browser_only_universe_says_what_is_missing():

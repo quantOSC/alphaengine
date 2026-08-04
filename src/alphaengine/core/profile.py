@@ -33,6 +33,8 @@ from typing import Any
 
 import numpy as np
 
+from .series_shapes import series_values
+
 _RND = 6
 MAX_NAMED = 24
 
@@ -44,46 +46,15 @@ SPIKE = 0.40
 STALE_RUN = 5
 
 
-def _closes(series: Any) -> tuple[np.ndarray, list[str] | None]:
-    """(closes, dates) for one symbol's series. `dates` is None when the caller
-    supplied bare numbers, which is what makes every calendar check below
-    unrunnable rather than clean.
-
-    THREE SHAPES, AND THE THIRD IS WHY THIS SIGNATURE CHANGED. A universe
-    arrives as bare closes, as `[{date, close}]` rows, or as a `{date: close}`
-    MAPPING — the last being exactly what the portal's own cache stores and
-    serves. That branch fell through to `np.empty(0)`, so a well-formed dated
-    universe profiled as one hundred percent UNREADABLE: a health check
-    reporting total corruption on data that was fine, which is the most
-    expensive possible direction for this module to be wrong in.
-    """
-    if isinstance(series, dict):
-        # {date: close}. Sorted by key, because a mapping's order is the
-        # producer's business and every check below reads left to right.
-        pairs = [
-            (str(k), float(v))
-            for k, v in series.items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool)
-        ]
-        if not pairs:
-            return np.empty(0), None
-        pairs.sort(key=lambda kv: kv[0])
-        return np.asarray([v for _, v in pairs], dtype=float), [k for k, _ in pairs]
-
-    if isinstance(series, (list, tuple)):
-        if series and isinstance(series[0], dict):
-            rows = [r for r in series if isinstance(r, dict) and isinstance(r.get("close"), (int, float))]
-            vals = np.asarray([float(r["close"]) for r in rows], dtype=float)
-            dates = [str(r.get("date") or "") for r in rows]
-            # A row shape with no date in it is still a row shape, and claiming
-            # dates we do not have would turn every calendar figure into a
-            # statement about the empty string.
-            return vals, dates if any(dates) else None
-        try:
-            return np.asarray(series, dtype=float), None
-        except (TypeError, ValueError):
-            return np.empty(0), None
-    return np.empty(0), None
+# THREE SHAPES, AND THE THIRD IS WHY THE READER MOVED. A universe arrives as
+# bare closes, as `[{date, close}]` rows, or as a `{date: close}` MAPPING — the
+# last being exactly what the portal's own cache stores and serves. The mapping
+# branch once fell through to `np.empty(0)` here, so a well-formed dated
+# universe profiled as one hundred percent UNREADABLE. The reading now lives in
+# `series_shapes.series_values`, shared with every other consumer of a
+# per-symbol series, so this module can never again tolerate a shape the rest
+# of the pipeline dies on.
+_closes = series_values
 
 
 def _stale_runs(closes: np.ndarray) -> int:

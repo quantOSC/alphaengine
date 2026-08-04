@@ -844,7 +844,9 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
         prices = fetched.get("prices") or {}
         if not prices:
             raise DataShapeError(f"{wanted!r} resolved to no stored prices.")
-        n_obs = max((len(v) for v in prices.values() if isinstance(v, list)), default=0)
+        # A list is observations and so is a {date: close} mapping — its length
+        # IS its date count. Anything else contributes nothing to the line.
+        n_obs = max((len(v) for v in prices.values() if isinstance(v, (list, dict))), default=0)
         say(
             dim(
                 f"  universe {wanted} {DOT} {len(prices)} names {DOT} "
@@ -1319,7 +1321,21 @@ def _say_next(run: Any) -> None:
     elif flat.get("mean_ic") is not None:
         line = "it carries information; give it a simulator: run validate_study --project <module>"
     elif "usable" in flat:
-        dirty = any(int(flat.get(k) or 0) for k in ("n_spike_names", "n_stale_names", "n_unreadable"))
+        # EVERY problem counter, or the hint lies: this said "the data is
+        # clean" over a run whose own tiles showed a name leaving the panel —
+        # ragged and ends-early were missing from the very list whose job is
+        # to notice them.
+        dirty = any(
+            int(flat.get(k) or 0)
+            for k in (
+                "n_spike_names",
+                "n_stale_names",
+                "n_unreadable",
+                "n_ragged",
+                "n_nonpositive",
+                "n_ends_early",
+            )
+        )
         line = (
             "the named names need looking at before anything runs on them."
             if dirty
@@ -1682,22 +1698,31 @@ def _returns_from_universe(data: Any, symbol: str) -> list[float] | None:
     symbol's closes is data shaping, not workflow knowledge: the same job the
     CSV loader does when it reads a wide file.
 
-    Handles both series shapes a universe arrives in: bare floats (the portal's
-    stored closes) and `{date, close}` rows (a wide/long CSV).
+    Handles all three series shapes a universe arrives in: bare floats (the
+    portal's stored closes), `{date, close}` rows, and a `{date: close}`
+    mapping (what a dated wide/long CSV loads as).
     """
     if not isinstance(data, dict):
         return None
     series = data.get(symbol.upper())
-    if not isinstance(series, list):
+    closes: list[float]
+    if isinstance(series, dict):
+        # The shared reader sorts a mapping by its date key — the same order
+        # every other consumer of the shape reads it in.
+        from .core import series_values
+
+        closes = [float(v) for v in series_values(series)[0]]
+    elif isinstance(series, list):
+        closes = []
+        for row in series:
+            if isinstance(row, dict):
+                value = row.get("close")
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    closes.append(float(value))
+            elif isinstance(row, (int, float)) and not isinstance(row, bool):
+                closes.append(float(row))
+    else:
         return None
-    closes: list[float] = []
-    for row in series:
-        if isinstance(row, dict):
-            value = row.get("close")
-            if isinstance(value, (int, float)) and not isinstance(value, bool):
-                closes.append(float(value))
-        elif isinstance(row, (int, float)) and not isinstance(row, bool):
-            closes.append(float(row))
     if len(closes) < 2 or any(c == 0 for c in closes[:-1]):
         return None
     return [round(closes[i] / closes[i - 1] - 1.0, 8) for i in range(1, len(closes))]

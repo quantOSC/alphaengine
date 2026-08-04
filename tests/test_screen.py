@@ -197,6 +197,18 @@ def test_the_same_universe_screens_the_same_way_twice() -> None:
     assert screen_universe(names, rank_by="return_pct") == screen_universe(names, rank_by="return_pct")
 
 
+def test_a_dated_mapping_universe_screens_identically_to_bare_lists() -> None:
+    """`{date: close}` is what a dated CSV loads as and what the portal's cache
+    serves. The dates change WHAT CAN BE CHECKED, never what the numbers are:
+    the same closes must produce the numerically identical shortlist."""
+    lists = universe(12, 300)
+    dated = {sym: {f"2026-{i:04d}": v for i, v in enumerate(series)} for sym, series in lists.items()}
+    for metric in ("return_pct", "rsi"):
+        assert screen_universe(dated, rank_by=metric, top_n=10) == screen_universe(
+            lists, rank_by=metric, top_n=10
+        )
+
+
 def test_ties_break_on_the_symbol_so_the_order_is_total() -> None:
     """Two names with an identical score must not swap places between runs. A
     ranking that is stable only up to ties is not reproducible, and reproducible

@@ -25,9 +25,9 @@ NOTHING HERE TOUCHES THE NETWORK, AND THAT IS THE POINT
 
 THE SHAPES, AND WHY DETECTION IS NARROW
 
-    wide     date,AAPL,MSFT,NVDA        -> {symbol: [closes]}    a universe
-    long     date,symbol,close          -> {symbol: [rows]}      a universe
-    series   date,close  /  one column  -> [floats]              returns or prices
+    wide     date,AAPL,MSFT,NVDA        -> {symbol: {date: close}}   a universe
+    long     date,symbol,close          -> {symbol: {date: close}}   a universe
+    series   date,close  /  one column  -> [floats]                  returns or prices
 
     Three shapes, recognised by their HEADER and nothing else. No sniffing of
     value ranges, no "looks like returns because they are small". A loader that
@@ -35,6 +35,17 @@ THE SHAPES, AND WHY DETECTION IS NARROW
     failure — a screen ranking returns as prices — produces plausible numbers
     rather than an error. When the header does not decide it, this raises and
     names the three shapes.
+
+THE DATES SURVIVE THE LOAD
+
+    A universe file carries a date column by definition — that is how its shape
+    was recognised — so a universe loads as `{symbol: {date: close}}` and every
+    calendar check downstream (`dates_supplied`, panel span, survivorship) can
+    actually run. Dropping the dates here made a dated file profile as undated
+    two steps later, which is a capability the caller paid for thrown away in
+    transit. A single series keeps its bare-list shape: one series feeds the
+    return-measuring workflows, which read values, and a bare column has no
+    dates to keep in the first place.
 
 NO NEW DEPENDENCY
 
@@ -140,10 +151,8 @@ def load_delimited(text: str, *, delimiter: str | None = None) -> Any:
     )
 
 
-def _long(
-    body: list[list[str]], date_at: int, symbol_at: int, value_at: int
-) -> dict[str, list[dict[str, Any]]]:
-    out: dict[str, list[dict[str, Any]]] = {}
+def _long(body: list[list[str]], date_at: int, symbol_at: int, value_at: int) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
     for row in body:
         if len(row) <= max(date_at, symbol_at, value_at):
             continue
@@ -153,17 +162,15 @@ def _long(
         symbol = (row[symbol_at] or "").strip().upper()
         if not symbol:
             continue
-        out.setdefault(symbol, []).append({"date": (row[date_at] or "").strip(), "close": value})
-    # Sorted by date because the file's order is the file's business and every
-    # metric downstream reads the LAST element as the most recent.
-    for rows in out.values():
-        rows.sort(key=lambda r: str(r["date"]))
-    return out
+        out.setdefault(symbol, {})[(row[date_at] or "").strip()] = value
+    # Inserted in date order because the file's order is the file's business.
+    # Consumers sort a mapping by key anyway; this only keeps the repr honest.
+    return {s: {d: series[d] for d in sorted(series)} for s, series in out.items()}
 
 
-def _wide(header: list[str], body: list[list[str]], date_at: int) -> dict[str, list[dict[str, Any]]]:
+def _wide(header: list[str], body: list[list[str]], date_at: int) -> dict[str, dict[str, float]]:
     columns = [(i, h) for i, h in enumerate(header) if i != date_at and h]
-    out: dict[str, list[dict[str, Any]]] = {h.upper(): [] for _, h in columns}
+    out: dict[str, dict[str, float]] = {h.upper(): {} for _, h in columns}
     ordered = sorted(body, key=lambda r: str(r[date_at]).strip() if len(r) > date_at else "")
     for row in ordered:
         if len(row) <= date_at:
@@ -179,15 +186,15 @@ def _wide(header: list[str], body: list[list[str]], date_at: int) -> dict[str, l
                 # contain, and every coverage figure downstream would be a lie
                 # about data that was never supplied.
                 continue
-            out[name.upper()].append({"date": date, "close": value})
+            out[name.upper()][date] = value
     return {k: v for k, v in out.items() if v}
 
 
 def load_csv(path: str | Path, *, delimiter: str | None = None) -> Any:
     """Read a local delimited file into the shape a workflow wants.
 
-    Returns `{symbol: rows}` for a universe file and `list[float]` for a single
-    series. Never fetches, never caches, never uploads.
+    Returns `{symbol: {date: close}}` for a universe file and `list[float]` for
+    a single series. Never fetches, never caches, never uploads.
     """
     p = Path(path).expanduser()
     if not p.exists():

@@ -39,6 +39,8 @@ from typing import Any
 
 import numpy as np
 
+from .series_shapes import series_values
+
 MAX_PERIODS = 64
 _RND = 6
 
@@ -55,7 +57,17 @@ class PanelShapeError(ValueError):
 
 def _series(values: Any) -> np.ndarray | None:
     """A numeric 1-D array, or None for anything else. Narrow on purpose —
-    guessing at a frame-like object risks reading the wrong column silently."""
+    guessing at a frame-like object risks reading the wrong column silently.
+
+    A `{date: value}` mapping and `[{date, close}]` rows go through the shared
+    reader — the shapes a dated universe arrives in, and the prices side of a
+    signal evaluation is exactly one of those. They used to read as None here,
+    so a dated universe scored zero usable names while profiling clean."""
+    if isinstance(values, dict) or (
+        isinstance(values, (list, tuple)) and len(values) and isinstance(values[0], dict)
+    ):
+        arr = series_values(values)[0]
+        return arr if arr.ndim == 1 and arr.size else None
     if isinstance(values, (list, tuple, np.ndarray)):
         try:
             arr = np.asarray(values, dtype=float)

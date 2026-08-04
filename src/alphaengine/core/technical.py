@@ -23,6 +23,8 @@ from typing import Any
 
 import numpy as np
 
+from .series_shapes import series_values
+
 DEFAULT_SMA_WINDOWS = [50, 150, 200]
 RSI_OVERBOUGHT = 70.0
 RSI_OVERSOLD = 30.0
@@ -38,8 +40,9 @@ def _extract(series: Any) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | N
     """Return (closes, highs, lows). Accepts bare closes, {date: close}, or a list
     of OHLC row dicts. highs/lows are None unless OHLC rows carry them."""
     if isinstance(series, dict):
-        dates = sorted(series.keys())
-        return np.asarray([float(series[d]) for d in dates], dtype=float), None, None
+        # The shared reader: sorted by date key, non-numeric entries skipped
+        # rather than raised on — one semantics for a mapping everywhere.
+        return series_values(series)[0], None, None
     if isinstance(series, list) and series and isinstance(series[0], dict):
         rows = series
         if all("date" in r for r in rows):

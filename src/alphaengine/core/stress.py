@@ -27,6 +27,8 @@ from typing import Any
 
 import numpy as np
 
+from .series_shapes import series_values
+
 _RND = 6
 _TRADING_DAYS = 252
 
@@ -39,6 +41,10 @@ MIN_OVERLAP_OBS = 20
 
 
 def _returns(values: Any) -> np.ndarray | None:
+    # A {date: value} mapping is a dated series, not a refusal: the shared
+    # reader sorts it by key, exactly as every other consumer of the shape.
+    if isinstance(values, dict):
+        values = series_values(values)[0]
     try:
         arr = np.asarray(values, dtype=float)
     except (TypeError, ValueError):

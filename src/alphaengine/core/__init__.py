@@ -36,6 +36,7 @@ from .performance import performance_report
 from .profile import profile_data
 from .risk import compute_var_cvar
 from .screen import screen_universe
+from .series_shapes import series_values
 from .signals import information_coefficient, quantile_returns, signal_decay
 from .stress import cost_ladder, drawdown_anatomy, overlap_stats, subperiod_stability
 from .technical import technical_features
@@ -78,4 +79,6 @@ __all__ = [
     "overlap_stats",
     # data hygiene: what is wrong with the file, before anything runs on it
     "profile_data",
+    # the one reading of the three shapes a per-symbol series arrives in
+    "series_values",
 ]
