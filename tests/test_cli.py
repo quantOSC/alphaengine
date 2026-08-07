@@ -1439,3 +1439,54 @@ def test_a_recap_never_takes_the_run_down(capsys):
 
     cli._say_gaps(_R())
     assert capsys.readouterr().out == ""
+
+
+# ── the portal bridge points at addresses that exist ───────────────────────
+#
+# The CLI printed a bare run id and named four screens that had been redirects
+# for months: "Work", "the sleeve page", "your Book", and — worst — "accept it
+# in the portal", pointing at a proposal surface that no longer exists at all.
+# An id nobody can turn into a URL is a reference to nothing.
+
+
+def test_a_run_is_printed_as_a_url_not_a_bare_id(capsys, monkeypatch):
+    monkeypatch.delenv("QUANTOS_PORTAL_URL", raising=False)
+    monkeypatch.delenv("QUANTOS_API_URL", raising=False)
+
+    class _R:
+        run_id = "run_abc123"
+
+    cli._where_it_lives(_R())
+    out = capsys.readouterr().out
+    assert "https://qosai.app/portal/runs/run_abc123" in out
+
+
+def test_the_portal_follows_the_api_to_localhost(monkeypatch):
+    """A CONFIG DEFAULT THAT IS PRESENT AND WRONG is worse than one that is
+    missing. Sending somebody to the hosted portal to read a run that exists
+    only on their machine is that failure exactly."""
+    monkeypatch.delenv("QUANTOS_PORTAL_URL", raising=False)
+    monkeypatch.setenv("QUANTOS_API_URL", "http://localhost:8000")
+    assert cli.portal_url() == "http://localhost:3000"
+
+
+def test_the_portal_url_is_overridable(monkeypatch):
+    """A self-hosted deployment must not send its users to ours."""
+    monkeypatch.setenv("QUANTOS_PORTAL_URL", "https://research.example.com/")
+    assert cli.portal_url() == "https://research.example.com"
+
+
+def test_no_line_names_a_screen_that_is_a_redirect():
+    """Four names that had been redirects since Phase 8. This asserts the
+    SOURCE rather than one code path, because the next one to go stale will be
+    somewhere none of these tests happens to reach."""
+    import pathlib
+
+    source = pathlib.Path(cli.__file__).read_text(encoding="utf-8")
+    for gone in (
+        "Open Work in the portal",
+        "the sleeve page shows",
+        "against your Book in the portal",
+        "Open it in the portal to accept",
+    ):
+        assert gone not in source, gone

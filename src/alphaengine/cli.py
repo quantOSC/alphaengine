@@ -112,6 +112,34 @@ _ENV_KEY = "QUANTOS_API_KEY"
 _ENV_URL = "QUANTOS_API_URL"
 DEFAULT_BASE_URL = "https://alpha-backend-production-51df.up.railway.app"
 
+#: WHERE A RUN IS READ. The CLI printed a bare run id and left the reader to
+#: work out that `/portal/runs/<id>` exists — and named four screens that had
+#: been redirects for months besides ("Work", "the sleeve page", "your Book",
+#: "accept it in the portal", the last pointing at a surface that does not
+#: exist at all). An id nobody can turn into a URL is a reference to nothing.
+#:
+#: Overridable, and derived from the API host when that has been pointed
+#: somewhere else, so a self-hosted deployment does not send its users to ours.
+DEFAULT_PORTAL_URL = "https://qosai.app"
+
+
+def portal_url(api_url: str | None = None) -> str:
+    """The portal this account's runs live on.
+
+    `$QUANTOS_PORTAL_URL` wins. Otherwise the public portal — EXCEPT when the
+    API has been pointed at localhost, where sending somebody to the hosted
+    portal to read a run that exists only on their machine is the config-default
+    failure this codebase has already paid for four times: present, wrong, and
+    answering every check.
+    """
+    override = os.environ.get("QUANTOS_PORTAL_URL")
+    if override:
+        return override.rstrip("/")
+    host = (api_url or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).lower()
+    if "localhost" in host or "127.0.0.1" in host:
+        return "http://localhost:3000"
+    return DEFAULT_PORTAL_URL
+
 
 # ── output ─────────────────────────────────────────────────────────────────
 #
@@ -1091,7 +1119,14 @@ def _propose_sleeve(session: Any, run: Any, thesis: dict[str, Any]) -> None:
 
     say("")
     say(f"  {green('Proposed.')} {len(ranked)} names for {bold(title)}")
-    say(dim("  Nothing exists yet. Open it in the portal to accept or change it."))
+    # THE PROPOSAL SURFACE WAS RETIRED IN PHASE 8 and this line went on naming
+    # it, so the one instruction printed here pointed at a redirect. Accepting
+    # work happens on the RUN now, which is where its figures, its caveats and
+    # its review pass already are.
+    say(
+        dim("  Nothing exists yet. Accept or decline it on the run: ")
+        + f"{portal_url()}/portal/runs/{getattr(run, 'run_id', '')}"
+    )
     say(dim(f"  proposal {filed.get('id')}"))
 
 
@@ -1529,7 +1564,7 @@ def _say_next(run: Any) -> None:
     elif flat.get("deflated_sharpe") is not None:
         line = "find where it breaks: run stress_study --input turnover=<one-way per period>"
     elif flat.get("target_weight") is not None:
-        line = "record the fill against your Book in the portal."
+        line = "record the fill on the Portfolio, or take the whole list at once."
     elif flat.get("mean_ic") is not None:
         line = "it carries information; give it a simulator: run validate_study --project <module>"
     elif "usable" in flat:
@@ -1554,7 +1589,7 @@ def _say_next(run: Any) -> None:
             else "the data is clean: run screen_universe"
         )
     elif flat.get("status") == "breached":
-        line = "the sleeve page shows the breach against its budget."
+        line = "it crossed a line: the breach is waiting for the desk in the portal."
 
     if line:
         say(dim(f"  next {DOT} ") + line)
@@ -1574,11 +1609,10 @@ def _where_it_lives(run: Any) -> None:
     if not run_id:
         return
     say("")
-    say(
-        dim(f"  Recorded {DOT} ")
-        + f"{run_id}"
-        + dim(f" {DOT} on your account. Open Work in the portal to see it rendered.")
-    )
+    # THE URL, NOT THE ID. A reader who has to know that `/portal/runs/<id>`
+    # exists is a reader who does not open it. Most terminals make this
+    # clickable; the ones that do not still let it be copied whole.
+    say(dim("  Recorded ") + f"{portal_url()}/portal/runs/{run_id}")
 
 
 #: How many shortlist rows the terminal prints before saying how many it kept
