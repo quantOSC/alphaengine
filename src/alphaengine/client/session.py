@@ -153,6 +153,32 @@ class Run:
             return []
         return list(out.get("gaps") or [])
 
+    def filed_diff(self) -> Figures | None:
+        """What moved since the last file of the same label, or None.
+
+        NOBODY READS A HUNDRED RANKED NAMES EVERY MORNING; they read what moved.
+        A weekly screen's real question is the delta, and it was answerable only
+        in a browser while the person asking it was in a terminal.
+
+        `first_file` distinguishes NO PREDECESSOR from NOTHING CHANGED, which
+        are opposite answers on the one morning somebody is looking hardest —
+        so the caller must not collapse them.
+
+        None means the run filed nothing, or the diff could not be read. Never
+        raises: a delta is worth losing, a result is not.
+        """
+        try:
+            filed = self.session._get("/api/me/signals?limit=60")
+        except (Offline, ServerError):
+            return None
+        mine = [f for f in (filed.get("signals") or []) if f.get("source_run_id") == self.run_id]
+        if not mine:
+            return None
+        try:
+            return self.session._get(f"/api/me/signals/{mine[0].get('id')}/diff")
+        except (Offline, ServerError):
+            return None
+
     def step(self, step: Figures) -> Figures:
         """Execute one permitted step locally and report the figures."""
         attempt_id = uuid.uuid4().hex
@@ -295,6 +321,21 @@ class Session:
     def workflows(self) -> list[Figures]:
         """Names and versions. That is all a client is given, and all it needs."""
         return list(self._get("/api/harness/workflows").get("workflows") or [])
+
+    def recent_runs(self, limit: int = 25) -> list[Figures]:
+        """YOUR OWN WEEK: what ran, what it decided, what it filed.
+
+        The terminal could start work and could not show you any of it, so "what
+        did I already try" was a question you had to open a browser to ask —
+        from the one place you are least likely to want to leave.
+
+        Rows carry the verdict, the honest trial count with its provenance, and
+        the stop reason where there is one. Mostly stops, which is the point:
+        the dead ends are the majority of a week's output and the part that
+        evaporates everywhere else.
+        """
+        out = self._get(f"/api/harness/runs?limit={int(limit)}")
+        return list(out.get("runs") or [])
 
     def universes(self) -> list[Figures]:
         """Universes you registered in the portal: names, and the SYMBOLS in them.

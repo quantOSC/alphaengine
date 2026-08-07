@@ -549,6 +549,69 @@ def cmd_workflows(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_runs(args: argparse.Namespace) -> int:
+    """YOUR OWN WEEK, from where the work happens.
+
+    The terminal could start a run and could not show you one. "What did I
+    already try" was a question you had to open a browser to ask, from the one
+    place you are least likely to want to leave — and a quant's week is fifteen
+    runs of which most are stops.
+
+    THE STOPS ARE THE POINT. They are the majority of a week's output and the
+    part that evaporates everywhere else, so a stop prints its REASON rather
+    than only its token: the sentence is the most useful thing the run produced.
+    """
+    from .client import Offline, ServerError
+
+    session, url = _session(args.url, args.key)
+    try:
+        rows = session.recent_runs(limit=args.limit)
+    except Offline:
+        _explain_offline(url)
+        return 2
+    except ServerError as exc:
+        refused(exc)
+        if is_auth_error(exc) and offer_key():
+            say(dim("  Key set. Run that again."))
+        return 2
+
+    if not rows:
+        say("")
+        say(dim("  Nothing recorded on this account yet."))
+        say(dim("  A run files itself as it goes: ") + "alphaengine screen --universe <name>")
+        return 0
+
+    say("")
+    for r in rows:
+        when = str(r.get("created_at") or "")[:10]
+        kind = str(r.get("kind") or "workflow")
+        verdict = str(r.get("verdict") or r.get("status") or "")
+        mark = (
+            yellow("stopped")
+            if verdict == "stopped"
+            else green("closed")
+            if verdict == "completed"
+            else dim(verdict or "open")
+        )
+        line = f"  {dim(when)}  {bold(kind.ljust(16))}  {mark}"
+        # THE DENOMINATOR TRAVELS WITH THE COUNT, here as everywhere. A number
+        # that was counted and one that was asserted are different claims.
+        if r.get("honest_n") is not None:
+            src = str(r.get("n_trials_source") or "unknown").replace("_", " ")
+            line += dim(f"  n={r['honest_n']} {DOT} {src}")
+        filed = r.get("signal_file")
+        if isinstance(filed, dict) and filed.get("version"):
+            line += dim(f"  {DOT} filed v{filed['version']}")
+        say(line)
+        reason = str(r.get("reason") or "").strip()
+        if reason:
+            for text in _wrap(reason, 68):
+                say("    " + dim(text))
+    say("")
+    say(dim(f"  {len(rows)} shown {DOT} open one in the portal to act on it"))
+    return 0
+
+
 def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest_fn: Any) -> str | None:
     """What is missing before a run starts. `None` when nothing is.
 
@@ -1106,7 +1169,7 @@ def _publish_signals(session: Any, run: Any, *, workspace_id: str | None, label:
         + dim(f"{saved.get('label')} {DOT} {saved.get('asof')}")
         + (dim(f" {DOT} v{version}") if version else "")
     )
-    say(dim("  It is on your account, dated and versioned. Tomorrow's run diffs against it."))
+    _say_diff(run)
 
 
 def _found(before: set[str], run: Any) -> str:
@@ -1341,6 +1404,58 @@ def _report(run: Any) -> int:
         return 1
     say(dim(f"Run left {run.status}. `alphaengine` can resume it: {run.run_id}"))
     return 1
+
+
+def _say_diff(run: Any) -> None:
+    """WHAT MOVED since the last file of the same label.
+
+    Nobody reads a hundred ranked names every morning; they read what changed. A
+    weekly screen's real question is the delta, and until now it was answerable
+    only in a browser — from the one place the person asking it is least likely
+    to want to leave.
+
+    NO PREDECESSOR IS ITS OWN SENTENCE. "First file of this label — nothing to
+    compare against" and "nothing moved" are opposite answers on the one morning
+    somebody is looking hardest, and collapsing them is the failure the
+    `first_file` flag exists to prevent.
+    """
+    try:
+        diff = run.filed_diff()
+    except Exception:  # noqa: BLE001 — a delta is worth losing; a result is not
+        return
+    if not diff:
+        return
+
+    if diff.get("first_file"):
+        say(dim("  First file under this label — nothing to compare against yet."))
+        return
+
+    n_in = int(diff.get("n_entered") or 0)
+    n_out = int(diff.get("n_exited") or 0)
+    n_moved = int(diff.get("n_moved") or 0)
+    n_held = len(diff.get("held") or [])
+    if not (n_in or n_out or n_moved):
+        say(dim(f"  Nothing moved against {diff.get('compared_with')} {DOT} {n_held} names, same ranking."))
+        return
+
+    parts = []
+    if n_in:
+        parts.append(green(f"{n_in} in"))
+    if n_out:
+        parts.append(red(f"{n_out} out"))
+    if n_moved:
+        parts.append(f"{n_moved} re-ranked")
+    parts.append(dim(f"{n_held} unchanged"))
+    say(f"  {dim('vs ' + str(diff.get('compared_with')))} {DOT} " + f" {DOT} ".join(parts))
+
+    # THE NAMES, not just the counts — a count tells you something happened and
+    # a desk still has to open a browser to find out what.
+    for key, colour, word in (("entered", green, "in"), ("exited", red, "out")):
+        names = [str(r.get("ticker")) for r in (diff.get(key) or []) if r.get("ticker")]
+        if names:
+            shown = ", ".join(names[:12])
+            more = f" +{len(names) - 12} more" if len(names) > 12 else ""
+            say(f"    {colour(word)}  {dim(shown + more)}")
 
 
 def _say_gaps(run: Any) -> None:
@@ -2959,6 +3074,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if verb == "workflows":
             cmd_workflows(args)
             continue
+        if verb == "runs":
+            # THE SESSION HAS ONE TOO, and it is the same record. A quant
+            # mid-session asking "what have I already tried" should not have to
+            # leave to find out.
+            cmd_runs(argparse.Namespace(url=args.url, key=args.key, limit=25))
+            continue
         if verb == "status":
             say(dim("no run yet") if last is None else f"{last.run_id}  {last.status}")
             continue
@@ -3173,6 +3294,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("version", parents=[common], help="print the version")
     sub.add_parser("workflows", parents=[common], help="list what the server offers")
     sub.add_parser("demo", parents=[common], help="run the built-in example, offline")
+    rl = sub.add_parser("runs", parents=[common], help="your own week: what ran, and what it decided")
+    rl.add_argument("--limit", type=int, default=25, help="how many to show (default 25)")
     sub.add_parser("logout", parents=[common], help="remove stored credentials")
     d = sub.add_parser("commands", parents=[common], help="every command, grouped")
     d.add_argument("verb", nargs="?", help="expand one command in full")
@@ -3240,6 +3363,7 @@ def main(argv: list[str] | None = None) -> int:
     handlers: dict[str | None, Callable[[argparse.Namespace], int]] = {
         "version": cmd_version,
         "workflows": cmd_workflows,
+        "runs": cmd_runs,
         "demo": cmd_demo,
         "logout": cmd_logout,
         "commands": cmd_commands,

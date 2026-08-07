@@ -108,6 +108,7 @@ distinction is the whole of the data boundary below.
 | Command | Does | Where |
 |---|---|---|
 | `demo` | run the built-in example offline, with no account and no data | shell + session |
+| `runs [--limit N]` | your own week: what ran, what it decided, what it filed | shell + session |
 | `workflows` | what the server offers, what each needs, and which reproduce | shell + session |
 | `key [quantos \| anthropic \| openai]` | enter a credential now, or see which rungs are unlocked | session |
 | `commands [verb]` | this directory, or one command in full | shell + session |
@@ -168,6 +169,7 @@ distinction is the whole of the data boundary below.
 | `--label TEXT` | what to call the artifact this run produces |
 | `--input K=V` | a workflow input; repeatable |
 | `--quiet` | only the result, no step narration |
+| `--limit N` | how many rows to show (default 25) |
 
 ### Examples
 
@@ -181,6 +183,8 @@ alphaengine overlap
 alphaengine size
 alphaengine monitor
 alphaengine demo
+alphaengine runs
+alphaengine runs --limit 50
 alphaengine workflows
 alphaengine commands
 alphaengine run screen_universe --universe sp500

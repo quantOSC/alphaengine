@@ -92,6 +92,7 @@ FLAGS: dict[str, Flag] = {
     "label": Flag("--label", "TEXT", "what to call the artifact this run produces"),
     "input": Flag("--input", "K=V", "a workflow input; repeatable"),
     "quiet": Flag("--quiet", "", "only the result, no step narration"),
+    "limit": Flag("--limit", "N", "how many rows to show (default 25)"),
 }
 
 
@@ -191,6 +192,26 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "failing, a tool that only ever agrees with you is not a referee."
         ),
         examples=("alphaengine demo",),
+    ),
+    Command(
+        verb="runs",
+        group="start",
+        args="[--limit N]",
+        scope="both",
+        purpose="your own week: what ran, what it decided, what it filed",
+        body=(
+            "The terminal could START work and could not show you any of it, so "
+            '"what did I already try" was a question you had to open a browser to '
+            "ask, from the one place you are least likely to want to leave.\n\n"
+            "MOSTLY STOPS, AND THAT IS THE POINT. The dead ends are the majority "
+            "of a research week and the part that evaporates everywhere else, so a "
+            "stopped run prints its REASON here rather than only its token: the "
+            "sentence is the most useful thing the run produced.\n\n"
+            "Every row carries the honest trial count WITH its provenance, because "
+            "a count that was derived from a grid that ran and one that was "
+            "asserted are different claims about the same number."
+        ),
+        examples=("alphaengine runs", "alphaengine runs --limit 50"),
     ),
     Command(
         verb="workflows",
