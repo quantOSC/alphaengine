@@ -133,6 +133,26 @@ class Run:
         out = self.session._get(f"/api/harness/runs/{self.run_id}/trace")
         return list(out.get("events") or [])
 
+    def gaps(self) -> list[Figures]:
+        """WHAT THIS RUN DOES NOT TELL YOU.
+
+        Derived server-side by a query over the record — which of the eight
+        questions were asked, of what data, and when — and never by a model. A
+        gap a model was invited to find is one it can decline to find, and worse
+        one it can invent. Each gap names the workflow that closes it, which is
+        what makes it a next step rather than an observation.
+
+        NEVER RAISES. A recap that cannot list its gaps is still worth printing;
+        one that takes the result down with it is not. `[]` covers both "none
+        found" and "could not ask", so the caller that needs to distinguish them
+        has to say so itself.
+        """
+        try:
+            out = self.session._get(f"/api/harness/runs/{self.run_id}/gaps")
+        except (Offline, ServerError):
+            return []
+        return list(out.get("gaps") or [])
+
     def step(self, step: Figures) -> Figures:
         """Execute one permitted step locally and report the figures."""
         attempt_id = uuid.uuid4().hex

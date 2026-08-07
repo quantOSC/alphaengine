@@ -1109,12 +1109,60 @@ def _publish_signals(session: Any, run: Any, *, workspace_id: str | None, label:
     say(dim("  It is on your account, dated and versioned. Tomorrow's run diffs against it."))
 
 
+def _found(before: set[str], run: Any) -> str:
+    """What the step that just ran FOUND, in the reader's words.
+
+    ── THE RULE THAT MAKES THIS SAFE: NARRATION IS RETROSPECTIVE ──────────────
+
+    `protocol.py` is emphatic that the client must never learn the graph — a
+    step names an operation and never a purpose, and "a progress bar is a graph
+    disclosure in a friendly hat". So this may never say what comes NEXT.
+
+    It does not have to. Every word here describes a step that has ALREADY run,
+    and the past is not the graph's future. `executor.execute` returns the
+    figures and `Run.step` records them by op before the round trip, so the
+    client already knows what it just found out, in numbers, as it finds them.
+
+    Only figures this step added, and only ones carrying a LABEL.
+    `_FIGURE_LABELS` is the same vocabulary the closing recap uses — a figure
+    called one thing while it streams and another when it lands is two figures
+    to a reader.
+    """
+    fresh: dict[str, Any] = {}
+    for op, blob in (getattr(run, "figures", {}) or {}).items():
+        if op in before or not isinstance(blob, dict):
+            continue
+        fresh.update(blob)
+
+    parts: list[str] = []
+    # A STATUS OR A VERDICT OUTRANKS A NUMBER. "the book again" is the entire
+    # result of an overlap run, and printing a correlation instead is how the
+    # one conclusion becomes the one thing left unsaid.
+    for key in ("status", "verdict"):
+        word = fresh.get(key)
+        if isinstance(word, str) and word:
+            parts.append(bold(word.replace("_", " ")))
+            break
+    for key, (label, unit) in _FIGURE_LABELS.items():
+        if len(parts) >= 3:  # three is a line; more is a table, and one lands below
+            break
+        v = fresh.get(key)
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            parts.append(f"{label} {bold(_num(v))}{(' ' + unit) if unit else ''}")
+    return f" {DOT} ".join(parts)
+
+
 def _drive(run: Any, *, quiet: bool = False) -> None:
-    """Execute the run, narrating each step.
+    """Execute the run, narrating each step BY WHAT IT FOUND.
 
     Wraps `Run.step` rather than calling `drive()` so there is something to
     watch. The loop itself — what is permitted, in what order, what stops it —
     is still entirely the server's.
+
+    IT USED TO PRINT THE OP NAME AND A DURATION: `server -> compute.screen 1.2s`.
+    That is a progress log. A quant watching it learned which functions fired
+    and never what was being found out — and the process IS the product here, so
+    a run that will not say what it is discovering is showing the wrong half.
     """
     n = 0
     failures: dict[str, int] = {}
@@ -1128,6 +1176,7 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
         for step in batch:
             op = step.get("op", "?")
             before = run.status
+            seen = set(getattr(run, "figures", {}) or {})
             # THE STEP IS WATCHED WHILE IT RUNS, not announced and then silent.
             # `compute.*` executes in-process against the caller's own frames, so
             # this is the one place in the product where a long wait is entirely
@@ -1160,7 +1209,12 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                     }
                     return
             elif not quiet:
-                say(f"  {dim('server ' + ARROW)}  {bold(op)}  {took}")
+                # WHAT IT FOUND, or the op when it produced nothing nameable —
+                # a step with no labelled figure is a real thing (`record.*`,
+                # `emit.*` seal rather than measure) and printing a blank line
+                # for it would read as a stall.
+                found = _found(seen, run)
+                say(f"  {dim(ARROW)}  {found or bold(op)}  {took}")
 
             if run.status != "open":
                 return
@@ -1261,6 +1315,7 @@ def _report(run: Any) -> int:
     if run.status == "closed":
         say(green("Closed.") + " " + dim(str((run.artifact or {}).get("workflow", ""))))
         _render_artifact(run.artifact or {})
+        _say_gaps(run)
         _where_it_lives(run)
         _say_next(run)
         return 0
@@ -1268,6 +1323,10 @@ def _report(run: Any) -> int:
         stop = run.stopped or {}
         say(yellow("Stopped.") + " " + str(stop.get("reason", "")))
         say(dim("  A stop is a result. The run did what it was built to do."))
+        # A STOP GETS ITS GAPS TOO, and needs them more than a close does: the
+        # run refused to answer, so what it could not cover is most of what
+        # there is to know about it.
+        _say_gaps(run)
         _where_it_lives(run)
         return 0
     if run.status == "abandoned":
@@ -1282,6 +1341,44 @@ def _report(run: Any) -> int:
         return 1
     say(dim(f"Run left {run.status}. `alphaengine` can resume it: {run.run_id}"))
     return 1
+
+
+def _say_gaps(run: Any) -> None:
+    """WHAT THIS RUN DOES NOT TELL YOU, printed where it can still be acted on.
+
+    The quant sees the gap at the moment of the run — before delivering, while
+    closing it is still cheap — and the PM sees the SAME derived object on the
+    run's page at the moment of the decision. One derivation, two readings; that
+    is the whole reason it lives on the server rather than in this file.
+
+    THE VOICE IS THE ONE THIS TERMINAL ALREADY USES FOR MEASUREMENT FACTS:
+    quiet, factual, no colour. A gap is not a warning — it is a statement about
+    what was and was not asked, and amber on "nobody has measured these scores
+    yet" would make a normal Tuesday read as an alarm.
+
+    Never fatal. `Run.gaps()` swallows its own transport failures and returns
+    `[]`, so a server that cannot answer costs the block and not the result.
+    """
+    try:
+        gaps = run.gaps()
+    except Exception:  # noqa: BLE001 — a recap must never take the run down
+        return
+    if not gaps:
+        return
+
+    say("")
+    say(dim("  What this does not tell you"))
+    for g in gaps:
+        says = str(g.get("says") or "").strip()
+        if not says:
+            continue
+        for i, line in enumerate(_wrap(says, 72)):
+            say(("    " if i else "  " + dim("·") + " ") + dim(line))
+        # THE REMEDY IS A COMMAND, not a suggestion to think about it. A gap
+        # that cannot name one prints nothing here rather than a vague verb.
+        closes = str(g.get("closes_with") or "")
+        if closes:
+            say("    " + dim("closes with ") + f"alphaengine run {closes}")
 
 
 def _say_next(run: Any) -> None:

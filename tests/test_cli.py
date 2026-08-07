@@ -1322,3 +1322,120 @@ def test_an_unreachable_portal_is_not_an_error_here():
             raise RuntimeError("offline")
 
     assert cli._universe_named_in("screen my sp100 universe", _Down()) is None
+
+
+# ── the run narrates itself, and never leaks the graph ─────────────────────
+#
+# The terminal used to print `server -> compute.screen 1.2s`: which functions
+# fired, never what was being found out. These hold the replacement to the one
+# rule that makes it safe — NARRATION IS RETROSPECTIVE. Every line describes a
+# step that has already run, so the past cannot disclose the graph's future.
+
+
+class _Narrating:
+    """A run whose figures have just gained one op's worth of results."""
+
+    def __init__(self, figures):
+        self.figures = figures
+
+
+def test_narration_reports_only_what_the_last_step_added():
+    before = {"compute.profile": {"universe_size": 500}}
+    run = _Narrating({**before, "compute.screen": {"n_evaluated": 431, "n_insufficient": 56}})
+    line = cli._found(set(before), run)
+    assert "431" in line and "56" in line
+    # The earlier step's figure is not restated — it was already narrated.
+    assert "500" not in line
+
+
+def test_a_verdict_outranks_a_number():
+    """ "the book again" is the entire result of an overlap run; a correlation
+    printed instead is the one conclusion left unsaid."""
+    run = _Narrating({"compute.overlap": {"correlation": 0.91, "verdict": "the_book_again"}})
+    line = cli._found(set(), run)
+    assert line.index("the book again") < line.index("0.91")
+
+
+def test_a_status_leads_the_line():
+    run = _Narrating({"compute.monitor": {"status": "breached", "n_obs": 250}})
+    assert cli._found(set(), run).startswith(cli.bold("breached"))
+
+
+def test_narration_never_names_an_op_or_a_stage():
+    """Rule 1 of the protocol: a step names an OPERATION, and the reader of this
+    line must not learn even that. Stage names are the graph's shape."""
+    run = _Narrating({"compute.screen": {"n_evaluated": 431}})
+    line = cli._found(set(), run)
+    assert "compute" not in line and "screen" not in line
+
+
+def test_a_step_that_produced_no_labelled_figure_narrates_nothing():
+    """`emit.*` and `record.*` seal rather than measure. The caller prints the
+    op in that case — a blank line would read as a stall."""
+    run = _Narrating({"emit.study": {"artifact_id": "abc", "sealed": True}})
+    assert cli._found(set(), run) == ""
+
+
+def test_narration_is_bounded_to_a_line():
+    run = _Narrating({"compute.all": {k: 1.0 for k in list(cli._FIGURE_LABELS)[:9]}})
+    assert cli._found(set(), run).count(cli.DOT) <= 2  # three parts, two separators
+
+
+# ── the gaps block ─────────────────────────────────────────────────────────
+
+
+def test_the_gap_block_prints_the_sentence_and_the_command(capsys):
+    class _R:
+        def gaps(self):
+            return [
+                {
+                    "code": "scores_never_measured",
+                    "kind": "sequence",
+                    "says": "These names are ranked by a score nothing has measured.",
+                    "closes_with": "evaluate_signal",
+                }
+            ]
+
+    cli._say_gaps(_R())
+    out = capsys.readouterr().out
+    assert "What this does not tell you" in out
+    assert "nothing has measured" in out
+    # THE REMEDY IS A COMMAND, not a suggestion to think about it.
+    assert "alphaengine run evaluate_signal" in out
+
+
+def test_a_gap_with_no_remedy_prints_no_command(capsys):
+    class _R:
+        def gaps(self):
+            return [
+                {
+                    "code": "engine_moved_on",
+                    "kind": "provenance",
+                    "says": "Computed on an older engine.",
+                    "closes_with": "",
+                }
+            ]
+
+    cli._say_gaps(_R())
+    out = capsys.readouterr().out
+    assert "older engine" in out and "alphaengine run" not in out
+
+
+def test_no_gaps_prints_no_heading(capsys):
+    class _R:
+        def gaps(self):
+            return []
+
+    cli._say_gaps(_R())
+    assert capsys.readouterr().out == ""
+
+
+def test_a_recap_never_takes_the_run_down(capsys):
+    """The result is already on screen; losing the gap block costs a block."""
+
+    class _R:
+        def gaps(self):
+            raise RuntimeError("the server is having a day")
+
+    cli._say_gaps(_R())
+    assert capsys.readouterr().out == ""
