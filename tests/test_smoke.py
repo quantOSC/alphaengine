@@ -69,15 +69,20 @@ def test_report_refuses_a_series_before_it_leaves_the_machine():
     series hidden under any key at all. It is duplicated on the server on
     purpose: a check that runs only on the client is not a check, and one that
     runs only on the server tells you too late and without naming the field.
+
+    SIZED OFF THE CAP. The fixture was 500 elements against a cap of 64; when
+    the cap moved to 512 the payload became legal and this test would have gone
+    on passing while asserting that the guard does nothing.
     """
     import pytest
 
-    from alphaengine.study.report import _guard
+    from alphaengine.study.report import MAX_FIGURE_LIST, _guard
 
     _guard({"performance": {"sharpe": 1.2}})  # figures pass
 
+    over = list(range(MAX_FIGURE_LIST + 1))
     with pytest.raises(ValueError, match="is a series"):
-        _guard({"performance": {"totally_not_returns": list(range(500))}})
+        _guard({"performance": {"totally_not_returns": over}})
 
 
 def test_report_needs_a_key_and_says_so():

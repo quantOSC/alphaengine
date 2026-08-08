@@ -93,12 +93,16 @@ def test_sweep_records_the_parameter_surface_when_the_grid_fits():
 
 
 def test_an_oversized_grid_records_the_absence_not_a_sample():
+    """A sampled surface would read as the full one, which is the whole reason
+    the cap exists. Sized off MAX_FIGURE_LIST — at 130 trials against a literal
+    this test silently inverted when the cap went to 512 and began asserting
+    that an oversized grid IS recorded."""
+    fast = list(range(2, 15))  # 13
+    slow = list(range(20, 20 + 2 * (MAX_FIGURE_LIST // len(fast) + 2), 2))
     ex = executor()
-    out = ex.execute(
-        "compute.sweep",
-        {"grid": {"fast": list(range(2, 15)), "slow": list(range(20, 40, 2))}},
-    )
-    assert out["n_trials"] == 130
+    out = ex.execute("compute.sweep", {"grid": {"fast": fast, "slow": slow}})
+
+    assert out["n_trials"] == len(fast) * len(slow) > MAX_FIGURE_LIST
     assert "trials" not in out
     assert out["trials_recorded"] is False
 
@@ -143,14 +147,23 @@ def test_a_handler_can_be_supplied_for_ops_only_your_environment_answers():
 # ── the data does not leave, enforced on this side too ─────────────────────
 def test_the_executor_refuses_to_send_a_series():
     """Enforced client side as well as server side. 'The data stays put' should
-    not depend on the other end remembering to check."""
-    ex = StepExecutor(data=prices(), handlers={"data.describe": lambda p, w: {"px": [1.0] * 500}})
+    not depend on the other end remembering to check.
+
+    SIZED OFF THE CAP, NOT OFF A LITERAL. These fixtures were 500 and 200 while
+    the cap was 64; raising it to 512 made both of them legal payloads, and both
+    tests went green while asserting nothing at all. A guard test whose fixture
+    does not move with the threshold stops testing the guard on the day the
+    threshold moves — which is the one day you want it to fail.
+    """
+    over = [1.0] * (MAX_FIGURE_LIST + 1)
+    ex = StepExecutor(data=prices(), handlers={"data.describe": lambda p, w: {"px": over}})
     with pytest.raises(ValueError, match="stays on your machine"):
         ex.execute("data.describe", {})
 
 
 def test_a_series_is_caught_however_it_is_nested():
-    ex = StepExecutor(data=prices(), handlers={"data.describe": lambda p, w: {"a": {"b": list(range(200))}}})
+    nested = list(range(MAX_FIGURE_LIST + 1))
+    ex = StepExecutor(data=prices(), handlers={"data.describe": lambda p, w: {"a": {"b": nested}}})
     with pytest.raises(ValueError, match="series"):
         ex.execute("data.describe", {})
 
@@ -709,3 +722,31 @@ def test_cost_ladder_emits_the_curve_only_when_it_was_measured():
     # ABSENCE, never a flat line at zero.
     bare = ex.execute("compute.cost_ladder", {})
     assert "cost_curve" not in bare
+
+
+def test_the_two_figure_caps_are_equal_even_though_they_are_duplicated():
+    """`study/report.py` repeats `MAX_FIGURE_LIST` rather than importing it, so
+    that `alphaengine.study` never pulls the client in — a real guarantee, and
+    the reason the duplication exists.
+
+    Deliberate duplication still drifts by accident. Both were 64; the wire cap
+    moved to 512 on 2026-08-08 and a report path left behind would have refused
+    exactly the curves the change exists to allow, from the one code path that
+    runs with no server to correct it.
+    """
+    from alphaengine.study.report import MAX_FIGURE_LIST as REPORT_CAP
+
+    assert MAX_FIGURE_LIST == REPORT_CAP
+
+
+def test_the_core_does_not_truncate_a_sequence_before_the_executor_buckets_it():
+    """MAX_PERIODS is upstream of every story figure and silently outranks them.
+
+    `information_coefficient` truncates `ic_by_period` to MAX_PERIODS before
+    `StepExecutor` ever sees it, so a core cap below `IC_POINTS` holds the chart
+    at the core's number and nothing in the executor says why.
+    """
+    from alphaengine.core.signals import MAX_PERIODS
+
+    assert MAX_PERIODS >= IC_POINTS
+    assert MAX_PERIODS <= MAX_FIGURE_LIST

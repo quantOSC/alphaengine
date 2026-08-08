@@ -61,19 +61,26 @@ Figures = dict[str, Any]
 Workspace = dict[str, Any]
 Handler = Callable[[Figures, Workspace], Figures]
 
-# Mirrors the server's guard. Enforced on our side too, because "the data never
-# leaves" should not depend on the other end remembering to check.
-MAX_FIGURE_LIST = 64
+# Mirrors the server's guard (`harness/vocabulary.MAX_LIST_LEN`). Enforced on
+# our side too, because "the data never leaves" should not depend on the other
+# end remembering to check. THE TWO MUST MOVE TOGETHER: a client cap above the
+# server's turns every long figure into a rejected step, and one below it
+# silently truncates work the server would have accepted.
+MAX_FIGURE_LIST = 512
 
 # ── the story figures, bounded by construction ─────────────────────────────
-# A run's detail page can only draw what travels, and what travels must be a
-# SHAPE, never a series — the same bargain profile.py strikes with
-# `live_by_period`. So the paths below are bucketed HERE, from data this
-# machine already holds, to at-or-under the wire's 64-element bound: a derived
-# summary of the caller's own backtest, not the backtest.
-CURVE_POINTS = 64  # the best configuration's path, and its drawdown
-IC_POINTS = 48  # per-period ICs
-COST_POINTS = 24  # cost rungs — it is a handful of levels
+# A run's detail page can only draw what travels, and what travels is a DERIVED
+# SUMMARY of the caller's own backtest — never their input series.
+#
+# RAISED 2026-08-08 with the wire (64 -> 512). At the old bound these curves
+# arrived pre-bucketed to 64 points, which is a sketch of a curve rather than
+# the curve: a 500-day equity path collapsed to 64 buckets loses every drawdown
+# shorter than eight sessions, and the drawdowns are the part a reader is
+# looking for. The bucketing still happens HERE, on the machine that holds the
+# data, so a longer history is still summarised rather than shipped whole.
+CURVE_POINTS = 512  # the best configuration's path, and its drawdown
+IC_POINTS = 256  # per-period ICs
+COST_POINTS = 64  # cost rungs — still a handful of levels in practice
 
 
 def _bucketed(
@@ -374,11 +381,16 @@ class StepExecutor:
         # The parameter surface, per trial — the artifact a sweep exists to
         # produce, and a derived statistic per configuration, so recording it
         # crosses no data boundary. Sent only when the WHOLE grid fits the
-        # wire's 64-element cap: a sampled surface would read as the full one,
-        # which is exactly the misrepresentation the cap exists to prevent.
-        # Failed trials are omitted so a configuration that did not run renders
-        # as a hole in the surface, never as a number.
-        if result.n_trials <= 64:
+        # wire's cap: a sampled surface would read as the full one, which is
+        # exactly the misrepresentation the cap exists to prevent. Failed trials
+        # are omitted so a configuration that did not run renders as a hole in
+        # the surface, never as a number.
+        #
+        # BOUND TO THE CAP RATHER THAN REPEATING IT. This was a literal 64 while
+        # the cap was 64, so raising one silently left the other — and the
+        # symptom would have been a 300-configuration surface still reporting
+        # `trials_recorded: false` for no visible reason.
+        if result.n_trials <= MAX_FIGURE_LIST:
             figures["trials"] = [
                 {**t.params, "sharpe": t.sharpe_annualized} for t in result.trials if t.failed is None
             ]
@@ -659,7 +671,59 @@ class StepExecutor:
                 "compute.overlap found `book_returns` but no candidate. Put the "
                 "idea's own series under `returns`."
             )
-        return dict(overlap_stats(candidate, book))
+        out = dict(overlap_stats(candidate, book))
+
+        # THE STORY FIGURES. A correlation and a beta are two numbers standing
+        # in for a relationship, and a desk cannot act on the summary alone:
+        #
+        #   the SCATTER is the joint distribution the correlation summarises,
+        #   and it is where you see that a 0.2 reading is really a cloud plus
+        #   four shared crashes;
+        #
+        #   ROLLING CORRELATION is whether the reading is stable. An idea that
+        #   averages 0.2 to the book but runs at 0.9 in every drawdown is the
+        #   book again exactly when it matters, and the average says the
+        #   opposite. This is the figure that changes a sizing decision.
+        #
+        # Both are derived from the caller's own two series, on this machine,
+        # and bounded before anything travels.
+        if out.get("correlation") is not None:
+            c = np.asarray(candidate, dtype=float)
+            b = np.asarray(book, dtype=float)
+            depth = int(out.get("n_obs") or min(c.size, b.size))
+            c, b = c[-depth:], b[-depth:]
+
+            stride = max(1, depth // CURVE_POINTS)
+            out["overlap_scatter"] = [
+                {"x": round(float(b[i]), 6), "y": round(float(c[i]), 6)} for i in range(0, depth, stride)
+            ]
+
+            # A quarter of the history, floored so the window is a measurement
+            # rather than a coincidence, and skipped entirely when the series
+            # is too short to roll — a rolling reading over 12 points would be
+            # noise drawn as a trend.
+            window = max(20, depth // 4)
+            if depth >= window * 2:
+                rolling: list[float] = []
+                for end in range(window, depth + 1):
+                    cw, bw = c[end - window : end], b[end - window : end]
+                    sc, sb = float(cw.std(ddof=1)), float(bw.std(ddof=1))
+                    if sc == 0 or sb == 0:
+                        rolling.append(float("nan"))
+                        continue
+                    cov = float(np.mean((cw - cw.mean()) * (bw - bw.mean())))
+                    rolling.append(cov / (sc * sb) * window / (window - 1))
+                clean = [v for v in rolling if v == v]
+                if clean:
+                    out["rolling_correlation"] = [
+                        {"i": i + window, "v": round(v, 6)}
+                        for i, v in _bucketed(rolling, CURVE_POINTS, _last)
+                        if v == v
+                    ]
+                    out["rolling_window"] = window
+                    out["max_rolling_correlation"] = round(max(clean), 6)
+                    out["min_rolling_correlation"] = round(min(clean), 6)
+        return out
 
     # ── emit / record ──────────────────────────────────────────────────────
     #

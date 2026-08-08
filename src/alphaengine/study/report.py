@@ -54,7 +54,12 @@ class ReportError(RuntimeError):
 # here rather than imported from `client` so that `alphaengine.study` never
 # pulls the client in — a guarantee `test_client.py` enforces, and one worth
 # more than not repeating fifteen lines.
-MAX_FIGURE_LIST = 64
+#
+# DUPLICATED ON PURPOSE, WHICH MEANS IT CAN DRIFT BY ACCIDENT. Raised with
+# `client.executor.MAX_FIGURE_LIST` on 2026-08-08; `test_client.py` holds the
+# two equal so the deliberate duplication cannot become an accidental
+# disagreement.
+MAX_FIGURE_LIST = 512
 
 
 def _guard(payload: dict[str, Any]) -> dict[str, Any]:

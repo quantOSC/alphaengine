@@ -41,7 +41,14 @@ import numpy as np
 
 from .series_shapes import series_values
 
-MAX_PERIODS = 64
+#: The longest per-period sequence a reading reports, and the longest bounded
+#: name list beside it.
+#:
+#: RAISED 64 -> 512 on 2026-08-08 with the wire cap. This one is easy to miss and
+#: silently defeats the others: the core truncates `ic_by_period` HERE, before
+#: `StepExecutor` ever buckets it, so leaving this at 64 would have held IC
+#: through time at 64 points no matter what `IC_POINTS` said.
+MAX_PERIODS = 512
 _RND = 6
 
 DEFAULT_HORIZON = 21

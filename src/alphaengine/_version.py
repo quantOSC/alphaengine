@@ -17,4 +17,16 @@ is what a changed figure costs. The API may still move underneath it.
 # column, so any grid with a failure read the wrong survivor's column (or
 # raised). Fixing it changes the figure a 0.2 install would have produced from
 # the same inputs — which is exactly what the MINOR position costs here.
-__version__ = "0.3.0"
+#
+# 0.4.0 IS THE SAME RULE AGAIN, and it is the harder case to spot because it
+# reads as "we added some charts". The wire's figure cap went 64 -> 512 and the
+# per-period cap in `core.signals` went with it, so the SAME INPUTS NOW PRODUCE
+# DIFFERENT OUTPUT: `ic_by_period` returns up to 512 readings where it returned
+# 64, `best_curve` and `drawdown_curve` carry a curve rather than a sketch of
+# one, a grid of up to 512 configurations records its full surface instead of
+# reporting `trials_recorded: false`, and `compute.overlap` emits a rolling
+# correlation and a scatter it did not emit before.
+#
+# Not one of those is a bug fix, and every one changes what a saved study
+# reproduces. That costs the MINOR position while the leading digit is 0.
+__version__ = "0.4.0"
