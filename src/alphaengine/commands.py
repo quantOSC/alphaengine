@@ -87,12 +87,11 @@ FLAGS: dict[str, Flag] = {
     "symbol": Flag(
         "--symbol", "TICKER", "one name out of a loaded universe; its closes become the return series"
     ),
-    "sleeve": Flag("--sleeve", "NAME", "the sleeve this run belongs to, and the budget it is bound by"),
-    "thesis": Flag("--thesis", "ID", "a draft thesis to propose this run's shortlist as a sleeve for"),
     "label": Flag("--label", "TEXT", "what to call the artifact this run produces"),
     "input": Flag("--input", "K=V", "a workflow input; repeatable"),
     "quiet": Flag("--quiet", "", "only the result, no step narration"),
     "limit": Flag("--limit", "N", "how many rows to show (default 25)"),
+    "budget": Flag("--budget", "N", "how many runs a night is worth (default 3)"),
 }
 
 
@@ -212,6 +211,43 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "asserted are different claims about the same number."
         ),
         examples=("alphaengine runs", "alphaengine runs --limit 50"),
+    ),
+    Command(
+        verb="gaps",
+        group="start",
+        args="",
+        scope="both",
+        purpose="what your record says is UNANSWERED, and what closes each one",
+        body=(
+            "`runs` shows what you already tried. This shows what you have not: "
+            "the other half of the same question, and the one you want at 9am "
+            "rather than at the end of a task.\n\n"
+            "EVERY LINE NAMES ITS REMEDY. A gap that cannot name one is an "
+            "observation rather than a next step, so the ones with no workflow "
+            "behind them are not printed as work.\n\n"
+            "Derived from the record, never asked of a model: a model invited to "
+            "find gaps can decline to find them, and can invent them. What you "
+            "see is a query over runs that actually happened."
+        ),
+        examples=("alphaengine gaps",),
+    ),
+    Command(
+        verb="tonight",
+        group="start",
+        args="[--budget N]",
+        scope="both",
+        purpose="what would run unattended tonight, without running any of it",
+        body=(
+            "The same derivation the scheduler uses, so this is what WILL happen "
+            "rather than a description of it.\n\n"
+            "EVERYTHING SKIPPED IS PRINTED. A plan showing only what it kept "
+            "reads as 'this is everything that mattered', which is the one thing "
+            "a plan must never imply. Two reasons appear: past tonight's budget, "
+            "and blocked on an input only you can state. A monitor's tolerances "
+            "are not something the planner may invent."
+        ),
+        examples=("alphaengine tonight", "alphaengine tonight --budget 5"),
+        flags=("budget",),
     ),
     Command(
         verb="workflows",

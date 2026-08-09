@@ -227,6 +227,11 @@ QUESTION_VERBS: dict[str, str] = {
     "size": "size_position",
     "monitor": "monitor_sleeve",
 }
+#: The same table read backwards, so a gap naming a WORKFLOW can print the verb
+#: a person actually types. Derived rather than written out twice, because two
+#: hand-maintained copies of this map is precisely the drift `commands.py`
+#: exists to prevent.
+QUESTION_FOR_WORKFLOW: dict[str, str] = {w: v for v, w in QUESTION_VERBS.items()}
 #: The held-back-rows marker. Probed like the rest: cp1252 renders a literal
 #: ellipsis as mojibake in exactly the place a user reads their result.
 ELLIPSIS = "…" if _UNICODE_OK else "..."
@@ -577,6 +582,105 @@ def cmd_workflows(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gaps(args: argparse.Namespace) -> int:
+    """WHAT THE RECORD SAYS IS UNANSWERED, and what closes each one.
+
+    `runs` shows what you already tried. This shows what you have NOT — the
+    other half of the same question, and the one you want at 9am rather than at
+    the end of a task.
+
+    Every line names its remedy, because a gap that cannot name one is an
+    observation rather than a next step. Both the gap and the remedy are
+    DERIVED from the record: a model asked to find gaps can decline to find
+    them, and can invent them.
+    """
+    from .client import Offline, ServerError
+
+    session, url = _session(args.url, args.key)
+    try:
+        out = session.gaps()
+    except Offline:
+        _explain_offline(url)
+        return 2
+    except ServerError as exc:
+        refused(exc)
+        if is_auth_error(exc) and offer_key():
+            say(dim("  Key set. Run that again."))
+        return 2
+
+    rows = list(out.get("queued") or []) + list(out.get("skipped") or [])
+    if not rows:
+        say("")
+        reason = str(out.get("reason") or "")
+        say(dim(f"  {reason}") if reason else dim("  Nothing open. The record answers what it was asked."))
+        return 0
+
+    say("")
+    say(f"  {bold(str(len(rows)))} open on this account")
+    for r in rows:
+        workflow = str(r.get("workflow") or "")
+        # THE SENTENCE IS THE FINDING. Printed whole rather than clipped to a
+        # label, because "nobody diagnosed this data before the run read it" is
+        # what tells somebody what to do and "data_never_diagnosed" is not.
+        say(f"  {dim(DOT)} {str(r.get('because') or r.get('code') or '').strip()}")
+        blocked = r.get("reason")
+        if blocked:
+            say(f"      {yellow('blocked')}  {dim(str(blocked))}")
+        else:
+            say(f"      {dim('->')} alphaengine {QUESTION_FOR_WORKFLOW.get(workflow, workflow)}")
+    say("")
+    return 0
+
+
+def cmd_tonight(args: argparse.Namespace) -> int:
+    """WHAT WOULD RUN TONIGHT, without running any of it.
+
+    The same derivation the scheduler uses, so this is what WILL happen rather
+    than a description of it.
+
+    Everything the budget cut is printed too. A plan that shows only what it
+    kept reads as "this is everything that mattered", which is the one thing a
+    plan must never imply.
+    """
+    from .client import Offline, ServerError
+
+    session, url = _session(args.url, args.key)
+    try:
+        out = session.plan(getattr(args, "budget", 0) or 0)
+    except Offline:
+        _explain_offline(url)
+        return 2
+    except ServerError as exc:
+        refused(exc)
+        if is_auth_error(exc) and offer_key():
+            say(dim("  Key set. Run that again."))
+        return 2
+
+    queued = list(out.get("queued") or [])
+    skipped = list(out.get("skipped") or [])
+    if not queued and not skipped:
+        say("")
+        reason = str(out.get("reason") or "")
+        say(dim(f"  {reason}") if reason else dim("  Nothing queued. The record has no open gap to close."))
+        return 0
+
+    say("")
+    if queued:
+        say(f"  {bold('queued')}  {dim(f'{len(queued)} of tonight')}")
+        for q in queued:
+            inputs = q.get("inputs") or {}
+            on = str(inputs.get("universe") or inputs.get("symbol") or "")
+            say(f"    {green(DOT)} {str(q.get('workflow') or '').ljust(18)}{dim(on)}")
+            say(f"      {dim(str(q.get('because') or ''))}")
+    if skipped:
+        say("")
+        say(f"  {dim('skipped')}")
+        for s in skipped:
+            say(f"    {dim(DOT)} {str(s.get('workflow') or '').ljust(18)}{dim(str(s.get('reason') or ''))}")
+    say("")
+    return 0
+
+
 def cmd_runs(args: argparse.Namespace) -> int:
     """YOUR OWN WEEK, from where the work happens.
 
@@ -818,24 +922,6 @@ def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, An
 
     universe = getattr(args, "universe", None)
 
-    # ── A SLEEVE BRINGS ITS OWN DATA ───────────────────────────────────────
-    #
-    # `--sleeve macro` is enough; `--sleeve macro --universe "sp100 universe"`
-    # was the shape before this, and saying which book and which data as two
-    # separate arguments on every command is what kept them separate concepts.
-    # A sleeve IS a book plus what it runs on.
-    #
-    # AN EXPLICIT `--universe` STILL WINS, and silently is not an option — the
-    # line below says which universe was used and why, because a run that
-    # quietly substituted the sleeve's default for the one somebody typed is
-    # the kind of helpfulness nobody can debug.
-    if universe is None and getattr(args, "sleeve", None):
-        sleeve = _sleeve_row(session, args.sleeve) or {}
-        from_sleeve = sleeve.get("universe_id")
-        if from_sleeve:
-            universe = str(from_sleeve)
-            say(dim(f"  sleeve {sleeve.get('name')} {DOT} runs on its registered universe"))
-
     if universe:
         data = _narrow_to_universe(session, universe, data)
 
@@ -967,167 +1053,24 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
     return kept
 
 
-def _sleeve_row(session: Any, wanted: str | None) -> dict[str, Any] | None:
-    """A sleeve name or id -> the workspace id a run is opened against.
-
-    Resolved by NAME because that is what a person types. A pod calls it
-    "Systematic Macro", not a uuid, and requiring the uuid is how a correct
-    mechanism ends up never receiving input — which is what happened here: no
-    caller ever sent `workspace_id`, so the risk budget resolved to nothing and
-    every sleeve's P&L reported zero.
-
-    A miss NAMES what is available rather than failing bare, and an account with
-    no pod is told that plainly instead of being shown an empty list.
-    """
-    if not wanted or session is None:
-        return None
-    from .loaders import DataShapeError
-
-    try:
-        rows = session.sleeves()
-    except Exception as exc:  # noqa: BLE001 - offline or refused, said plainly
-        raise DataShapeError(f"--sleeve needs the portal, and it could not be reached: {exc}") from exc
-
-    if not rows:
-        raise DataShapeError(
-            "your account is not in a pod, so it has no sleeves. Drop --sleeve "
-            "and the run works exactly the same; a sleeve only adds the budget "
-            "it is bound by and the book it rolls into."
-        )
-    # THE KEY IS `id`, NOT `workspace_id`. The server's sleeve serializer returns
-    # `{id, pod_id, name, stage, benchmark, initial_capital, pm_user_id, ...}` —
-    # the workspace IS the sleeve, so its primary key is `id`, and the name
-    # `workspace_id` only appears on the routes that TAKE one. Reading the
-    # parameter name off the route and assuming it names the response field is
-    # the same mistake that made `--universe` read a top-level `symbols` key the
-    # server has never sent. Pinned by a contract test in the platform repo that
-    # imports this function and the real serializer together.
-    match = next(
-        (s for s in rows if wanted in (str(s.get("id")), str(s.get("name")))),
-        None,
-    )
-    if match is None:
-        known = ", ".join(str(s.get("name")) for s in rows) or "none"
-        raise DataShapeError(f"no sleeve called {wanted!r}. Yours: {known}")
-    return dict(match)
-
-
-def _resolve_sleeve(session: Any, wanted: str | None) -> str | None:
-    """The workspace id a run is opened against, or None."""
-    row = _sleeve_row(session, wanted)
-    return str(row.get("id")) if row else None
-
-
-def _offer_sleeve(session: Any, run: Any, wanted: str | None) -> None:
-    """Resolve `--thesis` and propose, or say why it cannot.
-
-    BY TITLE AS WELL AS BY ID, because a person types a name. The same reasoning
-    as `--sleeve` and `--universe`: requiring a uuid is how a correct mechanism
-    ends up never receiving input.
-    """
-    if not wanted or session is None:
-        return
-    try:
-        rows = session.theses()
-    except Exception as exc:  # noqa: BLE001 - offline or refused, said plainly
-        say(dim(f"  Could not read your theses: {exc}"))
-        return
-
-    match = next((t for t in rows if wanted in (str(t.get("id")), str(t.get("title")))), None)
-    if match is None:
-        known = ", ".join(str(t.get("title")) for t in rows[:6]) or "none"
-        say(yellow(f"  No thesis called {wanted!r}. Yours: {known}"))
-        return
-    if match.get("workspace_id"):
-        say(yellow(f"  {match.get('title')!r} already belongs to a sleeve."))
-        say(dim("  A thesis expresses one claim in one book. Write a new draft."))
-        return
-
-    _propose_sleeve(session, run, match)
-
-
-def _propose_sleeve(session: Any, run: Any, thesis: dict[str, Any]) -> None:
-    """Offer the closed screen as a sleeve for the thesis it was run against.
-
-    ── THE VERB, FROM THE QUANT'S DESK ────────────────────────────────────────
-
-    The screen ran here, against data that never left this machine. What crosses
-    is the shortlist and the argument for it — as a PROPOSAL, which creates no
-    sleeve and no position. A person decides in the portal, because deciding is
-    the human act the whole object exists to require.
-
-    That split is the product: the quant runs the research where the data is,
-    the PM decides where the authority is, and something durable travels between
-    them instead of a screenshot.
-
-    A FAILURE HERE NEVER FAILS THE RUN. The figures are already on screen and
-    the run is sealed server-side; losing the proposal costs a hand-off, and
-    taking the run down with it would trade the work for the paperwork.
-    """
-    figures = (run.artifact or {}).get("figures") or {}
-    flat: dict[str, Any] = {}
-    for value in figures.values():
-        if isinstance(value, dict):
-            flat.update(value)
-    rows = flat.get("rows") or []
-    if not rows:
-        return
-
-    ranked = [
-        {
-            "ticker": str(r.get("symbol") or r.get("ticker") or ""),
-            "rank": i + 1,
-            "score": r.get("score"),
-            "target_weight": round(1.0 / min(len(rows), 25), 6),
-        }
-        for i, r in enumerate(rows[:25])
-    ]
-    caveats: list[str] = []
-    universe, evaluated = flat.get("universe_size"), flat.get("n_evaluated")
-    if isinstance(universe, int) and isinstance(evaluated, int) and evaluated < universe:
-        caveats.append(
-            f"{evaluated} of {universe} names could be measured; the rest had too "
-            "little history and are absent from this ranking, which flatters it."
-        )
-    if flat.get("truncated") or len(rows) > len(ranked):
-        caveats.append(
-            f"{len(rows)} names cleared the screen and the {len(ranked)} highest are "
-            "proposed. The cut is a position-count decision, not a quality one."
-        )
-
-    title = str(thesis.get("title") or "this thesis")
-    try:
-        filed = session.propose_sleeve(
-            thesis_id=str(thesis.get("id")),
-            rows=ranked,
-            rationale=(
-                f"{len(ranked)} names express {title!r}, ranked by "
-                f"{flat.get('rank_by') or 'score'}. Equal weight across the shortlist."
-            ),
-            caveats=caveats,
-            payload={
-                "rank_by": flat.get("rank_by"),
-                "n_ranked": len(rows),
-                "universe_size": universe,
-                "n_evaluated": evaluated,
-            },
-            run_id=getattr(run, "run_id", None),
-        )
-    except Exception as exc:  # noqa: BLE001 - named, never fatal
-        say(dim(f"  The sleeve could not be proposed: {exc}"))
-        return
-
-    say("")
-    say(f"  {green('Proposed.')} {len(ranked)} names for {bold(title)}")
-    # THE PROPOSAL SURFACE WAS RETIRED IN PHASE 8 and this line went on naming
-    # it, so the one instruction printed here pointed at a redirect. Accepting
-    # work happens on the RUN now, which is where its figures, its caveats and
-    # its review pass already are.
-    say(
-        dim("  Nothing exists yet. Accept or decline it on the run: ")
-        + f"{portal_url()}/portal/runs/{getattr(run, 'run_id', '')}"
-    )
-    say(dim(f"  proposal {filed.get('id')}"))
+# ── `--sleeve` AND `--thesis` ARE GONE (0.5.0) ─────────────────────────────
+#
+# Four helpers lived here: `_sleeve_row`, `_resolve_sleeve`, `_offer_sleeve` and
+# `_propose_sleeve`. They resolved a sleeve by name to open a run against, and
+# turned a closed screen into a PROPOSAL — the one thing this package ever
+# created.
+#
+# Their three routes (`/api/me/sleeves`, `/api/me/theses`,
+# `/api/me/proposals/from-os`) belonged to the thesis object model, which came
+# out with the retired agent desk it was built around. A CLI flag whose endpoint
+# does not exist is worse than an absent one: it fails at the END of a run, after
+# the work, naming a server error rather than a missing feature.
+#
+# THE SPLIT THEY EXISTED FOR IS UNCHANGED and now runs through a smaller object.
+# The quant still runs the research where the data is and the PM still decides
+# where the authority is; what travels between them is the run itself, handed
+# over with an addressee (`delivered_to`) and decided on the run page where its
+# figures, its caveats and its review pass already are.
 
 
 def _publish_signals(session: Any, run: Any, *, workspace_id: str | None, label: str | None) -> None:
@@ -1324,7 +1267,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     session, url = _session(args.url, args.key)
     try:
         data, backtest_fn = resolve_data(args, session)
-        workspace_id = _resolve_sleeve(session, getattr(args, "sleeve", None))
+        workspace_id = None
     except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
         return 2
@@ -1397,7 +1340,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     code = _report(run)
     if run.status == "closed":
         _publish_signals(session, run, workspace_id=workspace_id, label=args.label)
-        _offer_sleeve(session, run, getattr(args, "thesis", None))
     return code
 
 
@@ -3017,7 +2959,7 @@ def cmd_repl(args: argparse.Namespace) -> int:
     session, url = _session(args.url, args.key)
     try:
         data, backtest_fn = resolve_data(args, session)
-        workspace_id = _resolve_sleeve(session, getattr(args, "sleeve", None))
+        workspace_id = None
     except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
         return 2
@@ -3113,6 +3055,14 @@ def cmd_repl(args: argparse.Namespace) -> int:
             # mid-session asking "what have I already tried" should not have to
             # leave to find out.
             cmd_runs(argparse.Namespace(url=args.url, key=args.key, limit=25))
+            continue
+        if verb == "gaps":
+            # AND THE OTHER HALF: what has NOT been tried. Same reason it is in
+            # the session — the moment you want it is mid-flight.
+            cmd_gaps(argparse.Namespace(url=args.url, key=args.key))
+            continue
+        if verb == "tonight":
+            cmd_tonight(argparse.Namespace(url=args.url, key=args.key, budget=0))
             continue
         if verb == "status":
             say(dim("no run yet") if last is None else f"{last.run_id}  {last.status}")
@@ -3310,14 +3260,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--symbol",
         help="one name out of a loaded universe; its closes become the return series sizing runs on",
     )
-    common.add_argument(
-        "--sleeve",
-        help="name or id of a sleeve this run belongs to; binds it to that sleeve's risk budget",
-    )
-    common.add_argument(
-        "--thesis",
-        help="a draft thesis to propose this run's shortlist as a sleeve for",
-    )
 
     p = argparse.ArgumentParser(
         prog="alphaengine",
@@ -3330,6 +3272,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("demo", parents=[common], help="run the built-in example, offline")
     rl = sub.add_parser("runs", parents=[common], help="your own week: what ran, and what it decided")
     rl.add_argument("--limit", type=int, default=25, help="how many to show (default 25)")
+    sub.add_parser("gaps", parents=[common], help="what your record says is unanswered")
+    tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
+    tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
     sub.add_parser("logout", parents=[common], help="remove stored credentials")
     d = sub.add_parser("commands", parents=[common], help="every command, grouped")
     d.add_argument("verb", nargs="?", help="expand one command in full")
@@ -3398,6 +3343,8 @@ def main(argv: list[str] | None = None) -> int:
         "version": cmd_version,
         "workflows": cmd_workflows,
         "runs": cmd_runs,
+        "gaps": cmd_gaps,
+        "tonight": cmd_tonight,
         "demo": cmd_demo,
         "logout": cmd_logout,
         "commands": cmd_commands,

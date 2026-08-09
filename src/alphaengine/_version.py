@@ -29,4 +29,19 @@ is what a changed figure costs. The API may still move underneath it.
 #
 # Not one of those is a bug fix, and every one changes what a saved study
 # reproduces. That costs the MINOR position while the leading digit is 0.
-__version__ = "0.4.0"
+#
+# 0.5.0 IS THE RULE READ THE OTHER WAY: no computed value moved, and the SURFACE
+# broke. `--sleeve` and `--thesis` are removed along with `Session.sleeves()`,
+# `.theses()` and `.propose_sleeve()`. Their three routes were part of the thesis
+# object model, which came out of the platform with the agent desk it was built
+# around, so the flags could only have failed at the END of a run — after the
+# work, naming a server error rather than a missing feature.
+#
+# A removed flag is a breaking change even though every figure is byte-identical,
+# and while the leading digit is 0 the MINOR position carries that too.
+#
+# Added in the same release, and the reason the removal is not a loss: `gaps` and
+# `tonight`. The record already knew which workflow closes each open gap and
+# nothing traversed those edges; these two read that derivation, so the terminal
+# can now answer "what have I NOT tried" and "what will run while I sleep".
+__version__ = "0.5.0"

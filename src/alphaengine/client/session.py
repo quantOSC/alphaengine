@@ -422,68 +422,41 @@ class Session:
             body["source_run_id"] = source_run_id
         return self._post("/api/me/signals", body)
 
-    def theses(self) -> list[Figures]:
-        """The claims on your account, including drafts with no sleeve yet.
+    def gaps(self) -> Figures:
+        """WHAT YOUR RECORD SAYS IS UNANSWERED, across the whole account.
 
-        A draft is a thesis somebody wrote and has not acted on. It is the input
-        to the only verb in this package that creates anything, so the CLI has
-        to be able to see one.
+        A run's own `/gaps` answers this for one run — the view a quant has at
+        the moment of finishing something. This is the same derivation read
+        across everything, which is the view somebody has at the START of a day.
+
+        Every gap names the workflow that closes it, and both are DERIVED: a gap
+        a model was invited to find is one it can decline to find, and worse, one
+        it can invent.
         """
-        return list(self._get("/api/me/theses").get("theses") or [])
+        return self._get("/api/harness/gaps")
 
-    def propose_sleeve(
-        self,
-        *,
-        thesis_id: str,
-        rows: list[Figures],
-        rationale: str,
-        caveats: list[str] | None = None,
-        payload: Figures | None = None,
-        run_id: str | None = None,
-        book_id: str | None = None,
-    ) -> Figures:
-        """File a proposed sleeve for a thesis. THE ONLY THING THIS MAKES.
+    def plan(self, budget: int = 0) -> Figures:
+        """WHAT WOULD RUN TONIGHT, without running any of it.
 
-        ── WHAT THIS IS AND IS NOT ────────────────────────────────────────────
-
-        It creates a PROPOSAL, never a sleeve and never a position. The screen
-        ran here, on this machine, against data that never moved; what crosses
-        is the shortlist and the argument for it. Somebody then reads it and
-        decides — in the portal, because deciding is a human act and a
-        long-lived key pressing accept would be the machine approving its own
-        work through one extra hop.
-
-        THE CAVEATS ARE NOT OPTIONAL. They travel with the proposal because the
-        handoff is exactly where they get dropped, and a shortlist read without
-        what the run could not establish is the failure every control in this
-        product exists to prevent.
+        The same derivation the scheduler uses, so this shows what will happen
+        rather than a description of it. `skipped` carries what the budget cut
+        AND what is blocked on an input only you can state — a plan that
+        silently truncates reads as "this is everything that mattered".
         """
-        body: Figures = {
-            "thesis_id": thesis_id,
-            "rows": rows,
-            "rationale": rationale,
-            "caveats": list(caveats or []),
-        }
-        if payload:
-            body["payload"] = payload
-        if run_id:
-            body["source_run_id"] = run_id
-        if book_id:
-            body["book_id"] = book_id
-        return self._post("/api/me/proposals/from-os", body)
+        q = f"?budget={int(budget)}" if budget else ""
+        return self._get(f"/api/harness/plan{q}")
 
-    def sleeves(self) -> list[Figures]:
-        """The sleeves you can run against, if your account is in a pod.
-
-        A sleeve is a workspace with a pod, a stage and a PM. Naming one on a
-        run is what lets the platform resolve the risk budget that binds it and
-        roll the result into the pod's book — without it every run is orphaned
-        from the object model and every sleeve reports zero.
-
-        An account with no pod has no sleeves, and that is a working product
-        rather than an error: a solo quant is a first-class user here.
-        """
-        return list(self._get("/api/me/sleeves").get("sleeves") or [])
+    # ── THE THESIS AND SLEEVE METHODS ARE GONE (0.5.0) ─────────────────────
+    #
+    # `theses()`, `propose_sleeve()` and `sleeves()` backed `--thesis` and
+    # `--sleeve`. Their routes — /api/me/theses, /api/me/proposals/from-os and
+    # /api/me/sleeves — were part of the thesis object model, which came out with
+    # the retired agent desk it was built around.
+    #
+    # A breaking change, and a deliberate one: they created a PROPOSAL from a
+    # screen, which is the one thing this package ever made, and the loop that
+    # object served now runs through assignments and the deliver pin instead.
+    # See the 0.5.0 note in the README.
 
     # ── transport ──────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Figures | None = None) -> Figures:

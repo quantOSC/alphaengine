@@ -109,6 +109,8 @@ distinction is the whole of the data boundary below.
 |---|---|---|
 | `demo` | run the built-in example offline, with no account and no data | shell + session |
 | `runs [--limit N]` | your own week: what ran, what it decided, what it filed | shell + session |
+| `gaps` | what your record says is UNANSWERED, and what closes each one | shell + session |
+| `tonight [--budget N]` | what would run unattended tonight, without running any of it | shell + session |
 | `workflows` | what the server offers, what each needs, and which reproduce | shell + session |
 | `key [quantos \| anthropic \| openai]` | enter a credential now, or see which rungs are unlocked | session |
 | `commands [verb]` | this directory, or one command in full | shell + session |
@@ -164,12 +166,11 @@ distinction is the whole of the data boundary below.
 | `--data FILE` | a local CSV: wide, long, or a single series |
 | `--universe NAME` | a universe registered in the portal, with its stored closes |
 | `--symbol TICKER` | one name out of a loaded universe; its closes become the return series |
-| `--sleeve NAME` | the sleeve this run belongs to, and the budget it is bound by |
-| `--thesis ID` | a draft thesis to propose this run's shortlist as a sleeve for |
 | `--label TEXT` | what to call the artifact this run produces |
 | `--input K=V` | a workflow input; repeatable |
 | `--quiet` | only the result, no step narration |
 | `--limit N` | how many rows to show (default 25) |
+| `--budget N` | how many runs a night is worth (default 3) |
 
 ### Examples
 
@@ -185,6 +186,9 @@ alphaengine monitor
 alphaengine demo
 alphaengine runs
 alphaengine runs --limit 50
+alphaengine gaps
+alphaengine tonight
+alphaengine tonight --budget 5
 alphaengine workflows
 alphaengine commands
 alphaengine run screen_universe --universe sp500
