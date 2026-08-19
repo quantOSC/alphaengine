@@ -44,4 +44,16 @@ is what a changed figure costs. The API may still move underneath it.
 # `tonight`. The record already knew which workflow closes each open gap and
 # nothing traversed those edges; these two read that derivation, so the terminal
 # can now answer "what have I NOT tried" and "what will run while I sleep".
-__version__ = "0.5.0"
+#
+# 0.6.0 IS THE SAME RULE READ AS A FEATURE RELEASE. No computed value moved.
+# The artefact grew a research OS around the maths that already shipped: any
+# BYOK model (Anthropic, OpenAI-compatible, Gemini, Groq, OpenRouter, Azure,
+# a private gateway), the workflow ops that were library-only (`backtest`,
+# CPCV, factors, pairs, walk-forward, book overlap), allowlisted traces that
+# stay on disk when the portal has no route, a session with history and slash
+# verbs, and a screen that paints the parameter surface it is judging.
+#
+# A new published wheel is a new thing people `pip install`. While the leading
+# digit is 0 the MINOR position carries that, the same way 0.5.0 carried a
+# surface change that left every figure byte-identical.
+__version__ = "0.6.0"
