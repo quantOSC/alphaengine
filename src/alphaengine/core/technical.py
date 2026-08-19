@@ -95,10 +95,12 @@ def _wilder_rsi(closes: np.ndarray, window: int) -> float | None:
 def _atr(highs: np.ndarray | None, lows: np.ndarray | None, closes: np.ndarray, window: int) -> float | None:
     if highs is None or lows is None or len(closes) < window + 1:
         return None
-    n = len(closes)
-    tr = np.empty(n - 1)
-    for i in range(1, n):
-        tr[i - 1] = max(highs[i] - lows[i], abs(highs[i] - closes[i - 1]), abs(lows[i] - closes[i - 1]))
+    tr = np.maximum(
+        highs[1:] - lows[1:],
+        np.maximum(np.abs(highs[1:] - closes[:-1]), np.abs(lows[1:] - closes[:-1])),
+    )
+    if tr.size < window:
+        return None
     atr = float(tr[:window].mean())
     for i in range(window, len(tr)):
         atr = (atr * (window - 1) + float(tr[i])) / window

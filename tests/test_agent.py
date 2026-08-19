@@ -126,6 +126,14 @@ def test_the_prompt_contains_no_ordering_or_thresholds():
         assert banned not in lowered, f"the prompt leaked workflow knowledge: {banned!r}"
 
 
+def test_as_choice_is_the_index_bound_primitive():
+    from alphaengine.agent.driver import AgentDriver as IndexDriver
+
+    d = AgentDriver(lambda p: '{"choice": 1, "why": "x"}', goal="g")
+    assert d.as_choice()(PERMITTED, {}) == 1
+    assert callable(IndexDriver)
+
+
 def test_params_are_truncated_before_reaching_the_model():
     """A step's params can carry a parameter grid, which is frequently bigger
     intellectual property than the returns. No reason to ship all of it to a

@@ -36,6 +36,7 @@ import numpy as np
 from ..core import (
     compute_var_cvar,
     cost_ladder,
+    cpcv_score,
     deflated_sharpe,
     drawdown_anatomy,
     information_coefficient,
@@ -45,12 +46,15 @@ from ..core import (
     performance_report,
     profile_data,
     quantile_returns,
+    run_backtest,
+    score_backtest,
     screen_universe,
     series_values,
     signal_decay,
     subperiod_stability,
     technical_features,
 )
+from ..core.walkforward import walk_forward
 from ..sweep import sweep as run_sweep
 
 __all__ = ["StepExecutor", "UnsupportedOp", "MAX_FIGURE_LIST", "Handler"]
@@ -282,6 +286,14 @@ class StepExecutor:
             "compute.cost_ladder": self._cost_ladder,
             "compute.drawdown_anatomy": self._drawdown_anatomy,
             "compute.overlap": self._overlap,
+            "compute.backtest": self._backtest,
+            "compute.score_backtest": self._score_backtest,
+            "compute.cpcv": self._cpcv,
+            "compute.factors": self._factors,
+            "compute.pairs": self._pairs,
+            "compute.cointegrated_pairs": self._cointegrated_pairs,
+            "compute.walk_forward": self._walk_forward,
+            "compute.book_overlap": self._book_overlap,
             # `emit.*` and `record.*` were vocabulary strings the server could
             # issue and this executor had no handler for, so a run that reached
             # one could never produce the artifact it existed to produce. The
@@ -363,7 +375,8 @@ class StepExecutor:
                 'Declare one in your project module, e.g. GRID = {"fast": [5, 10, 20], '
                 '"slow": [50, 100, 200]}. Every combination is one trial.'
             )
-        result = run_sweep(self.backtest_fn, grid, data=self.data)
+        jobs = int(params.get("jobs") or 1)
+        result = run_sweep(self.backtest_fn, grid, data=self.data, jobs=jobs)
         ws["sweep"] = result  # the trial matrix stays here
 
         surface = result.surface()
@@ -724,6 +737,193 @@ class StepExecutor:
                     out["max_rolling_correlation"] = round(max(clean), 6)
                     out["min_rolling_correlation"] = round(min(clean), 6)
         return out
+
+    # ── the rest of the modeling week, previously library-only ─────────────
+
+    def _backtest(self, params: Figures, ws: Workspace) -> Figures:
+        """Run the built-in simulator. Series stay in the workspace."""
+        data = self.data
+        if not (isinstance(data, dict) and "signals" in data and "prices" in data):
+            raise UnsupportedOp(
+                "compute.backtest needs `data` shaped {'signals': {ticker: [...]}, "
+                "'prices': {ticker: [...]} }."
+            )
+        cfg = {
+            k: params[k]
+            for k in (
+                "slippage_bps",
+                "commission_bps",
+                "fill_timing",
+                "initial_capital",
+                "max_position_pct",
+                "adv",
+                "impact_coef",
+                "max_participation",
+            )
+            if k in params
+        }
+        bt = run_backtest(data["signals"], data["prices"], **cfg)
+        ws["backtest"] = bt
+        if isinstance(bt.get("returns"), list):
+            ws.setdefault("returns", bt["returns"])
+        return {
+            "n_bars": bt.get("n_bars"),
+            "n_trades": bt.get("n_trades"),
+            "final_equity": bt.get("final_equity"),
+            "total_return_pct": bt.get("total_return_pct"),
+            "cost_breakdown": bt.get("cost_breakdown"),
+            "capacity": bt.get("capacity"),
+            "config": bt.get("config"),
+        }
+
+    def _score_backtest(self, params: Figures, ws: Workspace) -> Figures:
+        bt = ws.get("backtest")
+        if bt is None:
+            raise UnsupportedOp("compute.score_backtest needs compute.backtest first in this run.")
+        n_trials = params.get("n_trials")
+        source = params.get("n_trials_source")
+        sweep = ws.get("sweep")
+        if sweep is not None and n_trials is None:
+            n_trials, source = int(sweep.n_trials), "derived_from_grid"
+        scored = score_backtest(
+            bt,
+            n_trials=None if n_trials is None else int(n_trials),
+            n_trials_source=source,
+            cpcv=bool(params.get("cpcv")),
+        )
+        ws["score"] = scored
+        return {
+            "performance": scored.get("performance"),
+            "validation": scored.get("validation"),
+            "trade_summary": scored.get("trade_summary"),
+            "costs": scored.get("costs"),
+            "not_computed": scored.get("not_computed"),
+        }
+
+    def _cpcv(self, params: Figures, ws: Workspace) -> Figures:
+        returns = self._returns_column(ws)
+        n_trials = params.get("n_trials")
+        sweep = ws.get("sweep")
+        if sweep is not None and n_trials is None:
+            n_trials = int(sweep.n_trials)
+        return dict(
+            cpcv_score(
+                returns,
+                n_groups=int(params.get("n_groups") or 8),
+                n_test_groups=int(params.get("n_test_groups") or 2),
+                purge=int(params.get("purge") or 1),
+                embargo=int(params.get("embargo") or 1),
+                n_trials=int(n_trials) if n_trials is not None else 1,
+            )
+        )
+
+    def _factors(self, params: Figures, ws: Workspace) -> Figures:
+        try:
+            from ..core.factors import decompose_factors
+        except ModuleNotFoundError as exc:
+            raise UnsupportedOp(str(exc)) from exc
+        data = self.data
+        if not (isinstance(data, dict) and "factor_returns" in data):
+            raise UnsupportedOp(
+                "compute.factors needs `data` shaped {'returns': [...], 'factor_returns': {name: [...]}}."
+            )
+        portfolio = _as_returns(data) or data.get("returns")
+        if portfolio is None:
+            raise UnsupportedOp("compute.factors found factor_returns but no portfolio returns.")
+        kwargs = {}
+        if params.get("risk_free_rate") is not None:
+            kwargs["risk_free_rate"] = float(params["risk_free_rate"])
+        return dict(decompose_factors(list(portfolio), data["factor_returns"], **kwargs))
+
+    def _pairs(self, params: Figures, ws: Workspace) -> Figures:
+        try:
+            from ..core.pairs import compute_spread_signal
+        except ModuleNotFoundError as exc:
+            raise UnsupportedOp(str(exc)) from exc
+        data = self.data
+        if not isinstance(data, dict) or len(data) < 2:
+            raise UnsupportedOp(
+                "compute.pairs needs two close series. Pass `data` as {A: closes, B: closes} "
+                "or {'a': ..., 'b': ...}."
+            )
+        if "a" in data and "b" in data:
+            a, b = data["a"], data["b"]
+            sa = str(params.get("symbol_a") or "A")
+            sb = str(params.get("symbol_b") or "B")
+        else:
+            skip = ("signal", "prices", "returns", "book_returns", "factor_returns")
+            names = [k for k in data if k not in skip]
+            if len(names) < 2:
+                raise UnsupportedOp("compute.pairs needs two named close series.")
+            sa, sb = names[0], names[1]
+            a, b = data[sa], data[sb]
+        out = dict(compute_spread_signal(a, b, symbol_a=sa, symbol_b=sb))
+        # A z-score path is a series. Keep the last reading only.
+        if isinstance(out.get("zscore_series"), list):
+            out["zscore_last"] = out["zscore_series"][-1] if out["zscore_series"] else None
+            del out["zscore_series"]
+        return out
+
+    def _cointegrated_pairs(self, params: Figures, ws: Workspace) -> Figures:
+        try:
+            from ..core.pairs import find_cointegrated_pairs
+        except ModuleNotFoundError as exc:
+            raise UnsupportedOp(str(exc)) from exc
+        universe = self._universe()
+        # Cap the all-pairs search so a 500-name universe does not become an
+        # accidental O(n²) overnight job. Caller can pass an explicit list.
+        symbols = list(universe)[: int(params.get("max_symbols") or 40)]
+        prices = {k: universe[k] for k in symbols}
+        only = bool(params.get("cointegrated_only", True))
+        out = dict(find_cointegrated_pairs(prices, cointegrated_only=only))
+        pairs = out.get("pairs") or []
+        if len(pairs) > MAX_FIGURE_LIST:
+            out["pairs"] = pairs[:MAX_FIGURE_LIST]
+            out["truncated"] = True
+        return out
+
+    def _walk_forward(self, params: Figures, ws: Workspace) -> Figures:
+        if self.backtest_fn is None:
+            raise UnsupportedOp(
+                "compute.walk_forward needs your backtest function, the same as compute.sweep."
+            )
+        grid = params.get("grid") or {}
+        if not grid:
+            raise UnsupportedOp("compute.walk_forward got an empty grid, and the grid is the trial count.")
+        out = walk_forward(
+            self.backtest_fn,
+            grid,
+            data=self.data,
+            n_windows=int(params.get("n_windows") or 4),
+            oos_fraction=float(params.get("oos_fraction") or 0.25),
+        )
+        ws["walk_forward"] = out
+        return out
+
+    def _book_overlap(self, params: Figures, ws: Workspace) -> Figures:
+        from ..book import Book
+
+        data = self.data
+        book = ws.get("book")
+        if book is None:
+            book = Book()
+            sleeves = data.get("sleeves") if isinstance(data, dict) else None
+            if isinstance(sleeves, dict):
+                for name, series in list(sleeves.items())[:16]:
+                    book.add(str(name), series)
+            elif isinstance(data, dict) and "book_returns" in data:
+                book.add("book", data["book_returns"])
+                candidate = _as_returns(data)
+                if candidate:
+                    book.add("candidate", candidate)
+            else:
+                raise UnsupportedOp(
+                    "compute.book_overlap needs `data` as {'sleeves': {name: returns, ...}} "
+                    "or the overlap shape {'returns': [...], 'book_returns': [...]}."
+                )
+            ws["book"] = book
+        candidate = params.get("candidate")
+        return book.overlap_matrix(candidate)
 
     # ── emit / record ──────────────────────────────────────────────────────
     #

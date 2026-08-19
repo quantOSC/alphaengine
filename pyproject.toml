@@ -68,6 +68,7 @@ factors = [
 # Sharpe should not need an LLM dependency to get one.
 agents = [
     "anthropic>=0.40",
+    "openai>=1.0",
 ]
 # Pulling data from a provider the customer already pays for.
 connectors = [
@@ -178,5 +179,5 @@ ignore_missing_imports = true
 # import is an error, so this is the difference between a build that passes on a
 # machine that happens to have them and one that passes anywhere.
 [[tool.mypy.overrides]]
-module = ["scipy.*", "statsmodels.*"]
+module = ["scipy.*", "statsmodels.*", "pyarrow.*", "httpx"]
 ignore_missing_imports = true

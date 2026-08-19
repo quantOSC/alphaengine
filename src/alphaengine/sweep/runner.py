@@ -230,6 +230,7 @@ def sweep(
     data: Any = None,
     store_params: bool = False,
     on_error: str = "record",
+    jobs: int = 1,
 ) -> SweepResult:
     """Run `backtest_fn` once per combination in `grid`.
 
@@ -248,6 +249,9 @@ def sweep(
         on_error: "record" marks a failing combination and continues (the
             default, because one bad corner of a grid should not lose the
             other ninety-nine results); "raise" propagates.
+        jobs: worker count. Default 1 preserves order and the golden figures.
+            Greater than 1 runs combinations concurrently but still records
+            each trial at its original index, including failures (0.3.0).
 
     Returns:
         SweepResult, holding the full (T x N) trial matrix that PBO needs and
@@ -258,10 +262,8 @@ def sweep(
         raise ValueError("grid is empty: nothing to sweep")
 
     data_hash = _hash_data(data) if data is not None else ""
-    trials: list[Trial] = []
-    columns: list[npt.NDArray[np.float64]] = []
 
-    for i, params in enumerate(combos):
+    def _run_one(i: int, params: dict[str, Any]) -> tuple[int, Trial, npt.NDArray[np.float64] | None]:
         try:
             raw = backtest_fn(data=data, **params) if data is not None else backtest_fn(**params)
             r = np.asarray(list(raw), dtype=float)
@@ -272,7 +274,8 @@ def sweep(
         except Exception as exc:  # noqa: BLE001
             if on_error == "raise":
                 raise
-            trials.append(
+            return (
+                i,
                 Trial(
                     i,
                     dict(params),
@@ -282,23 +285,39 @@ def sweep(
                     0.0,
                     0.0,
                     failed=f"{type(exc).__name__}: {exc}",
-                )
+                ),
+                None,
             )
-            continue
-
         sr = _sharpe(r)
-        trials.append(
-            Trial(
-                index=i,
-                params=dict(params),
-                params_hash=_hash_params(params),
-                n_obs=int(r.size),
-                sharpe=round(sr, 6),
-                sharpe_annualized=round(sr * math.sqrt(252), 4),
-                total_return_pct=round((float(np.prod(1 + r)) - 1) * 100, 4),
-            )
+        trial = Trial(
+            index=i,
+            params=dict(params),
+            params_hash=_hash_params(params),
+            n_obs=int(r.size),
+            sharpe=round(sr, 6),
+            sharpe_annualized=round(sr * math.sqrt(252), 4),
+            total_return_pct=round((float(np.prod(1 + r)) - 1) * 100, 4),
         )
-        columns.append(r)
+        return i, trial, r
+
+    workers = max(1, int(jobs))
+    slots: list[tuple[Trial, npt.NDArray[np.float64] | None] | None] = [None] * len(combos)
+    if workers == 1:
+        for i, params in enumerate(combos):
+            _, trial, col = _run_one(i, params)
+            slots[i] = (trial, col)
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futs = [pool.submit(_run_one, i, params) for i, params in enumerate(combos)]
+            for fut in futs:
+                i, trial, col = fut.result()
+                slots[i] = (trial, col)
+
+    ordered = [slot for slot in slots if slot is not None]
+    trials = [t for t, _ in ordered]
+    columns = [c for _, c in ordered if c is not None]
 
     if not columns:
         raise RuntimeError(

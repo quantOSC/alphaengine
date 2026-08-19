@@ -55,7 +55,22 @@ __all__ = ["config_path", "load_stored", "save_key", "clear_stored", "apply_stor
 #: `QUANTOS_API_KEY` is ours. The provider keys are here because a user who has
 #: said "sign me in" means all of it, and leaving one of the three to be pasted
 #: every session defeats the point.
-MANAGED = ("QUANTOS_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
+MANAGED = (
+    "QUANTOS_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GROQ_API_KEY",
+    "OPENROUTER_API_KEY",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_ENDPOINT",
+    "ALPHAENGINE_API_KEY",
+    "ALPHAENGINE_BASE_URL",
+    "ALPHAENGINE_MODEL",
+    "ALPHAENGINE_PROVIDER",
+    "OPENAI_BASE_URL",
+)
 
 
 def config_path() -> Path:

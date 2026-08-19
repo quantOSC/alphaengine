@@ -168,6 +168,14 @@ def run() -> int:
     print()
     print("A crossover on a random walk has no edge, and the verdict says so")
     print("rather than flattering it. That is this working, not failing.")
+
+    from alphaengine import cli as ui
+
+    if ui._tty():
+        sharpes = [t.sharpe for t in result.trials if t.failed is None]
+        ui.say("")
+        ui.say("  " + ui._spark_paint(sharpes or [0.0], width=36, cool=True))
+        ui.say("  " + ui.dim("trial Sharpes across the grid  " + ui.DOT + "  the ridge is the neighbourhood"))
     return 0
 
 

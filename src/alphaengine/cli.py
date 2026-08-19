@@ -95,12 +95,13 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import math
 import os
 import pathlib
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
@@ -152,6 +153,15 @@ def _tty() -> bool:
     return sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 
+def _truecolor() -> bool:
+    """24-bit colour when the terminal actually advertised it.
+
+    Guessing truecolor from `TERM=xterm-256color` paints wrong on a 256-colour
+    screen. `COLORTERM` is the signal terminals set on purpose.
+    """
+    return os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit")
+
+
 def _c(code: str, text: str) -> str:
     return f"\033[{code}m{text}\033[0m" if _tty() else text
 
@@ -174,6 +184,44 @@ def green(t: str) -> str:
 
 def yellow(t: str) -> str:
     return _c("33", t)
+
+
+def cyan(t: str) -> str:
+    return _c("36", t)
+
+
+def magenta(t: str) -> str:
+    return _c("35", t)
+
+
+def _rgb(r: int, g: int, b: int, text: str) -> str:
+    """A single-character (or short) paint. Falls back to the 256-colour cube."""
+    if not _tty() or not text:
+        return text
+    if _truecolor():
+        return f"\033[38;2;{r};{g};{b}m{text}\033[0m"
+    qr, qg, qb = min(5, r * 6 // 256), min(5, g * 6 // 256), min(5, b * 6 // 256)
+    return f"\033[38;5;{16 + 36 * qr + 6 * qg + qb}m{text}\033[0m"
+
+
+def _mix(start: tuple[int, int, int], end: tuple[int, int, int], t: float, ch: str) -> str:
+    t = 0.0 if t < 0 else 1.0 if t > 1 else t
+    r = int(start[0] + (end[0] - start[0]) * t)
+    g = int(start[1] + (end[1] - start[1]) * t)
+    b = int(start[2] + (end[2] - start[2]) * t)
+    return _rgb(r, g, b, ch)
+
+
+def _gradient(
+    text: str,
+    start: tuple[int, int, int] = (40, 200, 190),
+    end: tuple[int, int, int] = (140, 255, 170),
+) -> str:
+    """Paint a wordmark so it reads as a surface, not a logo font."""
+    if not _tty() or not text:
+        return text
+    n = max(len(text) - 1, 1)
+    return "".join(_mix(start, end, i / n, ch) for i, ch in enumerate(text))
 
 
 # ── glyphs, which are not always available ─────────────────────────────────
@@ -214,6 +262,16 @@ ON = "●" if _UNICODE_OK else "*"
 OFF = "○" if _UNICODE_OK else "-"
 #: A failed step's marker.
 CROSS = "×" if _UNICODE_OK else "x"
+#: Drive narration rails. A tree, not a progress bar: each line is a step that
+#: has already run, and the past is not the graph's future.
+RAIL_V = "│" if _UNICODE_OK else "|"
+RAIL_T = "├" if _UNICODE_OK else "+"
+RAIL_L = "└" if _UNICODE_OK else "+"
+RAIL_H = "─" if _UNICODE_OK else "-"
+#: REPL prompt. The ASCII fallback is the original `>`.
+PROMPT = "▸" if _UNICODE_OK else ">"
+#: Agent thought marker.
+GLEAM = "✦" if _UNICODE_OK else "*"
 
 #: The questions, as commands: what a quant TYPES maps to what the server
 #: RUNS. One table, read by the parser, the dispatcher and the shell alike.
@@ -239,6 +297,90 @@ ELLIPSIS = "…" if _UNICODE_OK else "..."
 
 def say(*parts: str) -> None:
     print(*parts, flush=True)
+
+
+#: Spinner frames. Braille where the stream takes it, ASCII where it does not —
+#: the same degradation `DOT` and `ARROW` get, for the same reason: a Windows
+#: cp1252 console rendered the pretty version as mojibake.
+_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if _UNICODE_OK else "|/-\\"
+_SPARK = "▁▂▃▄▅▆▇█" if _UNICODE_OK else ".:-=*#"
+_FILL = "█" if _UNICODE_OK else "#"
+_EMPTY = "░" if _UNICODE_OK else "."
+
+
+def sparkline(values: Sequence[float], *, width: int | None = None) -> str:
+    """A one-line plot of `values`, resampled to `width` when given.
+
+    Height is relative to the sample itself. An absolute scale would pretend we
+    know the ceiling; we do not. Used for the boot surface, the working pulse,
+    and a recap of trial Sharpes — never for a progress bar.
+    """
+    if not values:
+        return ""
+    n = len(values)
+    w = n if width is None else max(1, int(width))
+    sampled: list[float] = []
+    for i in range(w):
+        idx = int(round(i * (n - 1) / max(w - 1, 1))) if w > 1 else 0
+        sampled.append(float(values[idx]))
+    lo, hi = min(sampled), max(sampled)
+    span = hi - lo
+    last = len(_SPARK) - 1
+    out: list[str] = []
+    for v in sampled:
+        t = 0.5 if span == 0 else (v - lo) / span
+        out.append(_SPARK[min(last, int(t * last + 1e-9))])
+    return "".join(out)
+
+
+def _spark_paint(values: Sequence[float], *, width: int, cool: bool = True) -> str:
+    """Colour each bar by its height so a plateau reads as a ridge, not a fence."""
+    body = sparkline(values, width=width)
+    if not _tty():
+        return body
+    last = max(len(_SPARK) - 1, 1)
+    start = (24, 92, 88) if cool else (92, 36, 16)
+    end = (130, 255, 196) if cool else (255, 176, 64)
+    parts: list[str] = []
+    for ch in body:
+        rank = _SPARK.find(ch)
+        t = (rank if rank >= 0 else 0) / last
+        parts.append(_mix(start, end, t, ch))
+    return "".join(parts)
+
+
+def _bar(value: float, peak: float, *, width: int = 14) -> str:
+    """A relative meter. `peak` is the largest number on this screen, not 100%."""
+    filled = 0 if peak <= 0 else max(0, min(width, int(round(width * abs(value) / peak))))
+    body = _FILL * filled + _EMPTY * (width - filled)
+    if not _tty():
+        return body
+    if value < 0:
+        return red(body)
+    return cyan(body) if filled < width else green(body)
+
+
+def _pulse(elapsed: float, *, width: int = 14) -> str:
+    """A travelling heartbeat. Deliberately NOT a progress bar: nothing here
+    knows how long the step will take, and a bar that fills at a guessed rate
+    is a lie told smoothly."""
+    phase = (elapsed * 0.62) % 1.0
+    values = [
+        math.exp(-((((i / max(width - 1, 1)) - phase) * 4.8) ** 2))
+        + 0.18 * math.exp(-((((i / max(width - 1, 1)) - ((phase + 0.55) % 1.0)) * 7.0) ** 2))
+        for i in range(width)
+    ]
+    return sparkline(values, width=width)
+
+
+def _chip(label: str, *, on: bool) -> str:
+    """A HUD cell on the status line. Reverse-video when the stream can take it."""
+    body = f" {label} "
+    if not _tty():
+        return f"[{label}]"
+    if on:
+        return _c("48;5;23;38;5;159", body)
+    return _c("48;5;236;38;5;246", body)
 
 
 #: Spinner frames. Braille where the stream takes it, ASCII where it does not —
@@ -300,15 +442,18 @@ class Working:
 
     def _animate(self) -> None:
         i = 0
-        # A first frame immediately, then every 100ms. Waiting out the first
+        # A first frame immediately, then every 80ms. Waiting out the first
         # interval before drawing anything makes a fast step flash a blank line.
+        # The heartbeat is a travelling pulse of elapsed time, not a bar that
+        # claims to know when the work will finish.
         while True:
-            text = f"  {_SPIN[i % len(_SPIN)]} {self.label}  {self.elapsed:.1f}s"
-            plain_len = len(f"  {_SPIN[0]} {self.plain}  {self.elapsed:.1f}s")
+            pulse = _pulse(self.elapsed)
+            text = f"  {_SPIN[i % len(_SPIN)]} {self.label}  {self.elapsed:.1f}s  {cyan(pulse)}"
+            plain_len = len(f"  {_SPIN[0]} {self.plain}  {self.elapsed:.1f}s  {pulse}")
             sys.stdout.write("\r" + text)
             sys.stdout.flush()
             self._painted = max(self._painted, plain_len)
-            if self._stop.wait(0.1):
+            if self._stop.wait(0.08):
                 return
             i += 1
 
@@ -322,10 +467,6 @@ class Working:
             # slightly wider blank.
             sys.stdout.write("\r" + " " * (self._painted + 2) + "\r")
             sys.stdout.flush()
-
-
-def cyan(t: str) -> str:
-    return _c("36", t)
 
 
 # ── the boot screen ────────────────────────────────────────────────────────
@@ -369,14 +510,19 @@ PLATEAU = _PLATEAU_U if _UNICODE_OK else _PLATEAU_A
 EDGE = _EDGE_U if _UNICODE_OK else _EDGE_A
 
 
-def _boxed(rows: list[tuple[str, str]], width: int = 62) -> list[str]:
+def _boxed(rows: list[tuple[str, str]], width: int = 62, *, title: str = "") -> list[str]:
     """A key/value box. Unicode rules when the stream takes them, ASCII when not."""
     if _UNICODE_OK:
         tl, tr, bl, br, h, v = "╭", "╮", "╰", "╯", "─", "│"
     else:
         tl, tr, bl, br, h, v = "+", "+", "+", "+", "-", "|"
     inner = width - 2
-    out = [dim(tl + h * inner + tr)]
+    if title:
+        label = f"{h} {title} "
+        rest = inner - _visible_len(label)
+        out = [dim(tl) + dim(label) + dim(h * max(0, rest) + tr)]
+    else:
+        out = [dim(tl + h * inner + tr)]
     for k, val in rows:
         if k == "":  # a full-width line, already coloured by the caller
             pad = inner - 1 - _visible_len(val)
@@ -912,9 +1058,9 @@ def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, An
         data, backtest_fn = load_project(args.project)
 
     if getattr(args, "data", None):
-        from .loaders import load_csv
+        from .connectors import load_panel
 
-        loaded = load_csv(args.data)
+        loaded = load_panel(args.data)
         # A project module that also defined `data` keeps it: the explicit module
         # is the more specific statement, and silently replacing it would make
         # two flags fight where the user can see neither winning.
@@ -1207,6 +1353,8 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
     """
     n = 0
     failures: dict[str, int] = {}
+    if not quiet:
+        say(dim(f"  {RAIL_V}"))
     while run.status == "open" and n < 200:
         if not run.permitted:
             run.resume()
@@ -1236,11 +1384,11 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                     # with no why sent people to the traceback that no longer
                     # prints. The message came from the executor and was written
                     # to be read.
-                    say(f"  {red('failed ' + CROSS)}  {bold(op)}  {took}")
+                    say(f"  {red(RAIL_T + RAIL_H)} {red('failed ' + CROSS)}  {bold(op)}  {took}")
                     why = getattr(run, "last_error", None)
                     if why:
                         for line in str(why).splitlines():
-                            say(red(f"    {line}"))
+                            say(red(f"    {RAIL_V}  {line}"))
                 if failures[key] >= 2:
                     run.status = "abandoned"
                     run.stopped = {
@@ -1255,7 +1403,7 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                 # `emit.*` seal rather than measure) and printing a blank line
                 # for it would read as a stall.
                 found = _found(seen, run)
-                say(f"  {dim(ARROW)}  {found or bold(op)}  {took}")
+                say(f"  {cyan(RAIL_T + RAIL_H)} {found or bold(op)}  {took}")
 
             if run.status != "open":
                 return
@@ -1353,7 +1501,7 @@ def _report(run: Any) -> int:
     """
     say("")
     if run.status == "closed":
-        say(green("Closed.") + " " + dim(str((run.artifact or {}).get("workflow", ""))))
+        say(green(f"  {RAIL_L}{RAIL_H} Closed.") + " " + dim(str((run.artifact or {}).get("workflow", ""))))
         _render_artifact(run.artifact or {})
         _say_gaps(run)
         _where_it_lives(run)
@@ -1361,7 +1509,7 @@ def _report(run: Any) -> int:
         return 0
     if run.status == "stopped":
         stop = run.stopped or {}
-        say(yellow("Stopped.") + " " + str(stop.get("reason", "")))
+        say(yellow(f"  {RAIL_L}{RAIL_H} Stopped.") + " " + str(stop.get("reason", "")))
         say(dim("  A stop is a result. The run did what it was built to do."))
         # A STOP GETS ITS GAPS TOO, and needs them more than a close does: the
         # run refused to answer, so what it could not cover is most of what
@@ -1372,7 +1520,7 @@ def _report(run: Any) -> int:
     if run.status == "abandoned":
         stop = run.stopped or {}
         error = stop.get("error")
-        say(red("Abandoned.") + f" {stop.get('op')} failed twice, identically.")
+        say(red(f"  {RAIL_L}{RAIL_H} Abandoned.") + f" {stop.get('op')} failed twice, identically.")
         if error:
             for line in str(error).splitlines():
                 say(f"  {line}")
@@ -1716,9 +1864,11 @@ def _render_artifact(art: dict[str, Any]) -> None:
         # separates from its value — "worst segment Sharpe-3.20" welded a
         # 20-character label straight into a negative number.
         width = max(20, max(len(label) for label, _, _ in shown))
+        peak = max(abs(float(v)) for _, v, _ in shown) or 1.0
         for label, value, unit in shown:
             tail = f" {dim(unit)}" if unit else ""
-            say(f"  {dim(label.ljust(width))}  {bold(_num(value))}{tail}")
+            meter = _bar(float(value), peak)
+            say(f"  {dim(label.ljust(width))}  {bold(_num(value))}{tail}  {meter}")
 
     # SAID EVEN THOUGH THE TABLE IS RIGHT THERE. A shortlist of 20 means one
     # thing when 480 names were measured and rejected, and quite another when
@@ -1809,11 +1959,16 @@ def _render_rows(rows: list[Any], flat: dict[str, Any]) -> None:
         head += f"  {_head(m):>14}"
     say(dim(head))
 
+    scores = [abs(float(r.get("score") or 0)) for r in rows[:_SHOWN_ROWS] if isinstance(r, dict)]
+    peak = max(scores) if scores else 1.0
+
     for i, row in enumerate(rows[:_SHOWN_ROWS], start=1):
         if not isinstance(row, dict):
             continue
         symbol = str(row.get("symbol") or row.get("ticker") or "?")
-        line = f"  {i:>3}  {bold(symbol.ljust(8))}{_num(row.get('score')):>14}"
+        score = row.get("score")
+        meter = _bar(float(score or 0), peak, width=8)
+        line = f"  {i:>3}  {bold(symbol.ljust(8))}{_num(score):>14}  {meter}"
         for m in metrics:
             line += f"  {_num(row.get(m)):>14}"
         say(line)
@@ -2164,7 +2319,7 @@ def _shape_phrase(data: Any) -> str | None:
 
 
 def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str:
-    """One dim line above the prompt: what is loaded, and what can run.
+    """One HUD line above the prompt: what is loaded, and what can run.
 
     THE QUESTION THIS ANSWERS is the one asked most often inside a session and
     the one the boot screen answers once and then scrolls away: is my data in?
@@ -2173,26 +2328,28 @@ def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str
     identical to one that did -- which is exactly how "the S&P 500 is a handful
     of names" happened.
 
-    Deliberately ONE LINE and dim. It sits above every prompt, so anything
-    louder becomes wallpaper and stops being read at all.
+    Deliberately ONE LINE. It sits above every prompt, so anything taller
+    becomes wallpaper and stops being read at all. The cells are chips rather
+    than dim prose so the three facts (data, sign-in, model) can be scanned
+    without parsing separators.
     """
     from .model import available_models
 
-    bits: list[str] = []
+    chips: list[str] = []
 
     if data is None:
-        bits.append(dim("no data"))
+        chips.append(_chip("no data", on=False))
     else:
         phrase = _shape_phrase(data)
         label = project or "loaded"
-        bits.append(green(label + (f" {DOT} {phrase}" if phrase else "")))
+        chips.append(_chip(label + (f" {DOT} {phrase}" if phrase else ""), on=True))
 
-    bits.append(green("signed in") if keyed else dim("not signed in"))
+    chips.append(_chip("signed in" if keyed else "not signed in", on=keyed))
 
     models = available_models()
-    bits.append(dim(models[0][0]) if models else dim("no model"))
+    chips.append(_chip(models[0][0] if models else "no model", on=bool(models)))
 
-    return "  " + dim(f" {DOT} ").join(bits)
+    return "  " + " ".join(chips)
 
 
 def cmd_commands(args: argparse.Namespace) -> int:
@@ -2220,7 +2377,7 @@ def cmd_commands(args: argparse.Namespace) -> int:
         rows = in_group(group)
         if not rows:
             continue
-        say("  " + bold(title))
+        say("  " + cyan(bold(title)))
         width = max(len(_signature(c)) for c in rows)
         for c in rows:
             where = "" if c.scope == "both" else dim(f"  ({c.scope})")
@@ -2231,7 +2388,7 @@ def cmd_commands(args: argparse.Namespace) -> int:
     # are the single thing people are most often hunting for when they open a
     # directory at all — "how do I give it my data" is not answerable from a
     # list of verbs.
-    say("  " + bold("Getting your data in"))
+    say("  " + cyan(bold("Getting your data in")))
     width = max(len(d) for d, _ in DATA_DOORS)
     for door, what in DATA_DOORS:
         say(f"    {door.ljust(width)}   {dim(what)}")
@@ -2505,11 +2662,16 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
         say(f"alphaengine {__version__}  {DOT}  {url}")
         return
 
-    # The mark, the name, and what the mark means — three lines, and the third
-    # is doing teaching rather than decoration.
+    # THE SURFACE IS THE PRODUCT. Two ridges, same width, opposite shapes: a
+    # plateau that survives a neighbour, and a knife that does not. Colour is
+    # height, not decoration — the bright part is the peak.
+    plateau = [math.exp(-0.5 * ((i / 35 - 0.5) / 0.18) ** 2) for i in range(36)]
+    edge = [math.exp(-0.5 * ((i / 35 - 0.5) / 0.028) ** 2) for i in range(36)]
     say("")
-    say("  " + cyan(PLATEAU) + "   " + bold("alphaengine"))
+    say("  " + _spark_paint(plateau, width=36, cool=True))
+    say("  " + cyan(PLATEAU) + "   " + _gradient("alphaengine") + "  " + dim(__version__))
     say("  " + dim(EDGE) + "   " + dim("Find out what survives."))
+    say("  " + _spark_paint(edge, width=36, cool=False))
     say("")
 
     # Data is described by SHAPE, never printed. A boot screen that echoes the
@@ -2536,13 +2698,15 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
     else:
         signed = green("yes") + dim(f"  {DOT}  from your shell")
 
+    host = url.replace("https://", "").replace("http://", "")
     rows: list[tuple[str, str]] = [
         ("version", bold(__version__)),
+        ("host", dim(host)),
         ("signed in", signed),
         ("project", (bold(project) if project else dim("none"))),
         ("data", loaded),
     ]
-    for line in _boxed(rows):
+    for line in _boxed(rows, title="session"):
         say(line)
 
     say("")
@@ -2621,35 +2785,31 @@ def is_auth_error(exc: Any) -> bool:
     return getattr(exc, "status", None) in (401, 403)
 
 
+_KEY_PROMPTS: dict[str, tuple[str, str]] = {
+    "quantos": ("QUANTOS_API_KEY", "QuantOS key (ae_live_…) — created in the portal, on Data"),
+    "anthropic": ("ANTHROPIC_API_KEY", "Anthropic key (sk-ant-…)"),
+    "openai": ("OPENAI_API_KEY", "OpenAI key (sk-…) or any OpenAI-compatible key"),
+    "gemini": ("GEMINI_API_KEY", "Gemini / Google AI key"),
+    "google": ("GOOGLE_API_KEY", "Google AI key"),
+    "groq": ("GROQ_API_KEY", "Groq key"),
+    "openrouter": ("OPENROUTER_API_KEY", "OpenRouter key"),
+    "azure": ("AZURE_OPENAI_API_KEY", "Azure OpenAI key (also set AZURE_OPENAI_ENDPOINT)"),
+    "gateway": ("ALPHAENGINE_API_KEY", "Private gateway key (also set ALPHAENGINE_BASE_URL)"),
+}
+
+
 def enter_key(which: str) -> bool:
     """Prompt for a key and hold it FOR THIS SESSION ONLY.
 
-    ── WHY THIS DOES NOT PERSIST ANYTHING ─────────────────────────────────────
-    #
-    The convenient version writes to a config file, and then a credential that
-    can spend the user's money lives in plaintext on disk, survives the session,
-    and gets copied with the project directory. We are not in the business of
-    holding customer keys — that is the whole reason `AgentDriver` takes a
-    callable and has no key field — and a dotfile would give that up for the
-    sake of saving one `export`.
-
-    So this sets the variable in THIS PROCESS. Close the terminal and it is
-    gone. For a key you want every time, `export` it in your shell profile,
-    which is a thing your shell already manages properly.
-
-    Read with `getpass` so it does not echo and does not land in scrollback.
+    Persistence is optional and lives in `auth.save_key` (mode 0600, user config
+    dir). QuantOS never holds the key.
     """
     import getpass
 
-    if which == "quantos":
-        env, what = _ENV_KEY, "QuantOS key (ae_live_…) — created in the portal, on Data"
-    elif which == "anthropic":
-        env, what = "ANTHROPIC_API_KEY", "Anthropic key (sk-ant-…)"
-    elif which == "openai":
-        env, what = "OPENAI_API_KEY", "OpenAI key (sk-…)"
-    else:
-        say(red(f"unknown key {which!r} — try: quantos, anthropic, openai"))
+    if which not in _KEY_PROMPTS:
+        say(red(f"unknown key {which!r} — try: {', '.join(_KEY_PROMPTS)}"))
         return False
+    env, what = _KEY_PROMPTS[which]
 
     say(dim(f"  {what}"))
     try:
@@ -2726,6 +2886,7 @@ def _ask(
     without being unsafe.
     """
     from .client import AgentDriver, AgentRefusal, Offline, ServerError
+    from .events import EventSink
     from .model import NoModelConfigured, build_think
 
     # ── NOT STREAMED, AND THE REASON IS WHAT THE CALL RETURNS ──────────────
@@ -2745,6 +2906,9 @@ def _ask(
         say(yellow(str(exc)))
         return None
 
+    provider, _, model_name = label.partition("/")
+    sink = EventSink(session=session if os.environ.get(_ENV_KEY) else None)
+
     try:
         catalogue = session.workflows()
     except Offline:
@@ -2758,7 +2922,7 @@ def _ask(
         say(dim("The server offers no workflows, so there is nothing to choose from."))
         return None
 
-    say(f"  {dim('agent  ' + DOT)}  {dim(label)}")
+    say(f"  {magenta(GLEAM)}  {dim('agent  ' + DOT)}  {dim(label)}")
 
     # Choosing the workflow is the same shape as choosing a step: an index into
     # a list the server produced. Reusing `AgentDriver.pick` rather than writing
@@ -2766,7 +2930,10 @@ def _ask(
     driver = AgentDriver(
         think,
         goal=request,
-        on_thought=lambda why: say(f"  {dim('agent  ' + DOT)}  {dim(why)}"),
+        on_thought=lambda why: say(f"  {magenta(GLEAM)}  {dim('agent  ' + DOT)}  {why}"),
+        sink=sink,
+        provider=provider or None,
+        model=model_name or None,
     )
     options = [{"op": w.get("name", "?"), "params": {"agency": w.get("agency")}} for w in catalogue]
     try:
@@ -2831,7 +2998,7 @@ def _ask(
 
     repro = chosen.get("reproducible")
     say(
-        f"  {dim('agent  ' + DOT)}  chose {bold(name)}  "
+        f"  {magenta(GLEAM)}  {dim('agent  ' + DOT)}  chose {bold(name)}  "
         + (green("reproducible") if repro else yellow("not reproducible"))
     )
 
@@ -2843,6 +3010,7 @@ def _ask(
             workspace_id=workspace_id,
             **({"grid": project_grid()} if project_grid() else {}),
         )
+        sink.bind(run.run_id)
         driver.drive(run)
     except Offline:
         _explain_offline(url)
@@ -2857,7 +3025,7 @@ def _ask(
     _report(run)
     if run.status == "closed":
         _publish_signals(session, run, workspace_id=workspace_id, label=None)
-    _answer(request, run, think)
+    _answer(request, run, think, sink=sink, provider=provider, model=model_name)
     # SAID AT THE END, WHERE IT TRAVELS WITH THE RESULT. A study whose path was
     # chosen by a model is a different object from one whose path was fixed in
     # advance, and the difference has to reach whoever reads the artifact.
@@ -2885,7 +3053,15 @@ RULES, and the first is enforced after you reply:
     afterwards from the figures themselves and would be duplicated."""
 
 
-def _answer(request: str, run: Any, think: Callable[[str], str]) -> None:
+def _answer(
+    request: str,
+    run: Any,
+    think: Callable[[str], str],
+    *,
+    sink: Any | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> None:
     """The synthesis pass, which is the difference between a loop running and
     the system answering.
 
@@ -2918,14 +3094,41 @@ def _answer(request: str, run: Any, think: Callable[[str], str]) -> None:
         # NAMED, NOT SWALLOWED. This is the guard working, and a user who sees
         # nothing cannot tell it from a model that had nothing to say.
         say(yellow(f"  The answer was refused: {exc}"))
+        if sink is not None:
+            from .events import make_event
+
+            sink.emit(
+                make_event(
+                    "refusal",
+                    run_id=getattr(run, "run_id", None),
+                    error=str(exc),
+                    provider=provider,
+                    model=model,
+                )
+            )
         return
     except Exception:  # noqa: BLE001
         say(dim("  No answer could be composed from this run."))
         return
 
+    if sink is not None:
+        from .events import make_event
+
+        sink.emit(
+            make_event(
+                "answer",
+                run_id=getattr(run, "run_id", None),
+                provider=provider,
+                model=model,
+                answer_text=answer.text,
+                answer_caveats=list(answer.caveats),
+                agency="exploratory",
+            )
+        )
+
     say("")
     for line in _wrap(answer.text):
-        say(f"  {line}")
+        say(f"  {cyan(RAIL_V)} {line}")
     # THE CAVEATS ARE NOT OPTIONAL AND ARE NOT STYLED AWAY. Each one is a claim
     # the figures cannot support without it, and every honesty control in this
     # product exists to survive exactly this last step to the screen.
@@ -2951,10 +3154,25 @@ def _wrap(text: str, width: int = 76) -> list[str]:
     return out
 
 
+def _repl_prompt(*, keyed: bool) -> str:
+    """The session caret. Colour says which rungs are live; the glyph is just a caret."""
+    from .model import available_models
+
+    mark = f"{PROMPT} "
+    if keyed and available_models():
+        return cyan(bold(mark))
+    if keyed:
+        return green(bold(mark))
+    return bold(mark)
+
+
 def cmd_repl(args: argparse.Namespace) -> int:
     """A session. The point is that a run is watchable and repeatable without
     retyping a command line each time."""
     from .client import Offline, ServerError
+    from .complete import enable as enable_complete
+    from .events import EventSink
+    from .repl import SLASH, SessionState
 
     session, url = _session(args.url, args.key)
     try:
@@ -2981,6 +3199,15 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if getattr(args, "universe", None)
         else (f"file:{pathlib.Path(args.data).name}" if getattr(args, "data", None) else None)
     )
+    state = SessionState(
+        data=data,
+        backtest_fn=backtest_fn,
+        loaded_project=loaded_project,
+        sink=EventSink(session=session if os.environ.get(_ENV_KEY) or args.key else None),
+    )
+    from .commands import COMMANDS
+
+    enable_complete(verbs=[c.verb for c in COMMANDS if c.verb.isalpha()] + list(SLASH))
     last = None
     while True:
         try:
@@ -2992,7 +3219,7 @@ def cmd_repl(args: argparse.Namespace) -> int:
                     url, data=data, project=loaded_project, keyed=bool(os.environ.get(_ENV_KEY) or args.key)
                 )
             )
-            line = input(bold("> ")).strip()
+            line = input(_repl_prompt(keyed=bool(os.environ.get(_ENV_KEY) or args.key))).strip()
         except (EOFError, KeyboardInterrupt):
             say("")
             return 0
@@ -3002,6 +3229,8 @@ def cmd_repl(args: argparse.Namespace) -> int:
         # alternatives here: `screen my book --universe sp100` is both, and the
         # prompt used to force a choice between them.
         line, inline_flags = _extract_flags(line)
+        if line.startswith("/"):
+            line = line[1:].lstrip()
         if inline_flags:
             try:
                 data, backtest_fn = _apply_flags(inline_flags, session, data, backtest_fn)
@@ -3066,12 +3295,59 @@ def cmd_repl(args: argparse.Namespace) -> int:
             continue
         if verb == "status":
             say(dim("no run yet") if last is None else f"{last.run_id}  {last.status}")
+            if state.book.names:
+                say(dim("  book: " + ", ".join(state.book.names)))
+            if state.pinned_model:
+                say(dim("  model: " + state.pinned_model))
+            if state.last_shortlist:
+                say(dim("  shortlist: " + ", ".join(state.last_shortlist[:8])))
             continue
         if verb == "logout":
             cmd_logout(args)
-            for name in ("QUANTOS_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+            from .auth import MANAGED
+
+            for name in MANAGED:
                 os.environ.pop(name, None)
             session, url = _session(args.url, args.key)
+            state.sink.session = None
+            continue
+        if verb == "models":
+            cmd_models(args)
+            continue
+        if verb == "model":
+            from .model import available_models, pin_model
+
+            if not rest:
+                pinned = os.environ.get("ALPHAENGINE_PROVIDER") or os.environ.get("ALPHAENGINE_MODEL")
+                ready = available_models()
+                say(dim("  pinned: " + (pinned or "none (first usable)")))
+                for label, model in ready:
+                    say(f"    {label}/{model}")
+            else:
+                provider, model_name = pin_model(rest)
+                state.pinned_model = f"{provider or ''}/{model_name or rest}".strip("/")
+                say(green(f"  model {state.pinned_model}"))
+            continue
+        if verb == "trace":
+            cmd_trace(argparse.Namespace(run_id=rest or getattr(last, "run_id", None)))
+            continue
+        if verb in ("quiet", "verbose"):
+            state.quiet = verb == "quiet"
+            args.quiet = state.quiet
+            say(dim("  quiet" if state.quiet else "  verbose"))
+            continue
+        if verb == "book":
+            if rest in ("status", "monitor"):
+                say(str(state.book.monitor()))
+            if rest:
+                if isinstance(data, dict) and rest in data:
+                    state.book.add(rest, data[rest])
+                    say(dim(f"  sleeve {rest}"))
+                else:
+                    say(yellow("  load data first, then `book <name>`"))
+            else:
+                names = state.book.names
+                say(dim("  empty book") if not names else "  sleeves: " + ", ".join(names))
             continue
         if verb in ("key", "keys"):
             if rest:
@@ -3080,11 +3356,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
                     # the newly-entered credential would not be used until
                     # restart — which looks exactly like the key not working.
                     session, url = _session(args.url, args.key)
+                    state.sink.session = session
             else:
                 for ln in ladder_lines(keyed=bool(os.environ.get(_ENV_KEY) or args.key)):
                     say(ln)
                 say("")
-                say(dim("  `key quantos` · `key anthropic` · `key openai` to enter one now"))
+                say(dim("  `key quantos` · `key anthropic` · `key openai` · `key gemini` to enter one now"))
             continue
         if verb in ("universe", "data"):
             if not rest:
@@ -3228,6 +3505,8 @@ def cmd_repl(args: argparse.Namespace) -> int:
             )
             or last
         )
+        if last is not None:
+            state.remember_run(last, line)
 
 
 # ── entry point ────────────────────────────────────────────────────────────
@@ -3276,6 +3555,9 @@ def build_parser() -> argparse.ArgumentParser:
     tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
     sub.add_parser("logout", parents=[common], help="remove stored credentials")
+    sub.add_parser("models", parents=[common], help="which model providers this machine can use")
+    tr = sub.add_parser("trace", parents=[common], help="local model/run events for a run")
+    tr.add_argument("run_id", nargs="?", help="run id; defaults to the latest local dump")
     d = sub.add_parser("commands", parents=[common], help="every command, grouped")
     d.add_argument("verb", nargs="?", help="expand one command in full")
 
@@ -3284,6 +3566,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--label", help="what to call the artifact")
     r.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
     r.add_argument("--quiet", action="store_true", help="only the result")
+    r.add_argument("--stream", action="store_true", help="print the answer after the citation guard")
 
     # THE QUESTIONS ARE THE COMMANDS. `run screen_universe` is the machine's
     # spelling; `alphaengine screen` is the person's. Each verb is the full
@@ -3295,6 +3578,7 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("--label", help="what to call the artifact")
         q.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
         q.add_argument("--quiet", action="store_true", help="only the result")
+        q.add_argument("--stream", action="store_true", help="print the answer after the citation guard")
         q.set_defaults(workflow=workflow)
     return p
 
@@ -3311,6 +3595,53 @@ def cmd_demo(_args: argparse.Namespace) -> int:
     from . import demo
 
     return demo.run()
+
+
+def cmd_models(_args: argparse.Namespace) -> int:
+    """Which providers this machine can actually use, and which are one install away."""
+    from .model import available_models, keys_without_sdk, provider_labels
+
+    ready = available_models()
+    stranded = keys_without_sdk()
+    if ready:
+        say("")
+        say("  " + bold("usable"))
+        for label, model in ready:
+            say(f"    {green(ON)} {bold(label)}/{dim(model)}")
+    else:
+        say(dim("  no usable model on this machine"))
+    if stranded:
+        say(yellow("  key set, SDK missing"))
+        for label in stranded:
+            say(f"    {yellow(OFF)} {label}")
+    say(dim("  providers: " + ", ".join(provider_labels())))
+    return 0
+
+
+def cmd_trace(args: argparse.Namespace) -> int:
+    """Print the local jsonl dump. Portal POST is best-effort elsewhere."""
+    from .events import data_dir
+
+    run_id = getattr(args, "run_id", None)
+    root = data_dir() / "runs"
+    path = None
+    if run_id:
+        path = root / f"{run_id}.jsonl"
+    elif root.exists():
+        dumps = sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        path = dumps[0] if dumps else None
+    if path is None or not path.exists():
+        say(dim("  no local run events yet"))
+        return 0
+    say(dim(f"  {path}"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        say(red(str(exc)))
+        return 2
+    for line in text.splitlines()[-50:]:
+        say("  " + line)
+    return 0
 
 
 def cmd_logout(_args: argparse.Namespace) -> int:
@@ -3348,6 +3679,8 @@ def main(argv: list[str] | None = None) -> int:
         "demo": cmd_demo,
         "logout": cmd_logout,
         "commands": cmd_commands,
+        "models": cmd_models,
+        "trace": cmd_trace,
         "run": cmd_run,
         None: cmd_repl,  # bare `alphaengine` opens a session
     }

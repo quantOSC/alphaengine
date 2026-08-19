@@ -319,6 +319,33 @@ def test_a_long_server_url_does_not_overflow_the_box(monkeypatch):
     assert widths == {62}, f"box lines are ragged: {sorted(widths)}"
 
 
+def test_a_titled_box_is_still_square(monkeypatch):
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    lines = cli._boxed([("data", "ready")], width=62, title="session")
+    widths = {cli._visible_len(ln) for ln in lines}
+    assert widths == {62}, f"titled box is ragged: {sorted(widths)}"
+    assert "session" in lines[0]
+
+
+def test_sparkline_is_relative_and_resampled():
+    """A constant series is a mid-height fence, not a blank, and width is honoured."""
+    flat = cli.sparkline([1.0, 1.0, 1.0], width=8)
+    assert len(flat) == 8
+    peaked = cli.sparkline([0.0, 1.0, 0.0], width=5)
+    assert len(peaked) == 5
+    glyphs = cli._SPARK
+    assert glyphs.find(peaked[2]) >= glyphs.find(peaked[0])
+
+
+def test_the_working_pulse_does_not_claim_a_duration():
+    """Different elapsed times produce the same WIDTH. A bar that grew with
+    time would be a progress bar, and we do not know the duration."""
+    a = cli._pulse(0.0, width=14)
+    b = cli._pulse(1.7, width=14)
+    assert len(a) == len(b) == 14
+    assert a != b
+
+
 def test_fit_keeps_both_ends_because_the_tail_identifies_the_host():
     got = cli._fit("https://alpha-backend-production-51df.up.railway.app", 30)
     assert cli._visible_len(got) == 30
