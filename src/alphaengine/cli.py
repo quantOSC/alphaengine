@@ -190,10 +190,6 @@ def cyan(t: str) -> str:
     return _c("36", t)
 
 
-def magenta(t: str) -> str:
-    return _c("35", t)
-
-
 def _rgb(r: int, g: int, b: int, text: str) -> str:
     """A single-character (or short) paint. Falls back to the 256-colour cube."""
     if not _tty() or not text:
@@ -212,16 +208,26 @@ def _mix(start: tuple[int, int, int], end: tuple[int, int, int], t: float, ch: s
     return _rgb(r, g, b, ch)
 
 
-def _gradient(
-    text: str,
-    start: tuple[int, int, int] = (40, 200, 190),
-    end: tuple[int, int, int] = (140, 255, 170),
-) -> str:
-    """Paint a wordmark so it reads as a surface, not a logo font."""
-    if not _tty() or not text:
-        return text
-    n = max(len(text) - 1, 1)
-    return "".join(_mix(start, end, i / n, ch) for i, ch in enumerate(text))
+def _accent(text: str) -> str:
+    """The one brand colour. Warm gold, the wait-star Claude Code taught people
+    to read as 'something is happening'."""
+    return _rgb(255, 176, 72, text)
+
+
+_HUES: tuple[tuple[int, int, int], ...] = (
+    (255, 176, 72),
+    (255, 120, 80),
+    (220, 110, 190),
+    (130, 150, 255),
+    (64, 200, 210),
+    (90, 220, 140),
+    (210, 220, 80),
+)
+
+
+def _spin_mark(frame: int) -> str:
+    r, g, b = _HUES[frame % len(_HUES)]
+    return _rgb(r, g, b, STAR)
 
 
 # ── glyphs, which are not always available ─────────────────────────────────
@@ -262,16 +268,17 @@ ON = "●" if _UNICODE_OK else "*"
 OFF = "○" if _UNICODE_OK else "-"
 #: A failed step's marker.
 CROSS = "×" if _UNICODE_OK else "x"
-#: Drive narration rails. A tree, not a progress bar: each line is a step that
-#: has already run, and the past is not the graph's future.
-RAIL_V = "│" if _UNICODE_OK else "|"
-RAIL_T = "├" if _UNICODE_OK else "+"
-RAIL_L = "└" if _UNICODE_OK else "+"
-RAIL_H = "─" if _UNICODE_OK else "-"
-#: REPL prompt. The ASCII fallback is the original `>`.
-PROMPT = "▸" if _UNICODE_OK else ">"
-#: Agent thought marker.
-GLEAM = "✦" if _UNICODE_OK else "*"
+#: Nested detail, Codex-style. A step that has already run, never what comes next.
+NEST = "└" if _UNICODE_OK else "\\"
+#: REPL composer. Claude Code uses `>`; we keep a heavier caret so a research
+#: session does not look like a shell waiting for bash.
+PROMPT = "❯" if _UNICODE_OK else ">"
+#: The wait-mark Claude Code popularised: a star that changes colour while work
+#: is blocked. ASCII `*` where the stream cannot take it.
+STAR = "✻" if _UNICODE_OK else "*"
+#: Wordmark. The product is a parameter surface, not a mascot; this is just a
+#: pin so the welcome is one glance, not a painting.
+PIN = "α" if _stream_handles("α") else "ae"
 
 #: The questions, as commands: what a quant TYPES maps to what the server
 #: RUNS. One table, read by the parser, the dispatcher and the shell alike.
@@ -364,29 +371,18 @@ def _pulse(elapsed: float, *, width: int = 14) -> str:
     """A travelling heartbeat. Deliberately NOT a progress bar: nothing here
     knows how long the step will take, and a bar that fills at a guessed rate
     is a lie told smoothly."""
-    phase = (elapsed * 0.62) % 1.0
-    values = [
-        math.exp(-((((i / max(width - 1, 1)) - phase) * 4.8) ** 2))
-        + 0.18 * math.exp(-((((i / max(width - 1, 1)) - ((phase + 0.55) % 1.0)) * 7.0) ** 2))
+    return sparkline(_scan_wave(elapsed, width), width=width)
+
+
+def _scan_wave(elapsed: float, width: int) -> list[float]:
+    """A plateau moving across the line. The peak wraps; duration is unknown."""
+    mu = (elapsed * 0.42) % 1.0
+    denom = max(width - 1, 1)
+    return [
+        math.exp(-0.5 * ((i / denom - mu) / 0.14) ** 2)
+        + 0.28 * math.exp(-0.5 * ((i / denom - ((mu + 0.52) % 1.0)) / 0.10) ** 2)
         for i in range(width)
     ]
-    return sparkline(values, width=width)
-
-
-def _chip(label: str, *, on: bool) -> str:
-    """A HUD cell on the status line. Reverse-video when the stream can take it."""
-    body = f" {label} "
-    if not _tty():
-        return f"[{label}]"
-    if on:
-        return _c("48;5;23;38;5;159", body)
-    return _c("48;5;236;38;5;246", body)
-
-
-#: Spinner frames. Braille where the stream takes it, ASCII where it does not —
-#: the same degradation `DOT` and `ARROW` get, for the same reason: a Windows
-#: cp1252 console rendered the pretty version as mojibake.
-_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if _UNICODE_OK else "|/-\\"
 
 
 class Working:
@@ -442,18 +438,30 @@ class Working:
 
     def _animate(self) -> None:
         i = 0
-        # A first frame immediately, then every 80ms. Waiting out the first
-        # interval before drawing anything makes a fast step flash a blank line.
-        # The heartbeat is a travelling pulse of elapsed time, not a bar that
-        # claims to know when the work will finish.
+        # Two lines when the stream can take a ridge: a hue-cycling star (Claude
+        # Code) over a travelling plateau (the thing this tool actually judges).
+        # One line of ASCII otherwise. CSI erase is safe here because colour
+        # already committed us to ANSI the moment `_tty()` was true.
+        wide = _UNICODE_OK
         while True:
-            pulse = _pulse(self.elapsed)
-            text = f"  {_SPIN[i % len(_SPIN)]} {self.label}  {self.elapsed:.1f}s  {cyan(pulse)}"
-            plain_len = len(f"  {_SPIN[0]} {self.plain}  {self.elapsed:.1f}s  {pulse}")
-            sys.stdout.write("\r" + text)
+            mark = _spin_mark(i)
+            t = f"{self.elapsed:.1f}s"
+            if wide:
+                ridge = _spark_paint(_scan_wave(self.elapsed, 32), width=32)
+                block = f"  {mark}  {self.label}\n     {ridge}  {dim(t)}"
+                plain = 8 + max(len(self.plain), 32 + 2 + len(t))
+            else:
+                block = f"  {_SPIN[i % len(_SPIN)]} {self.label}  {t}"
+                plain = len(f"  {_SPIN[0]} {self.plain}  {t}")
+            if i == 0:
+                sys.stdout.write(block)
+            elif wide:
+                sys.stdout.write("\r\033[2K\033[1A\r\033[2K" + block)
+            else:
+                sys.stdout.write("\r\033[2K" + block)
             sys.stdout.flush()
-            self._painted = max(self._painted, plain_len)
-            if self._stop.wait(0.08):
+            self._painted = max(self._painted, plain)
+            if self._stop.wait(0.07):
                 return
             i += 1
 
@@ -461,11 +469,10 @@ class Working:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
-            # Erased with spaces rather than an ANSI erase-line: this runs on
-            # consoles old enough that colour is the only escape sequence worth
-            # assuming, and a stray `[2K` printed literally is worse than a
-            # slightly wider blank.
-            sys.stdout.write("\r" + " " * (self._painted + 2) + "\r")
+            if _UNICODE_OK:
+                sys.stdout.write("\r\033[2K\033[1A\r\033[2K")
+            else:
+                sys.stdout.write("\r" + " " * (self._painted + 2) + "\r")
             sys.stdout.flush()
 
 
@@ -1353,8 +1360,6 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
     """
     n = 0
     failures: dict[str, int] = {}
-    if not quiet:
-        say(dim(f"  {RAIL_V}"))
     while run.status == "open" and n < 200:
         if not run.permitted:
             run.resume()
@@ -1370,7 +1375,7 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
             # `compute.*` executes in-process against the caller's own frames, so
             # this is the one place in the product where a long wait is entirely
             # local and entirely invisible.
-            with Working(f"{dim('running ' + ARROW)}  {bold(op)}", plain=f"running {ARROW}  {op}") as w:
+            with Working(bold(op), plain=str(op)) as w:
                 run.step(step)
             n += 1
             took = dim(f"{w.elapsed:.1f}s")
@@ -1384,11 +1389,12 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                     # with no why sent people to the traceback that no longer
                     # prints. The message came from the executor and was written
                     # to be read.
-                    say(f"  {red(RAIL_T + RAIL_H)} {red('failed ' + CROSS)}  {bold(op)}  {took}")
+                    say(f"  {red(CROSS)}  {bold(op)}")
+                    say(f"     {NEST} {took}")
                     why = getattr(run, "last_error", None)
                     if why:
                         for line in str(why).splitlines():
-                            say(red(f"    {RAIL_V}  {line}"))
+                            say(red(f"     {NEST} {line}"))
                 if failures[key] >= 2:
                     run.status = "abandoned"
                     run.stopped = {
@@ -1403,7 +1409,8 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                 # `emit.*` seal rather than measure) and printing a blank line
                 # for it would read as a stall.
                 found = _found(seen, run)
-                say(f"  {cyan(RAIL_T + RAIL_H)} {found or bold(op)}  {took}")
+                say(f"  {_accent(ON)}  {found or bold(op)}")
+                say(f"     {dim(NEST)} {took}")
 
             if run.status != "open":
                 return
@@ -1501,7 +1508,7 @@ def _report(run: Any) -> int:
     """
     say("")
     if run.status == "closed":
-        say(green(f"  {RAIL_L}{RAIL_H} Closed.") + " " + dim(str((run.artifact or {}).get("workflow", ""))))
+        say(f"  {_accent(ON)}  {green('Closed')}  " + dim(str((run.artifact or {}).get("workflow", ""))))
         _render_artifact(run.artifact or {})
         _say_gaps(run)
         _where_it_lives(run)
@@ -1509,8 +1516,8 @@ def _report(run: Any) -> int:
         return 0
     if run.status == "stopped":
         stop = run.stopped or {}
-        say(yellow(f"  {RAIL_L}{RAIL_H} Stopped.") + " " + str(stop.get("reason", "")))
-        say(dim("  A stop is a result. The run did what it was built to do."))
+        say(f"  {yellow(ON)}  {yellow('Stopped')}  " + str(stop.get("reason", "")))
+        say(dim(f"     {NEST} A stop is a result. The run did what it was built to do."))
         # A STOP GETS ITS GAPS TOO, and needs them more than a close does: the
         # run refused to answer, so what it could not cover is most of what
         # there is to know about it.
@@ -1520,7 +1527,7 @@ def _report(run: Any) -> int:
     if run.status == "abandoned":
         stop = run.stopped or {}
         error = stop.get("error")
-        say(red(f"  {RAIL_L}{RAIL_H} Abandoned.") + f" {stop.get('op')} failed twice, identically.")
+        say(f"  {red(CROSS)}  {red('Abandoned')}  {stop.get('op')} failed twice, identically.")
         if error:
             for line in str(error).splitlines():
                 say(f"  {line}")
@@ -1864,11 +1871,9 @@ def _render_artifact(art: dict[str, Any]) -> None:
         # separates from its value — "worst segment Sharpe-3.20" welded a
         # 20-character label straight into a negative number.
         width = max(20, max(len(label) for label, _, _ in shown))
-        peak = max(abs(float(v)) for _, v, _ in shown) or 1.0
         for label, value, unit in shown:
             tail = f" {dim(unit)}" if unit else ""
-            meter = _bar(float(value), peak)
-            say(f"  {dim(label.ljust(width))}  {bold(_num(value))}{tail}  {meter}")
+            say(f"  {dim(label.ljust(width))}  {bold(_num(value))}{tail}")
 
     # SAID EVEN THOUGH THE TABLE IS RIGHT THERE. A shortlist of 20 means one
     # thing when 480 names were measured and rejected, and quite another when
@@ -2319,7 +2324,7 @@ def _shape_phrase(data: Any) -> str | None:
 
 
 def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str:
-    """One HUD line above the prompt: what is loaded, and what can run.
+    """One quiet line above the prompt: what is loaded, and what can run.
 
     THE QUESTION THIS ANSWERS is the one asked most often inside a session and
     the one the boot screen answers once and then scrolls away: is my data in?
@@ -2328,28 +2333,26 @@ def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str
     identical to one that did -- which is exactly how "the S&P 500 is a handful
     of names" happened.
 
-    Deliberately ONE LINE. It sits above every prompt, so anything taller
-    becomes wallpaper and stops being read at all. The cells are chips rather
-    than dim prose so the three facts (data, sign-in, model) can be scanned
-    without parsing separators.
+    Deliberately ONE LINE and dim. Reverse-video chips became wallpaper; this
+    is the Codex status strip: facts, not a second UI.
     """
     from .model import available_models
 
-    chips: list[str] = []
+    bits: list[str] = []
 
     if data is None:
-        chips.append(_chip("no data", on=False))
+        bits.append("no data")
     else:
         phrase = _shape_phrase(data)
         label = project or "loaded"
-        chips.append(_chip(label + (f" {DOT} {phrase}" if phrase else ""), on=True))
+        bits.append(label + (f" {DOT} {phrase}" if phrase else ""))
 
-    chips.append(_chip("signed in" if keyed else "not signed in", on=keyed))
+    bits.append("signed in" if keyed else "not signed in")
 
     models = available_models()
-    chips.append(_chip(models[0][0] if models else "no model", on=bool(models)))
+    bits.append(models[0][0] if models else "no model")
 
-    return "  " + " ".join(chips)
+    return "  " + dim(f" {DOT} ".join(bits))
 
 
 def cmd_commands(args: argparse.Namespace) -> int:
@@ -2377,7 +2380,7 @@ def cmd_commands(args: argparse.Namespace) -> int:
         rows = in_group(group)
         if not rows:
             continue
-        say("  " + cyan(bold(title)))
+        say("  " + dim(title))
         width = max(len(_signature(c)) for c in rows)
         for c in rows:
             where = "" if c.scope == "both" else dim(f"  ({c.scope})")
@@ -2388,7 +2391,7 @@ def cmd_commands(args: argparse.Namespace) -> int:
     # are the single thing people are most often hunting for when they open a
     # directory at all — "how do I give it my data" is not answerable from a
     # list of verbs.
-    say("  " + cyan(bold("Getting your data in")))
+    say("  " + dim("Getting your data in"))
     width = max(len(d) for d, _ in DATA_DOORS)
     for door, what in DATA_DOORS:
         say(f"    {door.ljust(width)}   {dim(what)}")
@@ -2509,12 +2512,11 @@ def ladder_lines(*, keyed: bool) -> list[str]:
         ),
     ]
 
-    out = ["  " + dim("Where you are")]
-    for live, name, does, note in rungs:
+    out: list[str] = []
+    for live, name, _does, note in rungs:
         mark = green(on) if live else dim(off)
         label = bold(name.ljust(14)) if live else dim(name.ljust(14))
-        does_s = does.ljust(44) if live else dim(does.ljust(44))
-        out.append(f"  {mark} {label}{does_s}{note}")
+        out.append(f"  {mark}  {label}{note}")
 
     # ONE ACTIONABLE LINE, and only when something is locked. The rungs
     # themselves stay in plain language — a menu that recites environment
@@ -2651,8 +2653,47 @@ def account_sleeve_lines(session: Any) -> list[str]:
     return out
 
 
+def _next_moves(*, keyed: bool, data: Any, project: str | None) -> list[str]:
+    """The next three things to type. A boot screen that cannot name a first
+    move is a logo."""
+    from .model import available_models
+
+    models = available_models()
+    rows: list[tuple[str, str]] = []
+    if not keyed:
+        rows = [
+            ("demo", "the offline half, no account"),
+            ("key quantos", "unlock workflows"),
+            ("key anthropic", "then ask in your own words"),
+        ]
+    elif data is None:
+        rows = [
+            ("universe <name>", "stored closes from the portal"),
+            ("--project research.momentum", "your module, your simulator"),
+            ("demo", "see a grid survive, or not"),
+        ]
+        if not models:
+            rows[2] = ("key anthropic", "ask in your own words")
+    else:
+        rows = [
+            ("screen", "what is worth a look"),
+            ("validate", "count the tries"),
+        ]
+        if models:
+            rows.append(('"which names are overbought?"', "the model picks the path"))
+        else:
+            rows.append(("key anthropic", "ask in your own words"))
+        if project:
+            rows[1] = ("validate", "count the tries on this project")
+    out = ["", "  " + dim("Next")]
+    width = max(len(cmd) for cmd, _ in rows)
+    for cmd, why in rows:
+        out.append(f"    {bold(cmd.ljust(width))}  {dim(why)}")
+    return out
+
+
 def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any = None) -> None:
-    """The opening screen. State first, decoration second.
+    """The opening screen. A transcript header, not a dashboard.
 
     Suppressed entirely when stdout is not a TTY: a CI log wants a transcript.
     """
@@ -2662,55 +2703,38 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
         say(f"alphaengine {__version__}  {DOT}  {url}")
         return
 
-    # THE SURFACE IS THE PRODUCT. Two ridges, same width, opposite shapes: a
-    # plateau that survives a neighbour, and a knife that does not. Colour is
-    # height, not decoration — the bright part is the peak.
-    plateau = [math.exp(-0.5 * ((i / 35 - 0.5) / 0.18) ** 2) for i in range(36)]
-    edge = [math.exp(-0.5 * ((i / 35 - 0.5) / 0.028) ** 2) for i in range(36)]
     say("")
-    say("  " + _spark_paint(plateau, width=36, cool=True))
-    say("  " + cyan(PLATEAU) + "   " + _gradient("alphaengine") + "  " + dim(__version__))
-    say("  " + dim(EDGE) + "   " + dim("Find out what survives."))
-    say("  " + _spark_paint(edge, width=36, cool=False))
+    say("  " + _accent(PIN) + "  " + bold("alphaengine") + "  " + dim(__version__))
+    say("     " + dim("Find out what survives."))
     say("")
 
     # Data is described by SHAPE, never printed. A boot screen that echoes the
     # first rows of somebody's price series into their scrollback — where it
     # will sit until the buffer rolls, and into any recording of the session —
     # is a boundary violation for the sake of a nicer banner.
+    bits: list[str] = []
     if data is None:
-        loaded = dim("none") + dim(f"  {DOT}  pass --project to load yours")
+        bits.append(dim("no data"))
     else:
-        phrase = _shape_phrase(data)  # dict of series, DataFrame, or one sequence
-        loaded = green("ready") + (dim(f"  {DOT}  {phrase}") if phrase else "")
+        phrase = _shape_phrase(data)
+        label = project or "loaded"
+        bits.append(green(label + (f" {DOT} {phrase}" if phrase else "")))
+    bits.append(green("signed in") if keyed else dim("not signed in"))
+    if keyed:
+        from .auth import load_stored
 
-    # SIGNED IN IS A FACT THE USER SHOULD SEE, not infer from things working.
-    # It also disambiguates the two ways a key can be present: one survives a
-    # new terminal and one does not, and "why does it work here but not there"
-    # is exactly the confusion that costs an afternoon.
-    from .auth import load_stored
-
-    stored = load_stored()
-    if not keyed:
-        signed = dim("no")
-    elif "QUANTOS_API_KEY" in stored and not _shell_set("QUANTOS_API_KEY", stored):
-        signed = green("yes") + dim(f"  {DOT}  stored on this machine")
-    else:
-        signed = green("yes") + dim(f"  {DOT}  from your shell")
-
-    host = url.replace("https://", "").replace("http://", "")
-    rows: list[tuple[str, str]] = [
-        ("version", bold(__version__)),
-        ("host", dim(host)),
-        ("signed in", signed),
-        ("project", (bold(project) if project else dim("none"))),
-        ("data", loaded),
-    ]
-    for line in _boxed(rows, title="session"):
-        say(line)
+        stored = load_stored()
+        if "QUANTOS_API_KEY" in stored and not _shell_set("QUANTOS_API_KEY", stored):
+            bits.append(dim("stored"))
+        else:
+            bits.append(dim("from your shell"))
+    say("     " + f" {dim(DOT)} ".join(bits))
 
     say("")
     for line in ladder_lines(keyed=keyed):
+        say(line)
+
+    for line in _next_moves(keyed=keyed, data=data, project=project):
         say(line)
 
     # ONLY WHEN IT CHANGES THE ANSWER: signed in, and nothing already loaded
@@ -2724,8 +2748,6 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
                     say(line)
 
     say("")
-    # THE ONE LINE THAT IS NOT STATUS. It is here because it is the thing most
-    # often forgotten and the thing that makes the rest make sense.
     say("  " + dim("Your data stays on this machine. Only the findings ever travel."))
     say("")
 
@@ -2922,7 +2944,7 @@ def _ask(
         say(dim("The server offers no workflows, so there is nothing to choose from."))
         return None
 
-    say(f"  {magenta(GLEAM)}  {dim('agent  ' + DOT)}  {dim(label)}")
+    say(f"  {_accent(STAR)}  {dim(label)}")
 
     # Choosing the workflow is the same shape as choosing a step: an index into
     # a list the server produced. Reusing `AgentDriver.pick` rather than writing
@@ -2930,7 +2952,7 @@ def _ask(
     driver = AgentDriver(
         think,
         goal=request,
-        on_thought=lambda why: say(f"  {magenta(GLEAM)}  {dim('agent  ' + DOT)}  {why}"),
+        on_thought=lambda why: say(f"  {_accent(STAR)}  {_c('2;3', why)}"),
         sink=sink,
         provider=provider or None,
         model=model_name or None,
@@ -2998,7 +3020,7 @@ def _ask(
 
     repro = chosen.get("reproducible")
     say(
-        f"  {magenta(GLEAM)}  {dim('agent  ' + DOT)}  chose {bold(name)}  "
+        f"  {_accent(ON)}  chose {bold(name)}  "
         + (green("reproducible") if repro else yellow("not reproducible"))
     )
 
@@ -3128,7 +3150,7 @@ def _answer(
 
     say("")
     for line in _wrap(answer.text):
-        say(f"  {cyan(RAIL_V)} {line}")
+        say(f"  {dim(NEST)} {line}")
     # THE CAVEATS ARE NOT OPTIONAL AND ARE NOT STYLED AWAY. Each one is a claim
     # the figures cannot support without it, and every honesty control in this
     # product exists to survive exactly this last step to the screen.
@@ -3155,14 +3177,14 @@ def _wrap(text: str, width: int = 76) -> list[str]:
 
 
 def _repl_prompt(*, keyed: bool) -> str:
-    """The session caret. Colour says which rungs are live; the glyph is just a caret."""
+    """The composer. Gold when the agent rung is live, otherwise quiet."""
     from .model import available_models
 
     mark = f"{PROMPT} "
     if keyed and available_models():
-        return cyan(bold(mark))
+        return _accent(mark)
     if keyed:
-        return green(bold(mark))
+        return green(mark)
     return bold(mark)
 
 

@@ -174,8 +174,12 @@ def run() -> int:
     if ui._tty():
         sharpes = [t.sharpe for t in result.trials if t.failed is None]
         ui.say("")
-        ui.say("  " + ui._spark_paint(sharpes or [0.0], width=36, cool=True))
-        ui.say("  " + ui.dim("trial Sharpes across the grid  " + ui.DOT + "  the ridge is the neighbourhood"))
+        ui.say(
+            f"  {ui._accent(ui.ON)}  {verdict.get('verdict')}  "
+            + ui.dim(f"{result.n_trials} trials {ui.DOT} {surface.get('shape')}")
+        )
+        ui.say("     " + ui._spark_paint(sharpes or [0.0], width=32, cool=True))
+        ui.say("     " + ui.dim("trial Sharpes across the grid"))
     return 0
 
 
