@@ -1,13 +1,46 @@
-# AlphaEngine
+<p align="center">
+  <img src="docs/assets/banner.png" alt="AlphaEngine: the research loop, on your machine" width="100%">
+</p>
 
-**The research loop, on your machine.** Ask what is worth looking at, whether it
-holds up, how much to hold, and whether anything has crossed a line. Your data
-never leaves.
+<h1 align="center">AlphaEngine</h1>
+
+<p align="center">
+  <strong>The research loop, on your machine.</strong><br>
+  Ask what is worth looking at, whether it holds up, how much to hold,<br>
+  and whether anything has crossed a line. Your data never leaves.
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/alphaengine/"><img src="https://img.shields.io/pypi/v/alphaengine.svg?style=flat-square&color=1B7A7A" alt="PyPI"></a>
+  <a href="https://pypi.org/project/alphaengine/"><img src="https://img.shields.io/pypi/pyversions/alphaengine.svg?style=flat-square" alt="Python 3.10+"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-0B1220?style=flat-square" alt="Apache 2.0"></a>
+  <a href="https://github.com/quantOSC/alphaengine/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/quantOSC/alphaengine/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+  <img src="https://img.shields.io/badge/deps-numpy%20%2B%20scipy-C4893A?style=flat-square" alt="Two dependencies: numpy and scipy">
+</p>
+
+<p align="center">
+  <img src="docs/assets/mark.png" alt="AlphaEngine mark" width="96">
+</p>
 
 ```bash
 pip install alphaengine
 alphaengine demo          # the whole offline half, no account, no data of your own
 ```
+
+<p align="center">
+  <img src="docs/assets/session.png" alt="The session canvas: a living parameter surface, then demo, login, load" width="92%">
+</p>
+
+The session is the product. Sign in, load something, then ask:
+
+```bash
+alphaengine
+❯ login
+❯ load prices.csv
+❯ screen
+```
+
+---
 
 ## What it answers
 
@@ -42,7 +75,7 @@ Or say it in plain English and let your own model pick:
 
 ```bash
 alphaengine
-> which of my names are overbought on RSI?
+❯ which of my names are overbought on RSI?
 ```
 
 That second path is EXPLORATORY: the model chooses a workflow and then chooses
@@ -50,27 +83,48 @@ each step from what the server permits. Two runs of the same question may
 differ, and the run says so. `run <workflow>` is SCRIPTED and reproducible.
 Both are legitimate; presenting one as the other is not.
 
+---
+
 ## The three rungs
 
-Each is useful without the one above it. The boot screen shows which are lit.
+Each is useful without the one above it. `login` lights the next one.
 
 | Rung | What you need | What you get |
 |---|---|---|
 | **The maths** | nothing | Every statistic, offline, forever. No account. |
-| **Workflows** | a QuantOS `ae_live_` key | The loop end to end, with the record. |
-| **Ask anything** | your OWN model key | Plain English in. Runs under your account, not ours. |
+| **Workflows** | a QuantOS `ae_live_` key (`login`) | The loop end to end, with the record. |
+| **Ask anything** | your OWN model key (`login anthropic`) | Plain English in. Runs under your account, not ours. |
 
 Nothing here stores a model key: it is read from your environment at call time
 and handed to the provider's own client. There is no field to put one in.
 
+```mermaid
+flowchart LR
+  A["demo / import<br/>offline maths"] --> B["login<br/>QuantOS key"]
+  B --> C["login anthropic<br/>your model"]
+  A -.->|"no account"| D["DSR · PBO · ICIR · HRP"]
+  B -.->|"ae_live_"| E["screen · validate · runs"]
+  C -.->|"BYOK"| F["plain English in"]
+```
+
+---
+
 ## Getting your data in
 
-Three doors, and nothing is ever fetched on your behalf.
+One verb, three shapes. Nothing is ever fetched on your behalf.
 
 ```bash
-alphaengine run screen_universe --data prices.csv          # a local CSV
-alphaengine run screen_universe --universe sp500           # registered in the portal
-alphaengine run validate_study --project research.momentum # a module of yours
+load prices.csv              # a local CSV
+load sp500                   # registered in the portal, with the closes you stored
+load research.momentum       # a module of yours (the only door that can carry a simulator)
+```
+
+From a shell the same doors are flags, for scripts:
+
+```bash
+alphaengine screen --data prices.csv
+alphaengine screen --universe sp500
+alphaengine validate --project research.momentum
 ```
 
 `--data` reads three shapes, decided by the header and nothing else:
@@ -94,6 +148,39 @@ for the scores it measures — while the rest run on prices alone.
 upload decrypted back to your own account, not us fetching market data, and the
 distinction is the whole of the data boundary below.
 
+<p align="center">
+  <img src="docs/assets/data_boundary.png" alt="Your machine holds prices and notebooks; only figures cross to the QuantOS record" width="92%">
+</p>
+
+---
+
+## What's new in 0.7.0
+
+The daily modelling morning, and the overnight book, without a third
+dependency. Existing goldens (deflated Sharpe, PBO, performance, screen) are
+byte-identical. New figures are a public contract from this release.
+
+| You have | You get | Module |
+|---|---|---|
+| A raw factor panel | Cross-sectional rank, z-score, winsorize, neutralize | `core.panel` |
+| A signal and prices | ICIR, Newey-West t-stat, Fama-MacBeth λ, quantile book with one-way turnover | `core.signals`, `core.cross_section` |
+| A return panel | EWMA / Ledoit-Wolf / Marchenko-Pastur covariance, HRP, risk parity, vol target | `core.covariance`, `core.allocate` |
+
+The session is slimmer too: `login` lights a rung, `load` is the one data verb,
+and boot paints the parameter surface this tool actually judges rather than a
+command encyclopedia.
+
+```python
+from alphaengine.core import cs_zscore, signal_icir, hrp_weights, fama_macbeth
+
+z = cs_zscore(factor_panel)          # skipped names are counted, not dropped
+ic = signal_icir(signal, prices)     # Spearman ICIR; Pearson is opt-in
+fm = fama_macbeth(signal, prices)    # λ_mean, t-stat, Newey-West
+w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
+```
+
+---
+
 ## Command reference
 
 `alphaengine commands` prints this directory in the terminal, and
@@ -112,7 +199,8 @@ distinction is the whole of the data boundary below.
 | `gaps` | what your record says is UNANSWERED, and what closes each one | shell + session |
 | `tonight [--budget N]` | what would run unattended tonight, without running any of it | shell + session |
 | `workflows` | what the server offers, what each needs, and which reproduce | shell + session |
-| `key [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | enter a credential now, or see which rungs are unlocked | session |
+| `login [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | sign in, or login anthropic for a model key | shell + session |
+| `key [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | same as login: enter a credential, or see which rungs are lit | session |
 | `commands [verb]` | this directory, or one command in full | shell + session |
 | `models` | which model providers this machine can actually use | shell + session |
 | `model [<provider[:name]>]` | pin the model for this session, or show the pin | session |
@@ -139,9 +227,10 @@ distinction is the whole of the data boundary below.
 | Command | Does | Where |
 |---|---|---|
 | `book [<name> \| status]` | show or load sleeves on the multi-strategy book | session |
-| `universe <name>` | load a universe you registered in the portal, with its closes | session |
-| `data <file>` | load a local CSV or parquet without leaving the session | session |
-| `project <module>` | load `data` and `backtest_fn` from a module of yours | session |
+| `load <file \| module \| universe>` | a CSV, a project module, or a portal universe | session |
+| `universe <name>` | same as load: a universe registered in the portal | session |
+| `data <file>` | same as load: a local CSV or parquet | session |
+| `project <module>` | same as load: a module with data and backtest_fn | session |
 
 ### Session
 
@@ -149,7 +238,7 @@ distinction is the whole of the data boundary below.
 |---|---|---|
 | `logout` | remove stored credentials from this machine | shell + session |
 | `version` | print the version | shell |
-| `help` | the short list | session |
+| `help` | the short list: demo, login, load, then a question | session |
 | `quit` | leave the session | session |
 
 ### Data flags
@@ -195,6 +284,7 @@ alphaengine gaps
 alphaengine tonight
 alphaengine tonight --budget 5
 alphaengine workflows
+alphaengine login
 alphaengine commands
 alphaengine run screen_universe --universe sp500
 alphaengine run size_position --data returns.csv
@@ -287,7 +377,12 @@ diffable, and versioned so it still parses in two years.
 
 | Module | Contents |
 |---|---|
-| `alphaengine.core` | deflated Sharpe, PSR, PBO via CSCV, CPCV, minimum track record length, performance and risk statistics |
+| `alphaengine.core` | deflated Sharpe, PSR, PBO via CSCV, CPCV, minimum track record length, performance and risk |
+| `alphaengine.core.panel` | cross-sectional rank, z-score, winsorize, neutralize |
+| `alphaengine.core.signals` | IC, ICIR, quantile returns, decay |
+| `alphaengine.core.cross_section` | Fama-MacBeth, quantile book with turnover |
+| `alphaengine.core.covariance` | EWMA, Ledoit-Wolf, Marchenko-Pastur denoise, detone |
+| `alphaengine.core.allocate` | HRP, risk parity, vol target |
 | `alphaengine.sweep` | the grid runner and the sensitivity surface |
 | `alphaengine.study` | the study artifact and its schema |
 | `alphaengine.client` | the workflow client and the step executor |
@@ -359,11 +454,27 @@ Probability of Backtest Overfitting." *Journal of Computational Finance* 20(4),
 López de Prado, M. (2018). *Advances in Financial Machine Learning.* Wiley,
 chapters 7 and 12.
 
+**Hierarchical Risk Parity**
+López de Prado, M. (2016). "Building Diversified Portfolios that Outperform
+Out of Sample." *Journal of Portfolio Management* 42(4), 59 to 69.
+
+**Covariance shrinkage and spectral denoising**
+Ledoit, O., and Wolf, M. (2004). "A Well-Conditioned Estimator for
+Large-Dimensional Covariance Matrices." *Journal of Multivariate Analysis*
+88(2), 365 to 411.
+Laloux, L., Cizeau, P., Bouchaud, J.-P., and Potters, M. (1999). "Noise
+Dressing of Financial Correlation Matrices." *Physical Review Letters* 83(7),
+1467 to 1470.
+
 **Multiple testing in asset pricing**
 Harvey, C. R., Liu, Y., and Zhu, H. (2016). "... and the Cross-Section of
 Expected Returns." *Review of Financial Studies* 29(1), 5 to 68.
 Harvey, C. R., and Liu, Y. (2015). "Backtesting." *Journal of Portfolio
 Management* 42(1), 13 to 28.
+
+**Fama-MacBeth**
+Fama, E. F., and MacBeth, J. D. (1973). "Risk, Return, and Equilibrium:
+Empirical Tests." *Journal of Political Economy* 81(3), 607 to 636.
 
 **Downside deviation**
 Sortino, F. A., and Price, L. N. (1994). "Performance Measurement in a Downside

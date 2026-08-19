@@ -17,6 +17,10 @@ __all__ = ["SessionState", "SLASH"]
 
 #: Verbs that also work with a leading `/`, Claude-Code style.
 SLASH = (
+    "login",
+    "load",
+    "demo",
+    "help",
     "model",
     "models",
     "key",
@@ -31,10 +35,10 @@ SLASH = (
     "runs",
     "quiet",
     "verbose",
-    "help",
     "status",
     "logout",
     "quit",
+    "commands",
 )
 
 

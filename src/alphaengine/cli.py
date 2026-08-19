@@ -385,8 +385,138 @@ def _scan_wave(elapsed: float, width: int) -> list[float]:
     ]
 
 
+def _live_tty() -> bool:
+    """Motion only on a real terminal.
+
+    Tests monkeypatch `_tty` so colour and glyphs can be asserted. Sleeping
+    through boot frames or a travelling mesh would stall pytest. A real
+    `isatty()` is the signal; `PYTEST_CURRENT_TEST` is the belt.
+    """
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        return False
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    try:
+        return bool(sys.stdout.isatty())
+    except Exception:
+        return False
+
+
+def _canvas_cols() -> int:
+    try:
+        n = os.get_terminal_size().columns
+    except OSError:
+        n = 80
+    return max(36, min(56, n - 8))
+
+
+CANVAS_ROWS = 8
+_MESH_OK = _stream_handles("╱╲")
+_SLOPE_UP = "╱" if _MESH_OK else "/"
+_SLOPE_DN = "╲" if _MESH_OK else "\\"
+
+
+def _height_at(x: float, z: float, t: float) -> float:
+    """A plateau with a knife-edge and travelling ripples. x,z in [0, 1]."""
+    plateau = math.exp(-((x - 0.48) ** 2) / 0.11 - ((z - 0.54) ** 2) / 0.17)
+    edge = math.exp(-((x - 0.78) ** 2) / 0.0055 - ((z - 0.42) ** 2) / 0.20)
+    ripple = math.sin(2 * math.pi * (1.35 * x + 0.90 * z - 0.18 * t))
+    ripple *= 0.20 * math.exp(-((z - 0.50) ** 2) / 0.42)
+    drift = 0.10 * math.cos(2 * math.pi * (0.70 * z - 0.11 * t + 0.28 * x))
+    h = 0.10 + 0.70 * plateau + 0.48 * edge + ripple + drift
+    return 0.0 if h < 0.0 else 1.0 if h > 1.0 else h
+
+
+def _paint_cell(h: float, dhx: float, z: float) -> str:
+    """One vertex: slope ticks on the sides, blocks on the plateau."""
+    last = len(_SPARK) - 1
+    steep = abs(dhx) > 0.10
+    ch = (_SLOPE_UP if dhx > 0 else _SLOPE_DN) if steep else _SPARK[min(last, int(h * last + 1e-9))]
+    if not _tty():
+        return ch
+    cool = (18, 70 + int(50 * z), 88 + int(70 * z))
+    warm = (255, 176, 72)
+    return _mix(cool, warm, h, ch)
+
+
+def surface_lines(t: float = 0.0, *, rows: int = CANVAS_ROWS, cols: int | None = None) -> list[str]:
+    """A living parameter surface. The thing this tool actually judges.
+
+    Perspective: back rows indent and narrow so the plateau reads as a volume,
+    not a stack of sparklines. Every line is padded to `cols` visible cells
+    so a CSI erase of the block stays rectangular.
+    """
+    cols = _canvas_cols() if cols is None else max(16, cols)
+    out: list[str] = []
+    for zi in range(rows):
+        z = zi / max(rows - 1, 1)
+        indent = int((1.0 - z) * 4)
+        width = max(12, cols - indent * 2)
+        cells: list[str] = []
+        row_h: list[float] = []
+        for xi in range(width):
+            x = xi / max(width - 1, 1)
+            h = _height_at(x, z, t)
+            row_h.append(h)
+            left = row_h[xi - 1] if xi else h
+            cells.append(_paint_cell(h, h - left, z))
+        body = " " * indent + "".join(cells)
+        pad = cols - _visible_len(body)
+        out.append(body + " " * max(0, pad))
+    return out
+
+
+def ridge_lines(values: Sequence[float], *, rows: int = 6, cols: int = 40) -> list[str]:
+    """A filled mountain from real numbers, used to recap a grid of Sharpes."""
+    if not values:
+        values = [0.0]
+    n = len(values)
+    sampled: list[float] = []
+    for i in range(cols):
+        idx = int(round(i * (n - 1) / max(cols - 1, 1))) if cols > 1 else 0
+        sampled.append(float(values[idx]))
+    lo, hi = min(sampled), max(sampled)
+    span = hi - lo or 1.0
+    norm = [(v - lo) / span for v in sampled]
+    out: list[str] = []
+    last = len(_SPARK) - 1
+    for zi in range(rows):
+        floor = 1.0 - (zi + 1) / rows
+        cells: list[str] = []
+        for v in norm:
+            h = 0.0 if v <= floor else min(1.0, (v - floor) * rows)
+            ch = _SPARK[min(last, int(h * last + 1e-9))]
+            cells.append(_mix((24, 92, 88), (130, 255, 196), h, ch) if _tty() else ch)
+        out.append("".join(cells))
+    return out
+
+
+def _write_block(lines: Sequence[str], *, replace: int = 0) -> int:
+    """Paint `lines` in place. `replace` is how many rows to rewind first."""
+    if replace:
+        sys.stdout.write(f"\r\033[{replace}A\033[J")
+    for ln in lines:
+        sys.stdout.write(ln + "\n")
+    sys.stdout.flush()
+    return len(lines)
+
+
+def _play_canvas(*, frames: int = 12) -> None:
+    """Boot sculpture. Sleeps only on a live TTY; tests get one still frame."""
+    cols = _canvas_cols()
+    rows = CANVAS_ROWS
+    if _live_tty() and frames > 1:
+        painted = 0
+        for i in range(frames):
+            painted = _write_block(surface_lines(i * 0.09, rows=rows, cols=cols), replace=painted)
+            time.sleep(0.05)
+        return
+    if _tty():
+        _write_block(surface_lines(0.0, rows=rows, cols=cols))
+
+
 class Working:
-    """An in-place status line for work that blocks, with the elapsed time.
+    """An in-place canvas for work that blocks, with the elapsed time.
 
     ── WHY THIS EXISTS ────────────────────────────────────────────────────────
 
@@ -410,6 +540,9 @@ class Working:
     NOT A TTY, NOT A SPINNER. A CI log or a piped run gets one plain line at the
     start and the ordinary completion line at the end — carriage returns in a
     transcript are noise, and the transcript is the artifact there.
+
+    MOTION IS GATED ON `_live_tty()`. Tests that monkeypatch `_tty` still see
+    colour and glyphs, but they must not wait on frames.
     """
 
     def __init__(self, label: str, *, plain: str = "") -> None:
@@ -422,57 +555,43 @@ class Working:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = 0.0
-        self._painted = 0
+        self._nlines = 0
 
     @property
     def elapsed(self) -> float:
         return time.monotonic() - self._started
 
+    def _block(self, frame: int) -> list[str]:
+        t = f"{self.elapsed:.1f}s"
+        if _UNICODE_OK:
+            cols = _canvas_cols()
+            lines = [f"  {ln}" for ln in surface_lines(self.elapsed, rows=CANVAS_ROWS, cols=cols)]
+            lines.append(f"  {_spin_mark(frame)}  {self.label}  {dim(t)}")
+            return lines
+        return [f"  {_SPIN[frame % len(_SPIN)]} {self.label}  {t}"]
+
     def __enter__(self) -> Working:
         self._started = time.monotonic()
         if not _tty():
             return self
-        self._thread = threading.Thread(target=self._animate, daemon=True)
-        self._thread.start()
+        self._nlines = _write_block(self._block(0))
+        if _live_tty():
+            self._thread = threading.Thread(target=self._animate, daemon=True)
+            self._thread.start()
         return self
 
     def _animate(self) -> None:
-        i = 0
-        # Two lines when the stream can take a ridge: a hue-cycling star (Claude
-        # Code) over a travelling plateau (the thing this tool actually judges).
-        # One line of ASCII otherwise. CSI erase is safe here because colour
-        # already committed us to ANSI the moment `_tty()` was true.
-        wide = _UNICODE_OK
-        while True:
-            mark = _spin_mark(i)
-            t = f"{self.elapsed:.1f}s"
-            if wide:
-                ridge = _spark_paint(_scan_wave(self.elapsed, 32), width=32)
-                block = f"  {mark}  {self.label}\n     {ridge}  {dim(t)}"
-                plain = 8 + max(len(self.plain), 32 + 2 + len(t))
-            else:
-                block = f"  {_SPIN[i % len(_SPIN)]} {self.label}  {t}"
-                plain = len(f"  {_SPIN[0]} {self.plain}  {t}")
-            if i == 0:
-                sys.stdout.write(block)
-            elif wide:
-                sys.stdout.write("\r\033[2K\033[1A\r\033[2K" + block)
-            else:
-                sys.stdout.write("\r\033[2K" + block)
-            sys.stdout.flush()
-            self._painted = max(self._painted, plain)
-            if self._stop.wait(0.07):
-                return
+        i = 1
+        while not self._stop.wait(0.07):
+            self._nlines = _write_block(self._block(i), replace=self._nlines)
             i += 1
 
     def __exit__(self, *exc: object) -> None:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=0.5)
-            if _UNICODE_OK:
-                sys.stdout.write("\r\033[2K\033[1A\r\033[2K")
-            else:
-                sys.stdout.write("\r" + " " * (self._painted + 2) + "\r")
+        if self._nlines and _tty():
+            sys.stdout.write(f"\r\033[{self._nlines}A\033[J")
             sys.stdout.flush()
 
 
@@ -1037,6 +1156,43 @@ def _looks_like_returns(data: Any) -> bool:
         return len(data) > 0 and not isinstance(data, (str, bytes))
     except TypeError:
         return False
+
+
+def _unquote(spec: str) -> str:
+    spec = spec.strip()
+    if len(spec) >= 2 and spec[0] == spec[-1] and spec[0] in "\"'":
+        return spec[1:-1]
+    return spec
+
+
+_DATA_SUFFIXES = {".csv", ".parquet", ".pq", ".tsv", ".json", ".feather", ".pkl", ".pickle"}
+
+
+def classify_load(spec: str) -> str:
+    """Which door this token opens: `data`, `project`, or `universe`.
+
+    A path that exists wins because a file on disk is the most specific thing
+    the caller could have said. A data suffix is next, so `load prices.csv`
+    still routes to the file loader when the file is missing (and then fails
+    usefully there). A dotted name that is not a path is a module. Everything
+    else is a universe.
+    """
+    spec = _unquote(spec)
+    if not spec:
+        raise ValueError("load what? a file, a project module, or a universe name.")
+    path = pathlib.Path(spec).expanduser()
+    try:
+        if path.is_file():
+            return "data"
+    except OSError:
+        pass
+    if path.suffix.lower() in _DATA_SUFFIXES:
+        return "data"
+    if os.sep in spec or (os.altsep and os.altsep in spec):
+        return "data"
+    if "." in spec and not spec.startswith("."):
+        return "project"
+    return "universe"
 
 
 def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, Any]:
@@ -2137,6 +2293,30 @@ def _split_run(rest: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
+def _open_spec(kind: str, spec: str, session: Any, data: Any, backtest_fn: Any) -> tuple[Any, Any, str]:
+    """Load one door mid-session. Returns (data, backtest_fn, source label)."""
+    spec = _unquote(spec)
+    if kind == "project":
+        data, backtest_fn = load_project(spec)
+        say(dim(f"  loaded {spec}"))
+        return data, backtest_fn, spec
+    ns = argparse.Namespace(
+        project=None,
+        data=spec if kind == "data" else None,
+        universe=spec if kind == "universe" else None,
+        symbol=None,
+    )
+    loaded, fn = resolve_data(ns, session)
+    if loaded is not None:
+        data = loaded
+    if fn is not None:
+        backtest_fn = fn
+    label = f"{kind}:{spec}"
+    phrase = _shape_phrase(data)
+    say(dim(f"  loaded {label}" + (f" {DOT} {phrase}" if phrase else "")))
+    return data, backtest_fn, label
+
+
 def _apply_flags(flags: list[str], session: Any, data: Any, backtest_fn: Any) -> tuple[Any, Any]:
     """Load whatever `--data` / `--universe` / `--project` name, mid-session.
 
@@ -2223,9 +2403,9 @@ def _repl_gap(gap: str, name: str) -> str:
         + NEWLINE
         + "  From here, load it first:"
         + NEWLINE
-        + "      universe <name>            a universe you registered in the portal"
+        + "      load prices.csv            a local file"
         + NEWLINE
-        + "      data <file.csv>            a local file"
+        + "      load <universe>            registered in the portal"
         + NEWLINE
         + f"      run {name} --universe <name>"
         + NEWLINE
@@ -2277,22 +2457,29 @@ def _edits(a: str, b: str) -> int:
 
 
 def _help_text() -> str:
-    """The short list, rendered from the one declaration.
+    """The short list: how you actually run work.
 
-    This was a hand-maintained string and it went stale the way every third copy
-    of a list does: `--data` and `--universe` shipped and never appeared here,
-    `demo` existed and was not mentioned. See `commands.py` for why there is now
-    one source and four renderings.
+    The full directory is `commands`. Dumping every verb at `help` made the
+    session look like a program you had to learn rather than a prompt you
+    type at.
     """
-    from .commands import COMMANDS
-
-    width = max(len(_signature(c)) for c in COMMANDS if c.scope in ("both", "repl"))
-    lines = [""]
-    for c in COMMANDS:
-        if c.scope not in ("both", "repl"):
-            continue
-        lines.append(f"  {bold(_signature(c).ljust(width))}   {dim(c.purpose)}")
-    lines += ["", "  " + dim("`commands` for the full directory, `commands <verb>` for one.")]
+    rows = (
+        ("demo", "see it work offline, no account"),
+        ("login", "sign in, or login anthropic for a model"),
+        ("load <what>", "a CSV, a project module, or a universe"),
+        ("screen", "what is worth a look"),
+        ("validate", "is this real, once you count the tries"),
+        ("run <workflow>", "scripted: same data, same place twice"),
+        ("<a sentence>", "your model picks the path"),
+    )
+    width = max(len(cmd) for cmd, _ in rows)
+    lines = ["", "  " + dim("Type a question, or:")]
+    for cmd, why in rows:
+        lines.append(f"    {bold(cmd.ljust(width))}  {dim(why)}")
+    lines += [
+        "",
+        "  " + dim("Slash works too: /demo /login /load /help. `commands` for everything."),
+    ]
     return "\n".join(lines)
 
 
@@ -2523,7 +2710,7 @@ def ladder_lines(*, keyed: bool) -> list[str]:
     # variables reads like a manual — but a reader who cannot do the thing they
     # came for still needs to be told exactly how, without going to look it up.
     if not keyed:
-        out += ["", "  " + dim("Type ") + bold("key quantos") + dim(f" to sign in, or export {_ENV_KEY}.")]
+        out += ["", "  " + dim("Type ") + bold("login") + dim(f" to sign in, or export {_ENV_KEY}.")]
     elif not models and stranded:
         # ONE STEP AWAY, so say which step. This is the state the owner hit: a
         # key set, the SDK absent, and a boot screen that suggested getting a key.
@@ -2539,9 +2726,9 @@ def ladder_lines(*, keyed: bool) -> list[str]:
             "",
             "  "
             + dim("Type ")
-            + bold("key anthropic")
+            + bold("login anthropic")
             + dim(" (or ")
-            + bold("key openai")
+            + bold("login openai")
             + dim(") to ask questions in your own words."),
         ]
     return out
@@ -2663,17 +2850,17 @@ def _next_moves(*, keyed: bool, data: Any, project: str | None) -> list[str]:
     if not keyed:
         rows = [
             ("demo", "the offline half, no account"),
-            ("key quantos", "unlock workflows"),
-            ("key anthropic", "then ask in your own words"),
+            ("login", f"unlock workflows, or export {_ENV_KEY}"),
+            ("login anthropic", "then ask in your own words"),
         ]
     elif data is None:
         rows = [
-            ("universe <name>", "stored closes from the portal"),
-            ("--project research.momentum", "your module, your simulator"),
+            ("load prices.csv", "a local file"),
+            ("load <universe>", "stored closes from the portal"),
             ("demo", "see a grid survive, or not"),
         ]
         if not models:
-            rows[2] = ("key anthropic", "ask in your own words")
+            rows[2] = ("login anthropic", "ask in your own words")
     else:
         rows = [
             ("screen", "what is worth a look"),
@@ -2682,7 +2869,7 @@ def _next_moves(*, keyed: bool, data: Any, project: str | None) -> list[str]:
         if models:
             rows.append(('"which names are overbought?"', "the model picks the path"))
         else:
-            rows.append(("key anthropic", "ask in your own words"))
+            rows.append(("login anthropic", "ask in your own words"))
         if project:
             rows[1] = ("validate", "count the tries on this project")
     out = ["", "  " + dim("Next")]
@@ -2704,6 +2891,7 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
         return
 
     say("")
+    _play_canvas()
     say("  " + _accent(PIN) + "  " + bold("alphaengine") + "  " + dim(__version__))
     say("     " + dim("Find out what survives."))
     say("")
@@ -2729,10 +2917,6 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
         else:
             bits.append(dim("from your shell"))
     say("     " + f" {dim(DOT)} ".join(bits))
-
-    say("")
-    for line in ladder_lines(keyed=keyed):
-        say(line)
 
     for line in _next_moves(keyed=keyed, data=data, project=project):
         say(line)
@@ -2781,7 +2965,7 @@ def refused(exc: Any) -> None:
     say(dim("  credentials on purpose."))
     say("")
     say("  " + dim("Get one:") + f"  the portal {ARROW} Data {ARROW} API keys {ARROW} New key")
-    say("  " + dim("Then:") + "     " + bold("key quantos") + dim(f"   (or export {_ENV_KEY})"))
+    say("  " + dim("Then:") + "     " + bold("login") + dim(f"   (or export {_ENV_KEY})"))
     say("")
 
 
@@ -3371,9 +3555,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 names = state.book.names
                 say(dim("  empty book") if not names else "  sleeves: " + ", ".join(names))
             continue
-        if verb in ("key", "keys"):
-            if rest:
-                if enter_key(rest):
+        if verb in ("login", "key", "keys"):
+            which = rest
+            if not which and verb == "login" and not (os.environ.get(_ENV_KEY) or args.key):
+                which = "quantos"
+            if which:
+                if enter_key(which):
                     # The session was built with the old key, so rebuild it or
                     # the newly-entered credential would not be used until
                     # restart — which looks exactly like the key not working.
@@ -3383,34 +3570,21 @@ def cmd_repl(args: argparse.Namespace) -> int:
                 for ln in ladder_lines(keyed=bool(os.environ.get(_ENV_KEY) or args.key)):
                     say(ln)
                 say("")
-                say(dim("  `key quantos` · `key anthropic` · `key openai` · `key gemini` to enter one now"))
+                say(dim("  `login` · `login anthropic` · `login openai` · `login gemini`"))
             continue
-        if verb in ("universe", "data"):
+        if verb in ("load", "universe", "data", "project"):
             if not rest:
-                say(red(f"{verb} what? try `{verb} <name>`."))
+                hint = "load prices.csv  |  load research.momentum  |  load <universe>"
+                say(red(f"{verb} what? try `{hint}`."))
                 continue
+            kind = {"data": "data", "universe": "universe", "project": "project"}.get(
+                verb, classify_load(rest)
+            )
             try:
-                ns = argparse.Namespace(
-                    project=None,
-                    data=rest if verb == "data" else None,
-                    universe=rest if verb == "universe" else None,
-                )
-                loaded, _ = resolve_data(ns, session)
-                if loaded is not None:
-                    data = loaded
-                    loaded_project = f"{verb}:{rest}"
+                data, backtest_fn, loaded_project = _open_spec(kind, rest, session, data, backtest_fn)
             except (ProjectError, ValueError) as exc:
                 say(red(str(exc)))
             except Exception as exc:  # noqa: BLE001 - a server refusal, said plainly
-                say(red(str(exc)))
-            continue
-
-        if verb == "project":
-            try:
-                data, backtest_fn = load_project(rest)
-                loaded_project = rest
-                say(dim(f"project: {rest}"))
-            except ProjectError as exc:
                 say(red(str(exc)))
             continue
         # A COMMAND WORD AT THE START OF A SENTENCE IS STILL A SENTENCE.
@@ -3577,6 +3751,8 @@ def build_parser() -> argparse.ArgumentParser:
     tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
     sub.add_parser("logout", parents=[common], help="remove stored credentials")
+    lg = sub.add_parser("login", parents=[common], help="sign in, or enter a model key")
+    lg.add_argument("provider", nargs="?", default="quantos", help="quantos, anthropic, openai, ...")
     sub.add_parser("models", parents=[common], help="which model providers this machine can use")
     tr = sub.add_parser("trace", parents=[common], help="local model/run events for a run")
     tr.add_argument("run_id", nargs="?", help="run id; defaults to the latest local dump")
@@ -3678,6 +3854,12 @@ def cmd_logout(_args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_login(args: argparse.Namespace) -> int:
+    """Sign in from a shell, without opening a session first."""
+    which = getattr(args, "provider", None) or "quantos"
+    return 0 if enter_key(which) else 2
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -3700,6 +3882,7 @@ def main(argv: list[str] | None = None) -> int:
         "tonight": cmd_tonight,
         "demo": cmd_demo,
         "logout": cmd_logout,
+        "login": cmd_login,
         "commands": cmd_commands,
         "models": cmd_models,
         "trace": cmd_trace,

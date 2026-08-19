@@ -37,23 +37,37 @@ from ..core import (
     compute_var_cvar,
     cost_ladder,
     cpcv_score,
+    cs_rank,
+    cs_winsorize,
+    cs_zscore,
     deflated_sharpe,
+    denoise_cov,
     drawdown_anatomy,
+    ewma_cov,
+    fama_macbeth,
+    hrp_weights,
     information_coefficient,
     min_track_record_length,
+    neutralize,
     overlap_stats,
     pbo_cscv,
     performance_report,
     profile_data,
+    quantile_book,
     quantile_returns,
+    risk_parity_weights,
     run_backtest,
     score_backtest,
     screen_universe,
     series_values,
     signal_decay,
+    signal_icir,
     subperiod_stability,
     technical_features,
+    vol_target,
 )
+from ..core.allocate import cov_from_returns
+from ..core.covariance import cov_diagnostics, returns_matrix, triangle
 from ..core.walkforward import walk_forward
 from ..sweep import sweep as run_sweep
 
@@ -294,6 +308,15 @@ class StepExecutor:
             "compute.cointegrated_pairs": self._cointegrated_pairs,
             "compute.walk_forward": self._walk_forward,
             "compute.book_overlap": self._book_overlap,
+            "compute.panel_transform": self._panel_transform,
+            "compute.signal_icir": self._signal_icir,
+            "compute.fama_macbeth": self._fama_macbeth,
+            "compute.quantile_book": self._quantile_book,
+            "compute.ewma_cov": self._ewma_cov,
+            "compute.denoise_cov": self._denoise_cov,
+            "compute.hrp": self._hrp,
+            "compute.risk_parity": self._risk_parity,
+            "compute.vol_target": self._vol_target,
             # `emit.*` and `record.*` were vocabulary strings the server could
             # issue and this executor had no handler for, so a run that reached
             # one could never produce the artifact it existed to produce. The
@@ -924,6 +947,161 @@ class StepExecutor:
             ws["book"] = book
         candidate = params.get("candidate")
         return book.overlap_matrix(candidate)
+
+    # ── daily CS + book construction ───────────────────────────────────────
+
+    def _panel_and_controls(self) -> tuple[dict[str, Any], Any]:
+        data = self.data
+        if isinstance(data, dict) and isinstance(data.get("panel"), dict):
+            return data["panel"], data.get("controls")
+        if isinstance(data, dict) and data:
+            return data, None
+        raise UnsupportedOp(
+            "compute.panel_transform needs a {symbol: series} panel, or "
+            "{'panel': {...}, 'controls': {...}} for neutralize."
+        )
+
+    def _panel_transform(self, params: Figures, ws: Workspace) -> Figures:
+        panel, controls = self._panel_and_controls()
+        method = str(params.get("method") or "zscore").lower()
+        if method == "rank":
+            out = cs_rank(panel)
+        elif method == "winsorize":
+            out = cs_winsorize(
+                panel,
+                lower=float(params.get("lower") or 0.01),
+                upper=float(params.get("upper") or 0.99),
+            )
+        elif method == "neutralize":
+            out = neutralize(panel, controls if controls is not None else params.get("controls"))
+        elif method == "zscore":
+            out = cs_zscore(panel)
+        else:
+            raise UnsupportedOp("compute.panel_transform method is rank, zscore, winsorize, or neutralize.")
+        ws["panel"] = out.get("panel")
+        figures = {k: v for k, v in out.items() if k != "panel"}
+        return figures
+
+    def _signal_icir(self, params: Figures, ws: Workspace) -> Figures:
+        signal, prices = self._signal_panels()
+        out = dict(
+            signal_icir(
+                signal,
+                prices,
+                horizon=int(params.get("horizon") or 21),
+                method=str(params.get("method") or "spearman"),
+            )
+        )
+        ics = out.get("ic_by_period")
+        if isinstance(ics, list):
+            out["ic_by_period"] = [
+                {"p": p + 1, "ic": round(v, 6)}
+                for p, v in _bucketed([float(x) for x in ics], IC_POINTS, _mean)
+            ]
+        return out
+
+    def _fama_macbeth(self, params: Figures, ws: Workspace) -> Figures:
+        signal, prices = self._signal_panels()
+        out = dict(fama_macbeth(signal, prices, horizon=int(params.get("horizon") or 21)))
+        series = out.get("lambda_by_date")
+        if isinstance(series, list):
+            out["lambda_by_date"] = [
+                {"p": p + 1, "lambda": round(v, 6)}
+                for p, v in _bucketed([float(x) for x in series], IC_POINTS, _mean)
+            ]
+        return out
+
+    def _quantile_book(self, params: Figures, ws: Workspace) -> Figures:
+        signal, prices = self._signal_panels()
+        return dict(
+            quantile_book(
+                signal,
+                prices,
+                horizon=int(params.get("horizon") or 21),
+                quantiles=int(params.get("quantiles") or 5),
+            )
+        )
+
+    def _returns_panel(self) -> tuple[Any, list[str], list[str]]:
+        data = self.data
+        if isinstance(data, dict) and isinstance(data.get("returns"), dict):
+            data = data["returns"]
+        if not isinstance(data, dict) or not data:
+            raise UnsupportedOp(
+                "covariance and allocation need `data` as {symbol: returns}, "
+                "or {'returns': {symbol: returns}}."
+            )
+        R, names, skipped = returns_matrix(data)
+        if R.shape[0] < 2 or R.shape[1] < 2:
+            raise UnsupportedOp("need at least two names and two observations to build a covariance.")
+        return R, names, skipped
+
+    def _ewma_cov(self, params: Figures, ws: Workspace) -> Figures:
+        R, names, skipped = self._returns_panel()
+        cov = ewma_cov(R, lam=float(params.get("lam") or 0.94))
+        ws["cov"] = cov
+        ws["cov_names"] = names
+        out = cov_diagnostics(cov)
+        out["method"] = "ewma"
+        out["lam"] = float(params.get("lam") or 0.94)
+        out["n_obs"] = int(R.shape[0])
+        out["n_skipped"] = len(skipped)
+        tri = triangle(cov, names)
+        if tri is not None:
+            out["triangle"] = tri
+        return out
+
+    def _denoise_cov(self, params: Figures, ws: Workspace) -> Figures:
+        R, names, skipped = self._returns_panel()
+        sample = cov_from_returns(R, method=str(params.get("estimator") or "sample"))
+        out = denoise_cov(sample, n_obs=int(R.shape[0]))
+        cov = out.pop("cov")
+        ws["cov"] = cov
+        ws["cov_names"] = names
+        out.update(cov_diagnostics(cov))
+        out["n_skipped"] = len(skipped)
+        tri = triangle(cov, names)
+        if tri is not None:
+            out["triangle"] = tri
+        return out
+
+    def _hrp(self, params: Figures, ws: Workspace) -> Figures:
+        R, names, skipped = self._returns_panel()
+        method = str(params.get("cov") or "sample")
+        if method in ("denoise", "mp"):
+            raw = cov_from_returns(R, method="sample")
+            cov = denoise_cov(raw, n_obs=int(R.shape[0]))["cov"]
+        else:
+            cov = cov_from_returns(R, method=method, lam=float(params.get("lam") or 0.94))
+        ws["cov"] = cov
+        out = hrp_weights(cov, names=names)
+        out["n_skipped"] = len(skipped)
+        out["n_obs"] = int(R.shape[0])
+        out["n_trials"] = len(names)
+        out["n_trials_source"] = "derived_from_names"
+        return out
+
+    def _risk_parity(self, params: Figures, ws: Workspace) -> Figures:
+        R, names, skipped = self._returns_panel()
+        cov = cov_from_returns(R, method=str(params.get("cov") or "lw"))
+        ws["cov"] = cov
+        out = risk_parity_weights(cov, names=names)
+        out["n_skipped"] = len(skipped)
+        out["n_obs"] = int(R.shape[0])
+        return out
+
+    def _vol_target(self, params: Figures, ws: Workspace) -> Figures:
+        returns = _as_returns(self.data)
+        if returns is None:
+            raise UnsupportedOp("compute.vol_target needs a return series.")
+        return dict(
+            vol_target(
+                returns,
+                target=float(params.get("target") or 0.10),
+                ewma_lambda=float(params.get("ewma_lambda") or 0.94),
+                periods_per_year=int(params.get("periods_per_year") or 252),
+            )
+        )
 
     # ── emit / record ──────────────────────────────────────────────────────
     #

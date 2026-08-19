@@ -31,13 +31,17 @@ everyone who does not need them:
     from alphaengine.core.pairs import find_cointegrated_pairs
 """
 
+from .allocate import hrp_weights, risk_parity_weights, vol_target
 from .backtest import run_backtest, score_backtest
+from .covariance import denoise_cov, detone_cov, ewma_cov, ledoit_wolf_cov
+from .cross_section import fama_macbeth, quantile_book
+from .panel import cs_rank, cs_winsorize, cs_zscore, neutralize
 from .performance import performance_report
 from .profile import profile_data
 from .risk import compute_var_cvar
 from .screen import screen_universe
 from .series_shapes import series_values
-from .signals import information_coefficient, quantile_returns, signal_decay
+from .signals import information_coefficient, quantile_returns, signal_decay, signal_icir
 from .stress import cost_ladder, drawdown_anatomy, overlap_stats, subperiod_stability
 from .technical import technical_features
 from .validation import (
@@ -69,8 +73,24 @@ __all__ = [
     "screen_universe",
     # signal evaluation: does a supplied signal carry information at all
     "information_coefficient",
+    "signal_icir",
     "quantile_returns",
     "signal_decay",
+    # cross-section: make a factor comparable, then ask what it is worth
+    "cs_rank",
+    "cs_zscore",
+    "cs_winsorize",
+    "neutralize",
+    "fama_macbeth",
+    "quantile_book",
+    # covariance and allocation: overnight book construction
+    "ewma_cov",
+    "ledoit_wolf_cov",
+    "denoise_cov",
+    "detone_cov",
+    "hrp_weights",
+    "risk_parity_weights",
+    "vol_target",
     # stress and overlap: where a validated result breaks, and whether an
     # idea is the book again
     "subperiod_stability",

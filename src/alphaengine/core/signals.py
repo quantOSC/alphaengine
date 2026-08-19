@@ -39,6 +39,7 @@ from typing import Any
 
 import numpy as np
 
+from .panel import newey_west_tstat
 from .series_shapes import series_values
 
 #: The longest per-period sequence a reading reports, and the longest bounded
@@ -147,12 +148,36 @@ def _forward(P: np.ndarray, t: int, horizon: int) -> np.ndarray:
     return out
 
 
+def _cross_pearson(signal_row: np.ndarray, fwd_row: np.ndarray) -> float | None:
+    """Pearson correlation of one cross-section, or None when degenerate."""
+    ok = np.isfinite(signal_row) & np.isfinite(fwd_row)
+    if int(ok.sum()) < MIN_NAMES:
+        return None
+    s, f = signal_row[ok], fwd_row[ok]
+    if np.ptp(s) == 0 or np.ptp(f) == 0:
+        return None
+    denom = float(np.std(s) * np.std(f))
+    if denom == 0:
+        return None
+    return float(np.mean((s - s.mean()) * (f - f.mean())) / denom)
+
+
 def _period_ics(S: np.ndarray, P: np.ndarray, horizon: int) -> list[float]:
     """One IC per NON-OVERLAPPING horizon window, oldest first."""
     depth = S.shape[0]
     ics: list[float] = []
     for t in range(0, depth - horizon, horizon):
         ic = _cross_ic(S[t], _forward(P, t, horizon))
+        if ic is not None:
+            ics.append(ic)
+    return ics
+
+
+def _period_ics_pearson(S: np.ndarray, P: np.ndarray, horizon: int) -> list[float]:
+    depth = S.shape[0]
+    ics: list[float] = []
+    for t in range(0, depth - horizon, horizon):
+        ic = _cross_pearson(S[t], _forward(P, t, horizon))
         if ic is not None:
             ics.append(ic)
     return ics
@@ -194,6 +219,65 @@ def information_coefficient(signal: dict, prices: dict, *, horizon: int = DEFAUL
         "n_skipped": len(skipped),
         "skipped": skipped[:MAX_PERIODS],
         "horizon": horizon,
+    }
+
+
+def signal_icir(
+    signal: dict,
+    prices: dict,
+    *,
+    horizon: int = DEFAULT_HORIZON,
+    method: str = "spearman",
+) -> dict:
+    """Information coefficient, its ratio, and a Newey-West t-stat.
+
+    ICIR = mean(IC) / std(IC) * sqrt(n_periods), on the SAME non-overlapping
+    dates `information_coefficient` uses. Overlapping windows would inflate the
+    t-stat in the direction that flatters, which is the failure this module
+    already refuses.
+
+    Spearman is the default so a ranking question stays a ranking question.
+    Pearson is available as `method="pearson"` and is a different measurement,
+    reported separately rather than mixed into the Spearman figures.
+
+    The original `information_coefficient` return shape is untouched.
+    """
+    horizon = max(1, int(horizon))
+    method = str(method or "spearman").lower()
+    if method not in ("spearman", "pearson"):
+        raise PanelShapeError("method is 'spearman' or 'pearson'.")
+    S, P, names, skipped = _tail_panel(signal, prices, need=horizon + 1)
+    if names:
+        ics = _period_ics_pearson(S, P, horizon) if method == "pearson" else _period_ics(S, P, horizon)
+    else:
+        ics = []
+
+    mean_ic: float | None = None
+    t_stat: float | None = None
+    t_stat_nw: float | None = None
+    icir: float | None = None
+    if ics:
+        arr = np.asarray(ics, dtype=float)
+        mean_ic = round(float(arr.mean()), _RND)
+        if len(ics) > 1 and float(arr.std(ddof=1)) > 0:
+            sd = float(arr.std(ddof=1))
+            t_stat = round(float(arr.mean() / (sd / np.sqrt(len(ics)))), _RND)
+            icir = round(float(arr.mean() / sd * np.sqrt(len(ics))), _RND)
+        nw = newey_west_tstat(arr, lags=1)
+        t_stat_nw = None if nw is None else round(float(nw), _RND)
+
+    return {
+        "mean_ic": mean_ic,
+        "icir": icir,
+        "ic_t_stat": t_stat,
+        "ic_t_stat_nw": t_stat_nw,
+        "n_periods": len(ics),
+        "ic_by_period": [round(v, _RND) for v in ics[-MAX_PERIODS:]],
+        "n_names": len(names),
+        "n_skipped": len(skipped),
+        "skipped": skipped[:MAX_PERIODS],
+        "horizon": horizon,
+        "method": method,
     }
 
 
@@ -282,6 +366,7 @@ def signal_decay(signal: dict, prices: dict, *, horizons: tuple[int, ...] = (1, 
 
 __all__ = [
     "information_coefficient",
+    "signal_icir",
     "quantile_returns",
     "signal_decay",
     "PanelShapeError",

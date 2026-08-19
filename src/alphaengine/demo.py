@@ -174,11 +174,12 @@ def run() -> int:
     if ui._tty():
         sharpes = [t.sharpe for t in result.trials if t.failed is None]
         ui.say("")
+        for ln in ui.ridge_lines(sharpes or [0.0], rows=6, cols=40):
+            ui.say("  " + ln)
         ui.say(
             f"  {ui._accent(ui.ON)}  {verdict.get('verdict')}  "
             + ui.dim(f"{result.n_trials} trials {ui.DOT} {surface.get('shape')}")
         )
-        ui.say("     " + ui._spark_paint(sharpes or [0.0], width=32, cool=True))
         ui.say("     " + ui.dim("trial Sharpes across the grid"))
     return 0
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -306,7 +307,7 @@ def test_boot_warns_when_there_is_no_key(capsys, monkeypatch):
     cli.boot("https://example.invalid", project=None, data=None, keyed=False)
     printed = capsys.readouterr().out
     assert "QUANTOS_API_KEY" in printed
-    assert "key quantos" in printed
+    assert "login" in printed
 
 
 def test_a_long_server_url_does_not_overflow_the_box(monkeypatch):
@@ -344,6 +345,58 @@ def test_the_working_pulse_does_not_claim_a_duration():
     b = cli._pulse(1.7, width=14)
     assert len(a) == len(b) == 14
     assert a != b
+
+
+def test_live_tty_is_off_under_pytest():
+    """Motion must not run inside the test suite even if `_tty` is patched."""
+    assert cli._live_tty() is False
+
+
+def test_boot_does_not_sleep_when_tty_is_faked(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    t0 = time.monotonic()
+    cli.boot("https://example.invalid", project=None, data=None, keyed=False)
+    capsys.readouterr()
+    assert time.monotonic() - t0 < 0.4, "faked TTY must not play boot frames"
+
+
+def test_working_does_not_sleep_when_tty_is_faked(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_tty", lambda: True)
+    t0 = time.monotonic()
+    with cli.Working("x", plain="x"):
+        pass
+    capsys.readouterr()
+    assert time.monotonic() - t0 < 0.4
+
+
+def test_the_canvas_is_a_rectangle():
+    rows = cli.surface_lines(0.0, rows=8, cols=40)
+    assert len(rows) == 8
+    widths = {cli._visible_len(ln) for ln in rows}
+    assert widths == {40}
+
+
+def test_a_later_frame_moves():
+    a = cli.surface_lines(0.0, rows=6, cols=24)
+    b = cli.surface_lines(1.7, rows=6, cols=24)
+    assert a != b
+
+
+def test_classify_load_picks_the_door(tmp_path):
+    csv = tmp_path / "prices.csv"
+    csv.write_text("date,close\n2020-01-01,1\n", encoding="utf-8")
+    assert cli.classify_load(str(csv)) == "data"
+    assert cli.classify_load("returns.parquet") == "data"
+    assert cli.classify_load("research.momentum") == "project"
+    assert cli.classify_load("alphaengine.demo") == "project"
+    assert cli.classify_load("sp500") == "universe"
+    assert cli.classify_load('"core names"') == "universe"
+
+
+def test_the_parser_accepts_login():
+    p = cli.build_parser()
+    assert p.parse_args(["login"]).command == "login"
+    assert p.parse_args(["login", "anthropic"]).provider == "anthropic"
 
 
 def test_fit_keeps_both_ends_because_the_tail_identifies_the_host():
@@ -404,7 +457,7 @@ def test_without_a_quantos_key_the_ladder_names_the_variable(monkeypatch):
     out = _ladder(monkeypatch, keyed=False, model=None)
     # The rungs stay in plain language; the ONE actionable line names the
     # command and the variable, so a locked reader is never left guessing.
-    assert "key quantos" in out
+    assert "login" in out
     assert "QUANTOS_API_KEY" in out
     # And the agent rung says WHY it is out of reach, rather than naming a
     # second credential the user cannot use yet.
@@ -413,7 +466,7 @@ def test_without_a_quantos_key_the_ladder_names_the_variable(monkeypatch):
 
 def test_with_a_quantos_key_the_agent_rung_names_the_model_variable(monkeypatch):
     out = _ladder(monkeypatch, keyed=True, model=None)
-    assert "key anthropic" in out or "key openai" in out
+    assert "login anthropic" in out or "login openai" in out
 
 
 def test_with_both_keys_every_rung_is_unlocked(monkeypatch):
@@ -507,7 +560,7 @@ def test_a_401_explains_that_a_browser_login_is_not_a_cli_credential(capsys, mon
     out = capsys.readouterr().out
     assert "portal login does not reach this process" in out
     assert "Data" in out and "API keys" in out, "it must say where the key comes from"
-    assert "key quantos" in out, "and how to enter one"
+    assert "Then:" in out and "QUANTOS_API_KEY" in out, "and how to enter one"
 
 
 def test_a_403_is_treated_the_same_way(capsys, monkeypatch):
@@ -522,6 +575,7 @@ def test_a_non_auth_refusal_keeps_the_plain_message(capsys, monkeypatch):
     cli.refused(_Refusal(422, "workflow inputs invalid"))
     out = capsys.readouterr().out
     assert "workflow inputs invalid" in out
+    assert "login" not in out
     assert "key quantos" not in out
 
 
@@ -1246,8 +1300,8 @@ def test_the_refusal_speaks_the_session_s_language_not_the_shell_s():
     gap = "screen_universe needs `universe`, and none was loaded." + chr(10) + "  more"
     out = cli._repl_gap(gap, "screen_universe")
 
-    assert "universe <name>" in out
-    assert "data <file.csv>" in out
+    assert "load prices.csv" in out
+    assert "load <universe>" in out
     assert "run screen_universe --universe" in out
     # The one thing it must NOT say in here.
     assert "alphaengine run" not in out

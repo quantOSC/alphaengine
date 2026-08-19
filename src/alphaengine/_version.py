@@ -62,4 +62,13 @@ is what a changed figure costs. The API may still move underneath it.
 # what a step found, a composer instead of a dashboard. Same rungs, same
 # doors, same refusals. The published artefact is a new wheel because 0.6.0
 # already left the building.
-__version__ = "0.6.1"
+#
+# 0.7.0 IS NEW PUBLIC FIGURES, AND A SIMPLER OS AROUND THEM. Existing DSR /
+# PBO / performance / screen goldens stay byte-identical. The artefact grew
+# the daily cross-section (rank, z-score, winsorize, neutralize, ICIR,
+# Fama-MacBeth, quantile book with turnover) and the overnight book
+# (EWMA / Ledoit-Wolf / Marchenko-Pastur covariance, HRP, risk parity, vol
+# target), plus a living parameter-surface canvas and one-verb `login` /
+# `load`. New numbers are a public contract from this release; old numbers
+# did not move.
+__version__ = "0.7.0"

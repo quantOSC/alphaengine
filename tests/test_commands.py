@@ -149,11 +149,13 @@ def test_an_unknown_verb_suggests_rather_than_shrugs(capsys):
     assert "commands" in out
 
 
-def test_the_short_help_covers_every_session_verb():
+def test_the_short_help_names_the_path_not_every_verb():
+    """`help` is how you start. `commands` is the directory."""
     text = cli._help_text()
-    for c in COMMANDS:
-        if c.scope in ("both", "repl"):
-            assert c.verb in text, f"{c.verb} works in a session and is not in `help`"
+    for verb in ("demo", "login", "load", "screen", "validate", "run"):
+        assert verb in text, f"{verb} is the short path and missing from help"
+    assert "commands" in text
+    assert "Type a question" in text
 
 
 def test_nothing_the_cli_prints_carries_an_em_dash():

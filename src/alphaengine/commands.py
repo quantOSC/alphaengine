@@ -268,24 +268,36 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         examples=("alphaengine workflows",),
     ),
     Command(
-        verb="key",
+        verb="login",
         group="start",
         args="[quantos | anthropic | openai | gemini | groq | azure | openrouter | gateway]",
-        scope="repl",
-        purpose="enter a credential now, or see which rungs are unlocked",
+        scope="both",
+        purpose="sign in, or login anthropic for a model key",
         body=(
             "Three rungs and each is useful without the one above it:\n\n"
             "  the maths      yours, offline, always. No account.\n"
             "  workflows      a QuantOS `ae_live_` key. The loop, end to end.\n"
             "  ask anything   your OWN model key. Plain English in.\n\n"
-            "Bare `key` shows which are lit. `key quantos` prompts for one and "
-            "rebuilds the session, because a session holds its credential and a key "
-            "entered without that looks exactly like a key that does not work.\n\n"
+            "Bare `login` signs into QuantOS when you are not already. "
+            "`login anthropic` (or openai, gemini, groq, ...) prompts for a "
+            "model key. From a shell: `alphaengine login`.\n\n"
             "Model keys are read from the environment at call time and handed to "
             "the provider. You can also stay signed in: that writes a mode-0600 file "
             "under your user profile, never the project directory."
         ),
-        examples=("key", "key quantos", "key anthropic", "key gemini"),
+        examples=("login", "login anthropic", "alphaengine login"),
+    ),
+    Command(
+        verb="key",
+        group="start",
+        args="[quantos | anthropic | openai | gemini | groq | azure | openrouter | gateway]",
+        scope="repl",
+        purpose="same as login: enter a credential, or see which rungs are lit",
+        body=(
+            "Kept because muscle memory. Prefer `login`. Bare `key` still shows "
+            "the rungs; `key anthropic` still prompts."
+        ),
+        examples=("key", "key quantos", "key anthropic"),
     ),
     Command(
         verb="commands",
@@ -402,11 +414,30 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     ),
     # ── bring your data ────────────────────────────────────────────────────
     Command(
+        verb="load",
+        group="data",
+        args="<file | module | universe>",
+        scope="repl",
+        purpose="a CSV, a project module, or a portal universe",
+        body=(
+            "One verb, three shapes. The token decides the door:\n\n"
+            "  prices.csv              a local file (wide, long, or one series)\n"
+            "  research.momentum       a module exposing `data` and `backtest_fn`\n"
+            "  sp500                   a universe you registered in the portal\n\n"
+            "A path that exists, or a data suffix (.csv, .parquet, ...), is a file. "
+            "A dotted name is a module. Anything else is a universe.\n\n"
+            "`data`, `project` and `universe` still work. Prefer `load`.\n\n"
+            "The only door that can supply a simulator is a module, which is why "
+            "`validate` needs `load research.momentum` and a screen does not."
+        ),
+        examples=("load prices.csv", "load research.momentum", "load sp500"),
+    ),
+    Command(
         verb="universe",
         group="data",
         args="<name>",
         scope="repl",
-        purpose="load a universe you registered in the portal, with its closes",
+        purpose="same as load: a universe registered in the portal",
         body=(
             "Brings the closes you stored with it. That is your own upload, "
             "decrypted back to your own account, not us fetching market data.\n\n"
@@ -424,7 +455,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="<file>",
         scope="repl",
-        purpose="load a local CSV or parquet without leaving the session",
+        purpose="same as load: a local CSV or parquet",
         body=(
             "Wide (date,AAPL,MSFT), long (date,symbol,close), or a single series. "
             "The shape is decided by the header and nothing else; a file it cannot "
@@ -437,7 +468,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="<module>",
         scope="repl",
-        purpose="load `data` and `backtest_fn` from a module of yours",
+        purpose="same as load: a module with data and backtest_fn",
         body=(
             "The ONLY door that can supply a simulator, because a simulator is code, "
             "which is why `validate_study` needs this one and the other three "
@@ -469,7 +500,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="session",
         args="",
         scope="repl",
-        purpose="the short list",
+        purpose="the short list: demo, login, load, then a question",
         examples=("help",),
     ),
     Command(

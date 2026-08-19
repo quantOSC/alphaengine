@@ -3,7 +3,8 @@
 ## Cursor Cloud specific instructions
 
 AlphaEngine is a pure-Python CLI + library (`alphaengine`) for validated quant
-research. There is no GUI; all interaction is via the terminal or
+research. There is no windowed GUI: the product is a terminal session (an
+animated parameter-surface canvas at boot and while Working) plus
 `import alphaengine`.
 
 ### Environment
@@ -29,12 +30,20 @@ research. There is no GUI; all interaction is via the terminal or
 - **Three rungs.** `demo` and the importable library are fully offline. Workflow
   CLI verbs (`diagnose`, `screen`, …, `run <workflow>`) need a portal
   `ae_live_` key (`QUANTOS_API_KEY`). Plain-English mode also needs a **model**
-  key. Any OpenAI-compatible key works: Anthropic, OpenAI (`OPENAI_BASE_URL` for
+  key. In a session: `login` (QuantOS) or `login anthropic`. `key` is the same
+  verb. Any OpenAI-compatible key works: Anthropic, OpenAI (`OPENAI_BASE_URL` for
   gateways), Gemini, Groq, OpenRouter, Azure, or
   `ALPHAENGINE_API_KEY`+`ALPHAENGINE_BASE_URL`. `alphaengine models` lists what
   this machine can actually use. Keys may persist in
   `~/.config/alphaengine/credentials.json` (mode 0600) if the user says yes at
-  `key <provider>`; env always wins. LLM keys are never sent to QuantOS.
+  `login`; env always wins. LLM keys are never sent to QuantOS.
+- **One data verb.** `load prices.csv` / `load research.momentum` / `load sp500`
+  unifies `--data` / `--project` / `--universe`. The old verbs still work.
+- **Motion is a real TTY.** Boot and `Working` paint a tall parameter-surface
+  canvas. Tests that monkeypatch `_tty` get colour without frame sleeps
+  (`_live_tty` gates motion). Do not add `time.sleep` on the `_tty()` path.
+  This image often has `NO_COLOR=1`; unset it to see the canvas
+  (`env -u NO_COLOR COLORTERM=truecolor TERM=xterm-256color`).
 - **A stop / `marginal` verdict exits 0.** Only a step that could not execute
   exits non-zero. Unauthenticated workflow calls exit 2.
 - **Data never leaves.** Executor and study-report guards refuse lists longer
@@ -45,10 +54,15 @@ research. There is no GUI; all interaction is via the terminal or
   keys. `alphaengine trace` reads the local dump.
 - **Goldens are a public contract.** Do not "fix" a golden to land a speedup;
   that is a version bump (`_version.py`).
-- **New compute ops** (`backtest`, `score_backtest`, `cpcv`, `factors`, `pairs`,
-  `cointegrated_pairs`, `walk_forward`, `book_overlap`) are on the executor.
-  The portal must offer them in a workflow graph or they sit unused; the CLI
-  remains useful without them.
+- **Compute ops on the executor** include the 0.6 workflow set (`backtest`,
+  `score_backtest`, `cpcv`, `factors`, `pairs`, `cointegrated_pairs`,
+  `walk_forward`, `book_overlap`) and the 0.7 CS / book set
+  (`panel_transform`, `signal_icir`, `fama_macbeth`, `quantile_book`,
+  `ewma_cov`, `denoise_cov`, `hrp`, `risk_parity`, `vol_target`). Panels and
+  covariance matrices stay in the workspace; figures go over the wire. The
+  portal must offer an op in a workflow graph or it sits unused; the CLI
+  remains useful without them. Short names in a panel are skipped and counted,
+  they do not shrink the rest of the book.
 - `sweep(..., jobs=N)` defaults to 1. Greater than 1 is opt-in and must keep
   trial index identity, including failures.
 - The `connectors` extra is lazy: parquet via `pyarrow`, HTTP via `httpx` to a
