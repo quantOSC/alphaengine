@@ -116,6 +116,9 @@ class AgentDriver:
         goal: str,
         on_thought: Callable[[str], None] | None = None,
         max_steps: int = 60,
+        sink: Any | None = None,
+        provider: str | None = None,
+        model: str | None = None,
     ) -> None:
         self.think = think
         self.goal = goal
@@ -125,6 +128,21 @@ class AgentDriver:
         self.on_thought = on_thought or (lambda _s: None)
         self.max_steps = max_steps
         self.history: list[str] = []
+        self.sink = sink
+        self.provider = provider
+        self.model = model
+
+    def as_choice(self) -> Any:
+        """Index-bound `choose` for `alphaengine.agent.AgentDriver`.
+
+        The library driver is the primitive: it takes `(permitted, figures) -> int`
+        and cannot name an op. This wrapper is the prompt+goal layer that USES it.
+        """
+
+        def choose(permitted: list[Figures], _figures: Figures) -> int:
+            return self.pick(permitted)
+
+        return choose
 
     # ── the one decision ───────────────────────────────────────────────────
 
@@ -146,19 +164,36 @@ class AgentDriver:
             f"  {i}. {p.get('op', '?')}" + (f"  {_brief(p.get('params'))}" if p.get("params") else "")
             for i, p in enumerate(permitted)
         )
-        raw = self.think(
-            _PROMPT.format(
-                goal=self.goal,
-                history="\n".join(f"  - {h}" for h in self.history[-12:]) or "  (nothing yet)",
-                options=options,
-            )
+        prompt = _PROMPT.format(
+            goal=self.goal,
+            history="\n".join(f"  - {h}" for h in self.history[-12:]) or "  (nothing yet)",
+            options=options,
         )
+        raw = self.think(prompt)
         idx, why = _parse_choice(raw, len(permitted))
         if why:
             self.on_thought(why)
             self.history.append(f"chose {permitted[idx].get('op')}: {why}")
         else:
             self.history.append(f"chose {permitted[idx].get('op')}")
+        if self.sink is not None:
+            import hashlib
+
+            from ..events import make_event
+
+            self.sink.emit(
+                make_event(
+                    "pick",
+                    provider=self.provider,
+                    model=self.model,
+                    choice=idx,
+                    why=why,
+                    workflow=str(permitted[idx].get("op") or ""),
+                    agency="exploratory",
+                    prompt_hash=hashlib.sha256(prompt.encode()).hexdigest()[:16],
+                    prompt_chars=len(prompt),
+                )
+            )
         return idx
 
     # ── the loop ───────────────────────────────────────────────────────────

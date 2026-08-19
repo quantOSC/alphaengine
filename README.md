@@ -112,8 +112,11 @@ distinction is the whole of the data boundary below.
 | `gaps` | what your record says is UNANSWERED, and what closes each one | shell + session |
 | `tonight [--budget N]` | what would run unattended tonight, without running any of it | shell + session |
 | `workflows` | what the server offers, what each needs, and which reproduce | shell + session |
-| `key [quantos \| anthropic \| openai]` | enter a credential now, or see which rungs are unlocked | session |
+| `key [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | enter a credential now, or see which rungs are unlocked | session |
 | `commands [verb]` | this directory, or one command in full | shell + session |
+| `models` | which model providers this machine can actually use | shell + session |
+| `model [<provider[:name]>]` | pin the model for this session, or show the pin | session |
+| `trace [run_id]` | local model/run events for a run, hashed prompts only | shell + session |
 
 ### Do the work
 
@@ -135,8 +138,9 @@ distinction is the whole of the data boundary below.
 
 | Command | Does | Where |
 |---|---|---|
+| `book [<name> \| status]` | show or load sleeves on the multi-strategy book | session |
 | `universe <name>` | load a universe you registered in the portal, with its closes | session |
-| `data <file.csv>` | load a local CSV without leaving the session | session |
+| `data <file>` | load a local CSV or parquet without leaving the session | session |
 | `project <module>` | load `data` and `backtest_fn` from a module of yours | session |
 
 ### Session
@@ -169,6 +173,7 @@ distinction is the whole of the data boundary below.
 | `--label TEXT` | what to call the artifact this run produces |
 | `--input K=V` | a workflow input; repeatable |
 | `--quiet` | only the result, no step narration |
+| `--stream` | print the answer once the citation guard has passed |
 | `--limit N` | how many rows to show (default 25) |
 | `--budget N` | how many runs a night is worth (default 3) |
 
@@ -194,6 +199,8 @@ alphaengine commands
 alphaengine run screen_universe --universe sp500
 alphaengine run size_position --data returns.csv
 alphaengine run validate_study --project research.momentum
+alphaengine models
+alphaengine trace
 alphaengine logout
 alphaengine version
 ```

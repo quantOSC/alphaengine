@@ -458,6 +458,14 @@ class Session:
     # object served now runs through assignments and the deliver pin instead.
     # See the 0.5.0 note in the README.
 
+    def post_event(self, run_id: str, event: dict[str, Any]) -> Figures:
+        """Allowlisted model/run event. 404-tolerant at the sink, not here.
+
+        The producer (`events.EventSink`) swallows a missing route so a research
+        run never fails because the portal is an older build.
+        """
+        return self._post(f"/api/harness/runs/{run_id}/events", event)
+
     # ── transport ──────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Figures | None = None) -> Figures:
         url = f"{self.base_url.rstrip('/')}{path}"

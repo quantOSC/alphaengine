@@ -912,9 +912,9 @@ def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, An
         data, backtest_fn = load_project(args.project)
 
     if getattr(args, "data", None):
-        from .loaders import load_csv
+        from .connectors import load_panel
 
-        loaded = load_csv(args.data)
+        loaded = load_panel(args.data)
         # A project module that also defined `data` keeps it: the explicit module
         # is the more specific statement, and silently replacing it would make
         # two flags fight where the user can see neither winning.
@@ -2621,35 +2621,31 @@ def is_auth_error(exc: Any) -> bool:
     return getattr(exc, "status", None) in (401, 403)
 
 
+_KEY_PROMPTS: dict[str, tuple[str, str]] = {
+    "quantos": ("QUANTOS_API_KEY", "QuantOS key (ae_live_…) — created in the portal, on Data"),
+    "anthropic": ("ANTHROPIC_API_KEY", "Anthropic key (sk-ant-…)"),
+    "openai": ("OPENAI_API_KEY", "OpenAI key (sk-…) or any OpenAI-compatible key"),
+    "gemini": ("GEMINI_API_KEY", "Gemini / Google AI key"),
+    "google": ("GOOGLE_API_KEY", "Google AI key"),
+    "groq": ("GROQ_API_KEY", "Groq key"),
+    "openrouter": ("OPENROUTER_API_KEY", "OpenRouter key"),
+    "azure": ("AZURE_OPENAI_API_KEY", "Azure OpenAI key (also set AZURE_OPENAI_ENDPOINT)"),
+    "gateway": ("ALPHAENGINE_API_KEY", "Private gateway key (also set ALPHAENGINE_BASE_URL)"),
+}
+
+
 def enter_key(which: str) -> bool:
     """Prompt for a key and hold it FOR THIS SESSION ONLY.
 
-    ── WHY THIS DOES NOT PERSIST ANYTHING ─────────────────────────────────────
-    #
-    The convenient version writes to a config file, and then a credential that
-    can spend the user's money lives in plaintext on disk, survives the session,
-    and gets copied with the project directory. We are not in the business of
-    holding customer keys — that is the whole reason `AgentDriver` takes a
-    callable and has no key field — and a dotfile would give that up for the
-    sake of saving one `export`.
-
-    So this sets the variable in THIS PROCESS. Close the terminal and it is
-    gone. For a key you want every time, `export` it in your shell profile,
-    which is a thing your shell already manages properly.
-
-    Read with `getpass` so it does not echo and does not land in scrollback.
+    Persistence is optional and lives in `auth.save_key` (mode 0600, user config
+    dir). QuantOS never holds the key.
     """
     import getpass
 
-    if which == "quantos":
-        env, what = _ENV_KEY, "QuantOS key (ae_live_…) — created in the portal, on Data"
-    elif which == "anthropic":
-        env, what = "ANTHROPIC_API_KEY", "Anthropic key (sk-ant-…)"
-    elif which == "openai":
-        env, what = "OPENAI_API_KEY", "OpenAI key (sk-…)"
-    else:
-        say(red(f"unknown key {which!r} — try: quantos, anthropic, openai"))
+    if which not in _KEY_PROMPTS:
+        say(red(f"unknown key {which!r} — try: {', '.join(_KEY_PROMPTS)}"))
         return False
+    env, what = _KEY_PROMPTS[which]
 
     say(dim(f"  {what}"))
     try:
@@ -2726,6 +2722,7 @@ def _ask(
     without being unsafe.
     """
     from .client import AgentDriver, AgentRefusal, Offline, ServerError
+    from .events import EventSink
     from .model import NoModelConfigured, build_think
 
     # ── NOT STREAMED, AND THE REASON IS WHAT THE CALL RETURNS ──────────────
@@ -2744,6 +2741,9 @@ def _ask(
     except NoModelConfigured as exc:
         say(yellow(str(exc)))
         return None
+
+    provider, _, model_name = label.partition("/")
+    sink = EventSink(session=session if os.environ.get(_ENV_KEY) else None)
 
     try:
         catalogue = session.workflows()
@@ -2767,6 +2767,9 @@ def _ask(
         think,
         goal=request,
         on_thought=lambda why: say(f"  {dim('agent  ' + DOT)}  {dim(why)}"),
+        sink=sink,
+        provider=provider or None,
+        model=model_name or None,
     )
     options = [{"op": w.get("name", "?"), "params": {"agency": w.get("agency")}} for w in catalogue]
     try:
@@ -2843,6 +2846,7 @@ def _ask(
             workspace_id=workspace_id,
             **({"grid": project_grid()} if project_grid() else {}),
         )
+        sink.bind(run.run_id)
         driver.drive(run)
     except Offline:
         _explain_offline(url)
@@ -2857,7 +2861,7 @@ def _ask(
     _report(run)
     if run.status == "closed":
         _publish_signals(session, run, workspace_id=workspace_id, label=None)
-    _answer(request, run, think)
+    _answer(request, run, think, sink=sink, provider=provider, model=model_name)
     # SAID AT THE END, WHERE IT TRAVELS WITH THE RESULT. A study whose path was
     # chosen by a model is a different object from one whose path was fixed in
     # advance, and the difference has to reach whoever reads the artifact.
@@ -2885,7 +2889,15 @@ RULES, and the first is enforced after you reply:
     afterwards from the figures themselves and would be duplicated."""
 
 
-def _answer(request: str, run: Any, think: Callable[[str], str]) -> None:
+def _answer(
+    request: str,
+    run: Any,
+    think: Callable[[str], str],
+    *,
+    sink: Any | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+) -> None:
     """The synthesis pass, which is the difference between a loop running and
     the system answering.
 
@@ -2918,10 +2930,37 @@ def _answer(request: str, run: Any, think: Callable[[str], str]) -> None:
         # NAMED, NOT SWALLOWED. This is the guard working, and a user who sees
         # nothing cannot tell it from a model that had nothing to say.
         say(yellow(f"  The answer was refused: {exc}"))
+        if sink is not None:
+            from .events import make_event
+
+            sink.emit(
+                make_event(
+                    "refusal",
+                    run_id=getattr(run, "run_id", None),
+                    error=str(exc),
+                    provider=provider,
+                    model=model,
+                )
+            )
         return
     except Exception:  # noqa: BLE001
         say(dim("  No answer could be composed from this run."))
         return
+
+    if sink is not None:
+        from .events import make_event
+
+        sink.emit(
+            make_event(
+                "answer",
+                run_id=getattr(run, "run_id", None),
+                provider=provider,
+                model=model,
+                answer_text=answer.text,
+                answer_caveats=list(answer.caveats),
+                agency="exploratory",
+            )
+        )
 
     say("")
     for line in _wrap(answer.text):
@@ -2955,6 +2994,9 @@ def cmd_repl(args: argparse.Namespace) -> int:
     """A session. The point is that a run is watchable and repeatable without
     retyping a command line each time."""
     from .client import Offline, ServerError
+    from .complete import enable as enable_complete
+    from .events import EventSink
+    from .repl import SLASH, SessionState
 
     session, url = _session(args.url, args.key)
     try:
@@ -2981,6 +3023,15 @@ def cmd_repl(args: argparse.Namespace) -> int:
         if getattr(args, "universe", None)
         else (f"file:{pathlib.Path(args.data).name}" if getattr(args, "data", None) else None)
     )
+    state = SessionState(
+        data=data,
+        backtest_fn=backtest_fn,
+        loaded_project=loaded_project,
+        sink=EventSink(session=session if os.environ.get(_ENV_KEY) or args.key else None),
+    )
+    from .commands import COMMANDS
+
+    enable_complete(verbs=[c.verb for c in COMMANDS if c.verb.isalpha()] + list(SLASH))
     last = None
     while True:
         try:
@@ -3002,6 +3053,8 @@ def cmd_repl(args: argparse.Namespace) -> int:
         # alternatives here: `screen my book --universe sp100` is both, and the
         # prompt used to force a choice between them.
         line, inline_flags = _extract_flags(line)
+        if line.startswith("/"):
+            line = line[1:].lstrip()
         if inline_flags:
             try:
                 data, backtest_fn = _apply_flags(inline_flags, session, data, backtest_fn)
@@ -3066,12 +3119,59 @@ def cmd_repl(args: argparse.Namespace) -> int:
             continue
         if verb == "status":
             say(dim("no run yet") if last is None else f"{last.run_id}  {last.status}")
+            if state.book.names:
+                say(dim("  book: " + ", ".join(state.book.names)))
+            if state.pinned_model:
+                say(dim("  model: " + state.pinned_model))
+            if state.last_shortlist:
+                say(dim("  shortlist: " + ", ".join(state.last_shortlist[:8])))
             continue
         if verb == "logout":
             cmd_logout(args)
-            for name in ("QUANTOS_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+            from .auth import MANAGED
+
+            for name in MANAGED:
                 os.environ.pop(name, None)
             session, url = _session(args.url, args.key)
+            state.sink.session = None
+            continue
+        if verb == "models":
+            cmd_models(args)
+            continue
+        if verb == "model":
+            from .model import available_models, pin_model
+
+            if not rest:
+                pinned = os.environ.get("ALPHAENGINE_PROVIDER") or os.environ.get("ALPHAENGINE_MODEL")
+                ready = available_models()
+                say(dim("  pinned: " + (pinned or "none (first usable)")))
+                for label, model in ready:
+                    say(f"    {label}/{model}")
+            else:
+                provider, model_name = pin_model(rest)
+                state.pinned_model = f"{provider or ''}/{model_name or rest}".strip("/")
+                say(green(f"  model {state.pinned_model}"))
+            continue
+        if verb == "trace":
+            cmd_trace(argparse.Namespace(run_id=rest or getattr(last, "run_id", None)))
+            continue
+        if verb in ("quiet", "verbose"):
+            state.quiet = verb == "quiet"
+            args.quiet = state.quiet
+            say(dim("  quiet" if state.quiet else "  verbose"))
+            continue
+        if verb == "book":
+            if rest in ("status", "monitor"):
+                say(str(state.book.monitor()))
+            if rest:
+                if isinstance(data, dict) and rest in data:
+                    state.book.add(rest, data[rest])
+                    say(dim(f"  sleeve {rest}"))
+                else:
+                    say(yellow("  load data first, then `book <name>`"))
+            else:
+                names = state.book.names
+                say(dim("  empty book") if not names else "  sleeves: " + ", ".join(names))
             continue
         if verb in ("key", "keys"):
             if rest:
@@ -3080,11 +3180,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
                     # the newly-entered credential would not be used until
                     # restart — which looks exactly like the key not working.
                     session, url = _session(args.url, args.key)
+                    state.sink.session = session
             else:
                 for ln in ladder_lines(keyed=bool(os.environ.get(_ENV_KEY) or args.key)):
                     say(ln)
                 say("")
-                say(dim("  `key quantos` · `key anthropic` · `key openai` to enter one now"))
+                say(dim("  `key quantos` · `key anthropic` · `key openai` · `key gemini` to enter one now"))
             continue
         if verb in ("universe", "data"):
             if not rest:
@@ -3228,6 +3329,8 @@ def cmd_repl(args: argparse.Namespace) -> int:
             )
             or last
         )
+        if last is not None:
+            state.remember_run(last, line)
 
 
 # ── entry point ────────────────────────────────────────────────────────────
@@ -3276,6 +3379,9 @@ def build_parser() -> argparse.ArgumentParser:
     tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
     sub.add_parser("logout", parents=[common], help="remove stored credentials")
+    sub.add_parser("models", parents=[common], help="which model providers this machine can use")
+    tr = sub.add_parser("trace", parents=[common], help="local model/run events for a run")
+    tr.add_argument("run_id", nargs="?", help="run id; defaults to the latest local dump")
     d = sub.add_parser("commands", parents=[common], help="every command, grouped")
     d.add_argument("verb", nargs="?", help="expand one command in full")
 
@@ -3284,6 +3390,7 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--label", help="what to call the artifact")
     r.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
     r.add_argument("--quiet", action="store_true", help="only the result")
+    r.add_argument("--stream", action="store_true", help="print the answer after the citation guard")
 
     # THE QUESTIONS ARE THE COMMANDS. `run screen_universe` is the machine's
     # spelling; `alphaengine screen` is the person's. Each verb is the full
@@ -3295,6 +3402,7 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("--label", help="what to call the artifact")
         q.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
         q.add_argument("--quiet", action="store_true", help="only the result")
+        q.add_argument("--stream", action="store_true", help="print the answer after the citation guard")
         q.set_defaults(workflow=workflow)
     return p
 
@@ -3311,6 +3419,52 @@ def cmd_demo(_args: argparse.Namespace) -> int:
     from . import demo
 
     return demo.run()
+
+
+def cmd_models(_args: argparse.Namespace) -> int:
+    """Which providers this machine can actually use, and which are one install away."""
+    from .model import available_models, keys_without_sdk, provider_labels
+
+    ready = available_models()
+    stranded = keys_without_sdk()
+    if ready:
+        say(bold("  usable"))
+        for label, model in ready:
+            say(f"    {label}/{model}")
+    else:
+        say(dim("  no usable model on this machine"))
+    if stranded:
+        say(yellow("  key set, SDK missing"))
+        for label in stranded:
+            say(f"    {label}")
+    say(dim("  providers: " + ", ".join(provider_labels())))
+    return 0
+
+
+def cmd_trace(args: argparse.Namespace) -> int:
+    """Print the local jsonl dump. Portal POST is best-effort elsewhere."""
+    from .events import data_dir
+
+    run_id = getattr(args, "run_id", None)
+    root = data_dir() / "runs"
+    path = None
+    if run_id:
+        path = root / f"{run_id}.jsonl"
+    elif root.exists():
+        dumps = sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        path = dumps[0] if dumps else None
+    if path is None or not path.exists():
+        say(dim("  no local run events yet"))
+        return 0
+    say(dim(f"  {path}"))
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        say(red(str(exc)))
+        return 2
+    for line in text.splitlines()[-50:]:
+        say("  " + line)
+    return 0
 
 
 def cmd_logout(_args: argparse.Namespace) -> int:
@@ -3348,6 +3502,8 @@ def main(argv: list[str] | None = None) -> int:
         "demo": cmd_demo,
         "logout": cmd_logout,
         "commands": cmd_commands,
+        "models": cmd_models,
+        "trace": cmd_trace,
         "run": cmd_run,
         None: cmd_repl,  # bare `alphaengine` opens a session
     }

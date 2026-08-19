@@ -90,6 +90,7 @@ FLAGS: dict[str, Flag] = {
     "label": Flag("--label", "TEXT", "what to call the artifact this run produces"),
     "input": Flag("--input", "K=V", "a workflow input; repeatable"),
     "quiet": Flag("--quiet", "", "only the result, no step narration"),
+    "stream": Flag("--stream", "", "print the answer once the citation guard has passed"),
     "limit": Flag("--limit", "N", "how many rows to show (default 25)"),
     "budget": Flag("--budget", "N", "how many runs a night is worth (default 3)"),
 }
@@ -269,7 +270,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="key",
         group="start",
-        args="[quantos | anthropic | openai]",
+        args="[quantos | anthropic | openai | gemini | groq | azure | openrouter | gateway]",
         scope="repl",
         purpose="enter a credential now, or see which rungs are unlocked",
         body=(
@@ -280,10 +281,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "Bare `key` shows which are lit. `key quantos` prompts for one and "
             "rebuilds the session, because a session holds its credential and a key "
             "entered without that looks exactly like a key that does not work.\n\n"
-            "Nothing here stores a model key. It is read from the environment at call "
-            "time and handed to the provider's own client."
+            "Model keys are read from the environment at call time and handed to "
+            "the provider. You can also stay signed in: that writes a mode-0600 file "
+            "under your user profile, never the project directory."
         ),
-        examples=("key", "key quantos", "key anthropic"),
+        examples=("key", "key quantos", "key anthropic", "key gemini"),
     ),
     Command(
         verb="commands",
@@ -316,7 +318,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "alphaengine run size_position --data returns.csv",
             "alphaengine run validate_study --project research.momentum",
         ),
-        flags=("project", "data", "universe", "symbol", "label", "input", "quiet", "url", "key"),
+        flags=("project", "data", "universe", "symbol", "label", "input", "quiet", "stream", "url", "key"),
     ),
     Command(
         verb="<anything else>",
@@ -330,8 +332,10 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "sequence, so this can be non-deterministic without being unsafe.\n\n"
             "Two runs of the same question may differ, and the run says so rather "
             "than presenting an exploratory result as a reproducible one.\n\n"
-            "Needs ANTHROPIC_API_KEY or OPENAI_API_KEY in this shell, and the SDK "
-            "installed: `pip install 'alphaengine[agents]'`."
+            "Needs a model key in this shell (Anthropic, OpenAI, Gemini, Groq, "
+            "OpenRouter, Azure, or OPENAI_BASE_URL / ALPHAENGINE_BASE_URL for any "
+            "OpenAI-compatible gateway), and the SDK installed: "
+            "`pip install 'alphaengine[agents]'`."
         ),
         examples=(
             "which of my names are overbought on RSI?",
@@ -345,6 +349,56 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         scope="repl",
         purpose="the current run, and what is loaded",
         examples=("status",),
+    ),
+    Command(
+        verb="models",
+        group="start",
+        args="",
+        purpose="which model providers this machine can actually use",
+        body=(
+            "Lists every provider that has a key AND an SDK on this machine. A key "
+            "without an SDK is reported separately so the boot ladder never lights a "
+            "rung that would then raise.\n\n"
+            "OpenAI-compatible gateways (Groq, OpenRouter, Gemini, vLLM, a company "
+            "endpoint) light when OPENAI_BASE_URL or the provider's own key is set."
+        ),
+        examples=("alphaengine models", "models"),
+    ),
+    Command(
+        verb="model",
+        group="start",
+        args="[<provider[:name]>]",
+        scope="repl",
+        purpose="pin the model for this session, or show the pin",
+        body=(
+            "Examples: `model anthropic`, `model openai/gpt-4o`, `model groq`. "
+            "Sets ALPHAENGINE_PROVIDER / ALPHAENGINE_MODEL in this process only."
+        ),
+        examples=("model", "model anthropic", "model openai/gpt-4o"),
+    ),
+    Command(
+        verb="trace",
+        group="start",
+        args="[run_id]",
+        purpose="local model/run events for a run, hashed prompts only",
+        body=(
+            "Reads ~/.local/share/alphaengine/runs/<id>.jsonl. The same allowlist "
+            "the portal ingest uses: choices, why, answers after the citation guard, "
+            "usage, prompt hashes. Never prices, never keys, never raw prompts."
+        ),
+        examples=("alphaengine trace", "trace", "trace <run_id>"),
+    ),
+    Command(
+        verb="book",
+        group="data",
+        args="[<name> | status]",
+        scope="repl",
+        purpose="show or load sleeves on the multi-strategy book",
+        body=(
+            "A book is named return series, not an order pad. `book` lists sleeves. "
+            "`book status` monitors each one: nothing checked never reads as all clear."
+        ),
+        examples=("book", "book status"),
     ),
     # ── bring your data ────────────────────────────────────────────────────
     Command(
@@ -368,9 +422,9 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="data",
         group="data",
-        args="<file.csv>",
+        args="<file>",
         scope="repl",
-        purpose="load a local CSV without leaving the session",
+        purpose="load a local CSV or parquet without leaving the session",
         body=(
             "Wide (date,AAPL,MSFT), long (date,symbol,close), or a single series. "
             "The shape is decided by the header and nothing else; a file it cannot "
