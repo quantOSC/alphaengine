@@ -56,4 +56,10 @@ is what a changed figure costs. The API may still move underneath it.
 # A new published wheel is a new thing people `pip install`. While the leading
 # digit is 0 the MINOR position carries that, the same way 0.5.0 carried a
 # surface change that left every figure byte-identical.
-__version__ = "0.6.0"
+#
+# 0.6.1 IS THE SCREEN, NOT THE MATHS. No computed value moved. The session is a
+# transcript now: a hue-cycling wait-star over a travelling plateau, cards for
+# what a step found, a composer instead of a dashboard. Same rungs, same
+# doors, same refusals. The published artefact is a new wheel because 0.6.0
+# already left the building.
+__version__ = "0.6.1"
