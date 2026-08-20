@@ -82,13 +82,27 @@ def test_dgp_stress_trial_count_is_the_path_count():
     assert len(hist["counts"]) <= 24
 
 
-def test_gbm_on_the_demo_walk_does_not_claim_an_edge():
-    out = dgp_stress(demo_data["close"], dgp="gbm", n_paths=80, seed=7)
+def test_gbm_on_zero_mean_noise_does_not_claim_an_edge():
+    """A DGP stress is not a strategy verdict. Zero-mean noise stays a coin flip."""
+    rng = np.random.default_rng(7)
+    r = rng.normal(0.0, 0.01, 800)
+    r = r - r.mean()
+    out = dgp_stress(r, dgp="gbm", n_paths=80, seed=7)
+    assert "verdict" not in out
     assert out["n_trials"] == 80
     assert out["n_trials_source"] == "monte_carlo"
     assert out["frac_positive"] is not None
     assert abs(out["frac_positive"] - 0.5) < 0.25
     assert out["sharpe_q50"] is not None
+    assert abs(out["sharpe_q50"]) < 1.5
+
+
+def test_gbm_on_the_demo_walk_records_the_path_count():
+    out = dgp_stress(demo_data["close"], dgp="gbm", n_paths=40, seed=7)
+    assert out["n_trials"] == 40
+    assert out["n_trials_source"] == "monte_carlo"
+    assert "verdict" not in out
+    assert "paths" not in out
 
 
 def test_guard_refuses_a_raw_path_list():

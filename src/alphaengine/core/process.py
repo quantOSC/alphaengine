@@ -230,7 +230,7 @@ def gbm_calibrate(values: Any) -> dict[str, Any]:
     if np.all(x > 0) and np.median(np.abs(x)) > 1.0:
         r = np.diff(np.log(x))
     else:
-        r = x[1:] if n > 1 else x
+        r = x
     r = r[np.isfinite(r)]
     if r.size < 2:
         return {"mu": None, "sigma": None, "n_obs": n, "method": "gbm"}
