@@ -1,0 +1,18 @@
+{
+  "name": "evaluate_process",
+  "schema": "alphaengine.workflow/1",
+  "title": "what law describes this path?",
+  "reproducible": true,
+  "needs": ["data"],
+  "selection": "all",
+  "note": "Portal harness copies this. Agents still only index permitted; these ops sit unused until registered.",
+  "stages": [
+    {"op": "data.resolve"},
+    {"op": "compute.gbm_calibrate"},
+    {"op": "compute.ou_calibrate"},
+    {"op": "compute.jump_calibrate"},
+    {"op": "compute.garch"},
+    {"op": "compute.dgp_stress", "params": {"dgp": "gbm"}},
+    {"op": "emit.process_report"}
+  ]
+}

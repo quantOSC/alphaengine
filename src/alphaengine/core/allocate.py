@@ -159,16 +159,18 @@ def vol_target(
     target: float = 0.10,
     ewma_lambda: float = 0.94,
     periods_per_year: int = 252,
+    method: str = "ewma",
+    garch_var: np.ndarray | list[float] | None = None,
 ) -> dict[str, Any]:
-    """Scalar overlay: leverage so EWMA vol matches `target` (annualised).
+    """Scalar overlay: leverage so forecast vol matches `target` (annualised).
 
-    The scaled path stays on this machine. Figures: realised vol of the overlay,
-    mean leverage, how many observations. A zero or tiny EWMA vol takes
-    leverage 0 rather than exploding.
+    `method=ewma` is RiskMetrics. `method=garch` uses a supplied GARCH variance
+    path, or EWMA if none was given so a missing calibration cannot explode.
     """
     r = np.asarray(returns, dtype=float).reshape(-1)
     r = r[np.isfinite(r)]
     n = int(r.size)
+    how = str(method or "ewma").lower()
     if n < 2:
         return {
             "target": float(target),
@@ -176,14 +178,35 @@ def vol_target(
             "mean_leverage": None,
             "realized_vol": None,
             "ewma_lambda": float(ewma_lambda),
+            "method": how,
+        }
+    ppy = max(int(periods_per_year), 1)
+    tgt = float(target)
+    gvar = None
+    if garch_var is not None:
+        gvar = np.asarray(garch_var, dtype=float).reshape(-1)
+        if gvar.size != n:
+            gvar = None
+    if how == "garch" and gvar is not None:
+        vol_ann = np.sqrt(np.clip(gvar, 0.0, None) * ppy)
+        leverages = np.where(vol_ann <= 1e-12, 0.0, tgt / vol_ann)
+        scaled = r * leverages
+        realized = float(scaled.std(ddof=1) * math.sqrt(ppy)) if n > 1 else None
+        return {
+            "target": tgt,
+            "n_obs": n,
+            "mean_leverage": round(float(leverages.mean()), _RND),
+            "realized_vol": None if realized is None else round(realized, _RND),
+            "ewma_lambda": float(ewma_lambda),
+            "periods_per_year": ppy,
+            "max_leverage": round(float(leverages.max()), _RND),
+            "method": "garch",
         }
     lam = min(max(float(ewma_lambda), 1e-6), 0.999999)
     warm = min(20, n)
     var = float(np.mean(r[:warm] ** 2))
     scaled = np.empty(n)
     leverages = np.empty(n)
-    ppy = max(int(periods_per_year), 1)
-    tgt = float(target)
     for i, x in enumerate(r):
         var = lam * var + (1.0 - lam) * x * x
         vol_ann = math.sqrt(max(var, 0.0) * ppy)
@@ -199,6 +222,7 @@ def vol_target(
         "ewma_lambda": lam,
         "periods_per_year": ppy,
         "max_leverage": round(float(leverages.max()), _RND),
+        "method": "ewma" if how != "garch" else "ewma",
     }
 
 

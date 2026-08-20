@@ -63,12 +63,10 @@ is what a changed figure costs. The API may still move underneath it.
 # doors, same refusals. The published artefact is a new wheel because 0.6.0
 # already left the building.
 #
-# 0.7.0 IS NEW PUBLIC FIGURES, AND A SIMPLER OS AROUND THEM. Existing DSR /
-# PBO / performance / screen goldens stay byte-identical. The artefact grew
-# the daily cross-section (rank, z-score, winsorize, neutralize, ICIR,
-# Fama-MacBeth, quantile book with turnover) and the overnight book
-# (EWMA / Ledoit-Wolf / Marchenko-Pastur covariance, HRP, risk parity, vol
-# target), plus a living parameter-surface canvas and one-verb `login` /
-# `load`. New numbers are a public contract from this release; old numbers
-# did not move.
-__version__ = "0.7.0"
+# 0.8.0 IS THE MODELING SUITE THE REST OF THE LIBRARY WAS MISSING. Existing
+# DSR / PBO / performance / screen goldens stay byte-identical. The artefact
+# grew named processes (OU, GBM, jumps, GARCH), DGP stress with an honest
+# Monte Carlo trial count, Grinold alpha / breadth / TC, a frozen chart
+# vocabulary, and a terminal boot that is the README banner in glyphs.
+# New figures are a public contract from this release; old numbers did not move.
+__version__ = "0.8.0"

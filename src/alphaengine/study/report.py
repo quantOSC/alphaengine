@@ -109,6 +109,10 @@ def _payload(study: Study) -> dict[str, Any]:
         "performance": study.performance or {},
         "notes": study.notes,
     }
+    if study.process:
+        out["process"] = study.process
+    if study.charts:
+        out["charts"] = study.charts
     return {k: v for k, v in out.items() if v is not None}
 
 

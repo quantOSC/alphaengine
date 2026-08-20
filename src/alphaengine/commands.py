@@ -194,6 +194,28 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         examples=("alphaengine demo",),
     ),
     Command(
+        verb="process",
+        group="start",
+        args="[ou | gbm | jump | garch]",
+        scope="both",
+        purpose="fit a named process to a series and stress it, offline",
+        body=(
+            "Calibrate a named data-generating process on a close, a spread, or "
+            "returns, then replay the book under Monte Carlo draws from that law.\n\n"
+            "Default is GBM. `process ou` asks whether the path mean-reverts; "
+            "`process garch` fits a GARCH(1,1) vol path you can then vol-target. "
+            "Pass --data for a local file; with nothing loaded it uses the built-in "
+            "demo walk, which has no edge, and the stress should say so.\n\n"
+            "Figures only: scalars, a histogram, a sketched band. The simulated "
+            "paths stay on this machine. Trial count is the path count, sourced "
+            "as monte_carlo. This is local, like `demo`; it does not call the portal. "
+            "The long spelling that will, once the harness registers it, is "
+            "`run evaluate_process` or `stress --input dgp=ou`."
+        ),
+        examples=("alphaengine process", "alphaengine process ou", "process garch"),
+        flags=("data",),
+    ),
+    Command(
         verb="runs",
         group="start",
         args="[--limit N]",

@@ -56,13 +56,16 @@ animated parameter-surface canvas at boot and while Working) plus
   that is a version bump (`_version.py`).
 - **Compute ops on the executor** include the 0.6 workflow set (`backtest`,
   `score_backtest`, `cpcv`, `factors`, `pairs`, `cointegrated_pairs`,
-  `walk_forward`, `book_overlap`) and the 0.7 CS / book set
+  `walk_forward`, `book_overlap`), the 0.7 CS / book set
   (`panel_transform`, `signal_icir`, `fama_macbeth`, `quantile_book`,
-  `ewma_cov`, `denoise_cov`, `hrp`, `risk_parity`, `vol_target`). Panels and
-  covariance matrices stay in the workspace; figures go over the wire. The
+  `ewma_cov`, `denoise_cov`, `hrp`, `risk_parity`, `vol_target`), and the
+  0.8 process / Grinold set (`ou_calibrate`, `ou_simulate`, `gbm_calibrate`,
+  `jump_calibrate`, `garch`, `dgp_stress`, `grinold_alpha`, `breadth_ir`,
+  `detone_cov`). Panels, covariance matrices, GARCH variance paths, OU paths
+  and alpha vectors stay in the workspace; figures go over the wire. The
   portal must offer an op in a workflow graph or it sits unused; the CLI
-  remains useful without them. Short names in a panel are skipped and counted,
-  they do not shrink the rest of the book.
+  `process` command runs the DGP stress offline without a portal. Short names
+  in a panel are skipped and counted, they do not shrink the rest of the book.
 - `sweep(..., jobs=N)` defaults to 1. Greater than 1 is opt-in and must keep
   trial index identity, including failures.
 - The `connectors` extra is lazy: parquet via `pyarrow`, HTTP via `httpx` to a

@@ -276,8 +276,9 @@ PROMPT = "❯" if _UNICODE_OK else ">"
 #: The wait-mark Claude Code popularised: a star that changes colour while work
 #: is blocked. ASCII `*` where the stream cannot take it.
 STAR = "✻" if _UNICODE_OK else "*"
-#: Wordmark. The product is a parameter surface, not a mascot; this is just a
-#: pin so the welcome is one glance, not a painting.
+#: Wordmark. The product is the README banner in a terminal: tracked
+#: ALPHAENGINE over a teal-to-amber mesh, not a mascot. `ae` is the ASCII
+#: fallback for streams that cannot take the Greek letter.
 PIN = "α" if _stream_handles("α") else "ae"
 
 #: The questions, as commands: what a quant TYPES maps to what the server
@@ -407,36 +408,57 @@ def _canvas_cols() -> int:
         n = os.get_terminal_size().columns
     except OSError:
         n = 80
-    return max(36, min(56, n - 8))
+    return max(48, min(72, n - 6))
 
 
-CANVAS_ROWS = 8
+CANVAS_ROWS = 12
 _MESH_OK = _stream_handles("╱╲")
 _SLOPE_UP = "╱" if _MESH_OK else "/"
 _SLOPE_DN = "╲" if _MESH_OK else "\\"
 
 
 def _height_at(x: float, z: float, t: float) -> float:
-    """A plateau with a knife-edge and travelling ripples. x,z in [0, 1]."""
-    plateau = math.exp(-((x - 0.48) ** 2) / 0.11 - ((z - 0.54) ** 2) / 0.17)
-    edge = math.exp(-((x - 0.78) ** 2) / 0.0055 - ((z - 0.42) ** 2) / 0.20)
-    ripple = math.sin(2 * math.pi * (1.35 * x + 0.90 * z - 0.18 * t))
-    ripple *= 0.20 * math.exp(-((z - 0.50) ** 2) / 0.42)
-    drift = 0.10 * math.cos(2 * math.pi * (0.70 * z - 0.11 * t + 0.28 * x))
-    h = 0.10 + 0.70 * plateau + 0.48 * edge + ripple + drift
+    """Banner topography: plateau left, valley, knife-edge ridge on the right."""
+    plateau = math.exp(-((x - 0.30) ** 2) / 0.085 - ((z - 0.58) ** 2) / 0.16)
+    valley = -0.22 * math.exp(-((x - 0.56) ** 2) / 0.028 - ((z - 0.50) ** 2) / 0.20)
+    ridge = math.exp(-((x - 0.80) ** 2) / 0.0032 - ((z - 0.38) ** 2) / 0.13)
+    ripple = math.sin(2 * math.pi * (1.25 * x + 0.85 * z - 0.16 * t))
+    ripple *= 0.10 * math.exp(-((z - 0.48) ** 2) / 0.40)
+    # Recede into a dark sky at the back, the way the README banner does.
+    sky = 0.22 + 0.78 * z
+    h = (0.08 + 0.60 * plateau + 0.86 * ridge + valley + ripple) * sky
     return 0.0 if h < 0.0 else 1.0 if h > 1.0 else h
 
 
-def _paint_cell(h: float, dhx: float, z: float) -> str:
-    """One vertex: slope ticks on the sides, blocks on the plateau."""
+def _teal(text: str) -> str:
+    """The banner's secondary colour: subtitle and 'your data never leaves.'"""
+    return _rgb(64, 200, 210, text)
+
+
+def _paint_cell(h: float, dhx: float, z: float, x: float) -> str:
+    """Teal on the plateau, amber on the ridge: the README banner, in glyphs."""
     last = len(_SPARK) - 1
-    steep = abs(dhx) > 0.10
-    ch = (_SLOPE_UP if dhx > 0 else _SLOPE_DN) if steep else _SPARK[min(last, int(h * last + 1e-9))]
+    steep = abs(dhx) > 0.09
+    on_x = abs((x * 18.0) % 1.0) < 0.055
+    on_z = abs((z * 9.0) % 1.0) < 0.11
+    if steep:
+        ch = _SLOPE_UP if dhx > 0 else _SLOPE_DN
+    elif on_x and on_z and _MESH_OK:
+        ch = "·"
+    else:
+        ch = _SPARK[min(last, int(h * last + 1e-9))]
     if not _tty():
         return ch
-    cool = (18, 70 + int(50 * z), 88 + int(70 * z))
-    warm = (255, 176, 72)
-    return _mix(cool, warm, h, ch)
+    # Hue is LEFT-RIGHT (teal → amber), brightness is HEIGHT. No mid-green.
+    lo = (8, int(36 + 28 * z), int(44 + 36 * z))
+    hi_l = (56, 214, 214)
+    hi_r = (255, 168, 48)
+    hi = (
+        int(hi_l[0] * (1.0 - x) + hi_r[0] * x),
+        int(hi_l[1] * (1.0 - x) + hi_r[1] * x),
+        int(hi_l[2] * (1.0 - x) + hi_r[2] * x),
+    )
+    return _mix(lo, hi, h, ch)
 
 
 def surface_lines(t: float = 0.0, *, rows: int = CANVAS_ROWS, cols: int | None = None) -> list[str]:
@@ -459,11 +481,28 @@ def surface_lines(t: float = 0.0, *, rows: int = CANVAS_ROWS, cols: int | None =
             h = _height_at(x, z, t)
             row_h.append(h)
             left = row_h[xi - 1] if xi else h
-            cells.append(_paint_cell(h, h - left, z))
+            cells.append(_paint_cell(h, h - left, z, x))
         body = " " * indent + "".join(cells)
         pad = cols - _visible_len(body)
         out.append(body + " " * max(0, pad))
     return out
+
+
+def _pad_to(text: str, width: int) -> str:
+    vis = _visible_len(text)
+    extra = max(0, width - vis)
+    left = extra // 2
+    return " " * left + text + " " * (extra - left)
+
+
+def _wordmark_lines(width: int) -> list[str]:
+    """The README banner type, in the terminal: tracked wordmark, one subtitle."""
+    title = " ".join("ALPHAENGINE")
+    sub = "the research loop, on your machine"
+    return [
+        _pad_to(bold(title), width),
+        _pad_to(_teal(sub), width),
+    ]
 
 
 def ridge_lines(values: Sequence[float], *, rows: int = 6, cols: int = 40) -> list[str]:
@@ -505,14 +544,18 @@ def _play_canvas(*, frames: int = 12) -> None:
     """Boot sculpture. Sleeps only on a live TTY; tests get one still frame."""
     cols = _canvas_cols()
     rows = CANVAS_ROWS
+
+    def block(t: float) -> list[str]:
+        return ["  " + ln for ln in surface_lines(t, rows=rows, cols=cols)]
+
     if _live_tty() and frames > 1:
         painted = 0
         for i in range(frames):
-            painted = _write_block(surface_lines(i * 0.09, rows=rows, cols=cols), replace=painted)
+            painted = _write_block(block(i * 0.09), replace=painted)
             time.sleep(0.05)
         return
     if _tty():
-        _write_block(surface_lines(0.0, rows=rows, cols=cols))
+        _write_block(block(0.0))
 
 
 class Working:
@@ -2465,6 +2508,7 @@ def _help_text() -> str:
     """
     rows = (
         ("demo", "see it work offline, no account"),
+        ("process", "fit a named DGP and stress it, offline"),
         ("login", "sign in, or login anthropic for a model"),
         ("load <what>", "a CSV, a project module, or a universe"),
         ("screen", "what is worth a look"),
@@ -2890,10 +2934,13 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
         say(f"alphaengine {__version__}  {DOT}  {url}")
         return
 
+    cols = _canvas_cols()
+    say("")
+    for line in _wordmark_lines(cols):
+        say("  " + line)
     say("")
     _play_canvas()
-    say("  " + _accent(PIN) + "  " + bold("alphaengine") + "  " + dim(__version__))
-    say("     " + dim("Find out what survives."))
+    say("  " + _teal("your data never leaves."))
     say("")
 
     # Data is described by SHAPE, never printed. A boot screen that echoes the
@@ -2901,6 +2948,7 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
     # will sit until the buffer rolls, and into any recording of the session —
     # is a boundary violation for the sake of a nicer banner.
     bits: list[str] = []
+    bits.append(dim(__version__))
     if data is None:
         bits.append(dim("no data"))
     else:
@@ -2931,8 +2979,6 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
                 for line in lines:
                     say(line)
 
-    say("")
-    say("  " + dim("Your data stays on this machine. Only the findings ever travel."))
     say("")
 
 
@@ -3479,6 +3525,12 @@ def cmd_repl(args: argparse.Namespace) -> int:
             # example first" -- was the one thing this prompt could not do.
             cmd_demo(args)
             continue
+        if verb == "process":
+            cmd_process(
+                argparse.Namespace(dgp=rest or "gbm", data=None, project=None, universe=None),
+                data=data,
+            )
+            continue
         if verb in ("commands", "?"):
             cmd_commands(argparse.Namespace(verb=rest))
             continue
@@ -3745,6 +3797,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("version", parents=[common], help="print the version")
     sub.add_parser("workflows", parents=[common], help="list what the server offers")
     sub.add_parser("demo", parents=[common], help="run the built-in example, offline")
+    pr = sub.add_parser(
+        "process", parents=[common], help="fit a named process to a series and stress it, offline"
+    )
+    pr.add_argument("dgp", nargs="?", default="gbm", help="ou, gbm, jump, or garch (default gbm)")
     rl = sub.add_parser("runs", parents=[common], help="your own week: what ran, and what it decided")
     rl.add_argument("--limit", type=int, default=25, help="how many to show (default 25)")
     sub.add_parser("gaps", parents=[common], help="what your record says is unanswered")
@@ -3779,6 +3835,86 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("--stream", action="store_true", help="print the answer after the citation guard")
         q.set_defaults(workflow=workflow)
     return p
+
+
+def _process_series(data: Any) -> Any:
+    """One numeric path from loaded data. Never prints the values."""
+    from .core.process import as_series
+
+    if isinstance(data, dict):
+        for key in ("close", "spread", "series", "returns"):
+            if key in data:
+                arr = as_series(data[key])
+                if arr.size:
+                    return arr
+        first = next(iter(data.values()), None)
+        return as_series(first)
+    return as_series(data)
+
+
+def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
+    """Calibrate a named DGP and stress it. Offline, figures only."""
+    from .core.process import dgp_stress
+
+    dgp = str(getattr(args, "dgp", None) or "gbm").lower().strip()
+    if dgp not in ("ou", "gbm", "jump", "garch"):
+        say(red("process takes ou, gbm, jump, or garch."))
+        return 2
+    source = "loaded"
+    if data is None:
+        loaded, _bt = resolve_data(args)
+        data = loaded
+    if data is None:
+        from . import demo
+
+        data = demo.data
+        source = "demo walk"
+    series = _process_series(data)
+    if getattr(series, "size", 0) < 3:
+        say(red("process needs a numeric series (a close, a spread, or returns)."))
+        return 2
+    with Working(f"fitting {dgp}", plain=f"fitting {dgp}"):
+        figures = dgp_stress(series, dgp=dgp, n_paths=80, seed=7)
+    say("")
+    say(f"  {bold('process')}  {dim(DOT)}  {dgp}  {dim(DOT)}  {source}")
+    say("")
+    keys = (
+        "kappa",
+        "theta",
+        "sigma",
+        "half_life",
+        "phi",
+        "mean_reverting",
+        "mu",
+        "omega",
+        "alpha",
+        "beta",
+        "persistence",
+        "jump_lambda",
+        "jump_mu",
+        "jump_sigma",
+        "n_jumps_named",
+        "n_obs",
+        "n_paths",
+        "n_trials",
+        "n_trials_source",
+        "sharpe_q10",
+        "sharpe_q50",
+        "sharpe_q90",
+        "frac_positive",
+    )
+    present = [k for k in keys if figures.get(k) is not None]
+    width = max((len(k) for k in present), default=8)
+    for k in present:
+        say(f"    {dim(k.ljust(width))}  {figures[k]}")
+    hist = figures.get("sharpe_hist") or {}
+    counts = hist.get("counts") or []
+    if counts:
+        say("")
+        say("    " + dim("sharpe hist") + "  " + sparkline([float(c) for c in counts], width=36))
+    say("")
+    say("  " + _teal("your data never leaves."))
+    return 0
 
 
 def cmd_demo(_args: argparse.Namespace) -> int:
@@ -3881,6 +4017,7 @@ def main(argv: list[str] | None = None) -> int:
         "gaps": cmd_gaps,
         "tonight": cmd_tonight,
         "demo": cmd_demo,
+        "process": cmd_process,
         "logout": cmd_logout,
         "login": cmd_login,
         "commands": cmd_commands,

@@ -18,17 +18,14 @@
   <img src="https://img.shields.io/badge/deps-numpy%20%2B%20scipy-C4893A?style=flat-square" alt="Two dependencies: numpy and scipy">
 </p>
 
-<p align="center">
-  <img src="docs/assets/mark.png" alt="AlphaEngine mark" width="96">
-</p>
-
 ```bash
 pip install alphaengine
 alphaengine demo          # the whole offline half, no account, no data of your own
+alphaengine process       # fit a DGP to the demo walk and stress it
 ```
 
 <p align="center">
-  <img src="docs/assets/session.png" alt="The session canvas: a living parameter surface, then demo, login, load" width="92%">
+  <img src="docs/assets/session.png" alt="The session canvas: tracked ALPHAENGINE over a teal plateau and amber ridge, then your data never leaves." width="92%">
 </p>
 
 The session is the product. Sign in, load something, then ask:
@@ -154,6 +151,35 @@ distinction is the whole of the data boundary below.
 
 ---
 
+## What's new in 0.8.0
+
+Named processes, Grinold, and a frozen chart contract. Existing goldens
+(deflated Sharpe, PBO, performance, screen) are byte-identical. New figures
+are a public contract from this release. The study schema is **1.1**: optional
+`process` and `charts` fields; 1.0 studies still load.
+
+| You have | You get | Module |
+|---|---|---|
+| A spread or a close | OU / GBM / jump / GARCH(1,1) calibration, then Monte Carlo stress under that law | `core.process` |
+| An IC and a cross-section | Grinold alpha, breadth, transfer coefficient | `core.active` |
+| A return panel | Detoned covariance and a PCA variance-explained table | `core.covariance` |
+| Figures that already travel | `{kind, key, title}` hints a portal maps to a chart | `charts`, [figure contract](docs/figure_contract.md) |
+
+The terminal boot is the README banner: tracked `ALPHAENGINE`, the subtitle,
+a teal-left / amber-right mesh (plateau, valley, knife-edge ridge), and
+`your data never leaves.` `alphaengine process` fits a DGP offline, no account.
+
+```python
+from alphaengine.core import ou_calibrate, garch_calibrate, dgp_stress, grinold_alpha
+
+ou = ou_calibrate(spread)            # kappa, theta, half_life; or not mean-reverting
+g = garch_calibrate(returns)         # omega, alpha, beta, persistence in (0, 1)
+s = dgp_stress(close, dgp="ou")      # n_trials = n_paths, source monte_carlo
+a = grinold_alpha(panel, ic=0.05)    # alpha vector stays here; scalars travel
+```
+
+---
+
 ## What's new in 0.7.0
 
 The daily modelling morning, and the overnight book, without a third
@@ -195,6 +221,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | Command | Does | Where |
 |---|---|---|
 | `demo` | run the built-in example offline, with no account and no data | shell + session |
+| `process [ou \| gbm \| jump \| garch]` | fit a named process to a series and stress it, offline | shell + session |
 | `runs [--limit N]` | your own week: what ran, what it decided, what it filed | shell + session |
 | `gaps` | what your record says is UNANSWERED, and what closes each one | shell + session |
 | `tonight [--budget N]` | what would run unattended tonight, without running any of it | shell + session |
@@ -278,6 +305,8 @@ alphaengine overlap
 alphaengine size
 alphaengine monitor
 alphaengine demo
+alphaengine process
+alphaengine process ou
 alphaengine runs
 alphaengine runs --limit 50
 alphaengine gaps
@@ -381,8 +410,11 @@ diffable, and versioned so it still parses in two years.
 | `alphaengine.core.panel` | cross-sectional rank, z-score, winsorize, neutralize |
 | `alphaengine.core.signals` | IC, ICIR, quantile returns, decay |
 | `alphaengine.core.cross_section` | Fama-MacBeth, quantile book with turnover |
-| `alphaengine.core.covariance` | EWMA, Ledoit-Wolf, Marchenko-Pastur denoise, detone |
-| `alphaengine.core.allocate` | HRP, risk parity, vol target |
+| `alphaengine.core.covariance` | EWMA, Ledoit-Wolf, Marchenko-Pastur denoise, detone, variance explained |
+| `alphaengine.core.allocate` | HRP, risk parity, vol target (EWMA or GARCH) |
+| `alphaengine.core.process` | OU, GBM, jumps, GARCH(1,1), DGP stress |
+| `alphaengine.core.active` | Grinold alpha, breadth, transfer coefficient |
+| `alphaengine.charts` | frozen `{kind, key, title}` hints; see [figure contract](docs/figure_contract.md) |
 | `alphaengine.sweep` | the grid runner and the sensitivity surface |
 | `alphaengine.study` | the study artifact and its schema |
 | `alphaengine.client` | the workflow client and the step executor |
@@ -475,6 +507,22 @@ Management* 42(1), 13 to 28.
 **Fama-MacBeth**
 Fama, E. F., and MacBeth, J. D. (1973). "Risk, Return, and Equilibrium:
 Empirical Tests." *Journal of Political Economy* 81(3), 607 to 636.
+
+**Ornstein-Uhlenbeck / Vasicek**
+Vasicek, O. (1977). "An Equilibrium Characterization of the Term Structure."
+*Journal of Financial Economics* 5(2), 177 to 188.
+
+**GARCH(1,1)**
+Bollerslev, T. (1986). "Generalized Autoregressive Conditional
+Heteroskedasticity." *Journal of Econometrics* 31(3), 307 to 327.
+
+**Jump-diffusion**
+Merton, R. C. (1976). "Option Pricing When Underlying Stock Returns Are
+Discontinuous." *Journal of Financial Economics* 3(1-2), 125 to 144.
+
+**The fundamental law of active management**
+Grinold, R. C., and Kahn, R. N. (2000). *Active Portfolio Management.* 2nd ed.
+McGraw-Hill.
 
 **Downside deviation**
 Sortino, F. A., and Price, L. N. (1994). "Performance Measurement in a Downside

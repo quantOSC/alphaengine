@@ -1,0 +1,14 @@
+{
+  "name": "stress_study",
+  "schema": "alphaengine.workflow/1",
+  "title": "where does it break?",
+  "note": "Additive DGP stage for the existing stress_study graph. Copy into the portal harness. The CLI spelling that does not wait on the portal is `alphaengine process` or `stress --input dgp=ou` once this stage is live.",
+  "add_stage": {
+    "id": "dgp_stress",
+    "op": "compute.dgp_stress",
+    "input": "dgp",
+    "default": "gbm",
+    "values": ["ou", "gbm", "jump", "garch"],
+    "after": "compute.cost_ladder"
+  }
+}

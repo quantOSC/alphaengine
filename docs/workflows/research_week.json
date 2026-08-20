@@ -1,0 +1,29 @@
+{
+  "name": "research_week",
+  "schema": "alphaengine.workflow/1",
+  "title": "gaps the modeling suite closes once the portal registers the ops",
+  "gaps": [
+    {
+      "question": "what law describes this path?",
+      "workflow": "evaluate_process",
+      "op": "compute.dgp_stress",
+      "cli": "alphaengine process"
+    },
+    {
+      "question": "where does it break under a named DGP?",
+      "workflow": "stress_study",
+      "stage": "dgp_stress",
+      "cli": "alphaengine process ou"
+    },
+    {
+      "question": "how much alpha does the IC imply?",
+      "workflow": "size_position",
+      "op": "compute.grinold_alpha"
+    },
+    {
+      "question": "is the book the market in disguise?",
+      "workflow": "size_position",
+      "op": "compute.detone_cov"
+    }
+  ]
+}

@@ -182,3 +182,30 @@ def test_study_tolerates_unknown_minor_fields(tmp_path):
     back = load(p)
     assert back.label == "x"
     assert back.n_trials == 3
+
+
+def test_study_schema_1_0_still_loads(tmp_path):
+    """1.1 is a minor bump: optional process/charts. A 1.0 file must still parse."""
+    payload = Study(label="old", n_trials=2).to_dict()
+    payload["schema_version"] = "1.0"
+    payload.pop("process", None)
+    payload.pop("charts", None)
+    p = tmp_path / "v10.json"
+    p.write_text(json.dumps(payload), encoding="utf8")
+    back = load(p)
+    assert back.process is None
+    assert back.charts is None
+    assert back.n_trials == 2
+
+
+def test_study_1_1_keeps_optional_process_and_charts(tmp_path):
+    s = Study(
+        label="p",
+        n_trials=4,
+        process={"dgp": "ou"},
+        charts=[{"kind": "hist", "key": "sharpe_hist", "title": "Sharpe under the DGP"}],
+    )
+    back = load(save(s, tmp_path / "p.json"))
+    assert back.process == {"dgp": "ou"}
+    assert back.charts[0]["kind"] == "hist"
+    assert back.schema_version == SCHEMA_VERSION

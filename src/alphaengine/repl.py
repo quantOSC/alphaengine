@@ -20,6 +20,7 @@ SLASH = (
     "login",
     "load",
     "demo",
+    "process",
     "help",
     "model",
     "models",

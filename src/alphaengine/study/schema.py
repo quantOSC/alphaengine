@@ -20,7 +20,7 @@ from typing import Any
 
 from .._version import __version__
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 __all__ = ["Study", "save", "load", "SCHEMA_VERSION"]
 
@@ -73,6 +73,12 @@ class Study:
     # ── optional, off by default ────────────────────────────────────────────
     # The parameter grid is frequently bigger IP than the return series.
     best_params: dict[str, Any] | None = None
+
+    # ── optional, 1.1 ────────────────────────────────────────────────────────
+    # A named data-generating process and the chart hints a portal draws from
+    # figures. Absent on studies that never asked; older readers drop both.
+    process: dict[str, Any] | None = None
+    charts: list[dict[str, Any]] | None = None
 
     # ── provenance ──────────────────────────────────────────────────────────
     schema_version: str = SCHEMA_VERSION

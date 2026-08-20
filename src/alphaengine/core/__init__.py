@@ -31,12 +31,21 @@ everyone who does not need them:
     from alphaengine.core.pairs import find_cointegrated_pairs
 """
 
+from .active import breadth_ir, grinold_alpha
 from .allocate import hrp_weights, risk_parity_weights, vol_target
 from .backtest import run_backtest, score_backtest
-from .covariance import denoise_cov, detone_cov, ewma_cov, ledoit_wolf_cov
+from .covariance import denoise_cov, detone_cov, ewma_cov, ledoit_wolf_cov, variance_explained
 from .cross_section import fama_macbeth, quantile_book
 from .panel import cs_rank, cs_winsorize, cs_zscore, neutralize
 from .performance import performance_report
+from .process import (
+    dgp_stress,
+    garch_calibrate,
+    gbm_calibrate,
+    jump_calibrate,
+    ou_calibrate,
+    ou_simulate,
+)
 from .profile import profile_data
 from .risk import compute_var_cvar
 from .screen import screen_universe
@@ -91,6 +100,16 @@ __all__ = [
     "hrp_weights",
     "risk_parity_weights",
     "vol_target",
+    # named processes: a law for the path, then a stress under it
+    "ou_calibrate",
+    "ou_simulate",
+    "gbm_calibrate",
+    "jump_calibrate",
+    "garch_calibrate",
+    "dgp_stress",
+    "grinold_alpha",
+    "breadth_ir",
+    "variance_explained",
     # stress and overlap: where a validated result breaks, and whether an
     # idea is the book again
     "subperiod_stability",

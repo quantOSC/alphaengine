@@ -33,7 +33,9 @@ from typing import Any
 
 import numpy as np
 
+from ..charts import chart
 from ..core import (
+    breadth_ir,
     compute_var_cvar,
     cost_ladder,
     cpcv_score,
@@ -42,13 +44,21 @@ from ..core import (
     cs_zscore,
     deflated_sharpe,
     denoise_cov,
+    detone_cov,
+    dgp_stress,
     drawdown_anatomy,
     ewma_cov,
     fama_macbeth,
+    garch_calibrate,
+    gbm_calibrate,
+    grinold_alpha,
     hrp_weights,
     information_coefficient,
+    jump_calibrate,
     min_track_record_length,
     neutralize,
+    ou_calibrate,
+    ou_simulate,
     overlap_stats,
     pbo_cscv,
     performance_report,
@@ -64,6 +74,7 @@ from ..core import (
     signal_icir,
     subperiod_stability,
     technical_features,
+    variance_explained,
     vol_target,
 )
 from ..core.allocate import cov_from_returns
@@ -317,6 +328,15 @@ class StepExecutor:
             "compute.hrp": self._hrp,
             "compute.risk_parity": self._risk_parity,
             "compute.vol_target": self._vol_target,
+            "compute.ou_calibrate": self._ou_calibrate,
+            "compute.ou_simulate": self._ou_simulate,
+            "compute.gbm_calibrate": self._gbm_calibrate,
+            "compute.jump_calibrate": self._jump_calibrate,
+            "compute.garch": self._garch,
+            "compute.dgp_stress": self._dgp_stress,
+            "compute.grinold_alpha": self._grinold_alpha,
+            "compute.breadth_ir": self._breadth_ir,
+            "compute.detone_cov": self._detone_cov,
             # `emit.*` and `record.*` were vocabulary strings the server could
             # issue and this executor had no handler for, so a run that reached
             # one could never produce the artifact it existed to produce. The
@@ -329,6 +349,7 @@ class StepExecutor:
             "emit.health": self._emit_echo,
             "emit.stress": self._emit_echo,
             "emit.overlap": self._emit_echo,
+            "emit.process_report": self._emit_echo,
             "record.note": self._record,
             "record.decision": self._record,
             "record.approval": self._record,
@@ -1063,6 +1084,16 @@ class StepExecutor:
         tri = triangle(cov, names)
         if tri is not None:
             out["triangle"] = tri
+        explained = variance_explained(cov)
+        if explained:
+            out["variance_explained"] = explained
+        hints = []
+        if tri is not None:
+            hints.append(chart("triangle", "triangle", "denoised covariance"))
+        if explained:
+            hints.append(chart("rows", "variance_explained", "eigenvalue share"))
+        if hints:
+            out["charts"] = hints
         return out
 
     def _hrp(self, params: Figures, ws: Workspace) -> Figures:
@@ -1094,14 +1125,173 @@ class StepExecutor:
         returns = _as_returns(self.data)
         if returns is None:
             raise UnsupportedOp("compute.vol_target needs a return series.")
+        how = str(params.get("method") or "ewma").lower()
+        gvar = ws.get("garch_var")
         return dict(
             vol_target(
                 returns,
                 target=float(params.get("target") or 0.10),
                 ewma_lambda=float(params.get("ewma_lambda") or 0.94),
                 periods_per_year=int(params.get("periods_per_year") or 252),
+                method=how,
+                garch_var=gvar,
             )
         )
+
+    def _series_or_refuse(self, why: str) -> list[float]:
+        returns = _as_returns(self.data)
+        if returns is not None:
+            return returns
+        if isinstance(self.data, dict):
+            for key in ("close", "spread", "series"):
+                inner = self.data.get(key)
+                if inner is not None:
+                    got = _as_returns(inner) if not isinstance(inner, dict) else None
+                    if got:
+                        return got
+                    from ..core.process import as_series
+
+                    arr = as_series(inner)
+                    if arr.size:
+                        return [float(v) for v in arr.tolist()]
+        from ..core.process import as_series
+
+        arr = as_series(self.data)
+        if arr.size:
+            return [float(v) for v in arr.tolist()]
+        raise UnsupportedOp(why)
+
+    def _ou_calibrate(self, params: Figures, ws: Workspace) -> Figures:
+        series = self._series_or_refuse("compute.ou_calibrate needs a spread or return series.")
+        out = dict(ou_calibrate(series, dt=float(params.get("dt") or 1.0)))
+        ws["ou"] = out
+        figures = {k: v for k, v in out.items() if k != "paths"}
+        figures["charts"] = [chart("curve", "path_sketch", "calibrated spread")]
+        return figures
+
+    def _ou_simulate(self, params: Figures, ws: Workspace) -> Figures:
+        cal = ws.get("ou") if isinstance(ws.get("ou"), dict) else None
+        series = None
+        try:
+            series = self._series_or_refuse("compute.ou_simulate needs a series when no OU is calibrated.")
+        except UnsupportedOp:
+            series = None
+        if cal is None or cal.get("kappa") is None:
+            if series is None:
+                raise UnsupportedOp("compute.ou_simulate needs a calibrated OU or a series to fit.")
+            cal = ou_calibrate(series)
+            ws["ou"] = cal
+        if cal.get("kappa") is None:
+            raise UnsupportedOp("the series is not mean-reverting; OU simulate refused.")
+        n = int(params.get("n_obs") or cal.get("n_obs") or 120)
+        sim = ou_simulate(
+            kappa=float(cal["kappa"]),
+            theta=float(cal.get("theta") or 0.0),
+            sigma=float(cal.get("sigma") or 0.01),
+            n_obs=n,
+            n_paths=int(params.get("n_paths") or 200),
+            x0=float(series[-1]) if series else None,
+            seed=int(params.get("seed") or 7),
+        )
+        ws["ou_paths"] = sim.pop("paths")
+        sim["charts"] = [
+            chart("curve", "mean_path", "mean OU path"),
+            chart("band", "band", "OU quantile band"),
+        ]
+        return sim
+
+    def _gbm_calibrate(self, _params: Figures, ws: Workspace) -> Figures:
+        series = self._series_or_refuse("compute.gbm_calibrate needs a price or return series.")
+        out = dict(gbm_calibrate(series))
+        ws["gbm"] = out
+        return out
+
+    def _jump_calibrate(self, params: Figures, ws: Workspace) -> Figures:
+        series = self._series_or_refuse("compute.jump_calibrate needs a price or return series.")
+        out = dict(jump_calibrate(series, z=float(params.get("z") or 3.0)))
+        ws["jump"] = out
+        return out
+
+    def _garch(self, _params: Figures, ws: Workspace) -> Figures:
+        series = self._series_or_refuse("compute.garch needs a return series.")
+        out = dict(garch_calibrate(series))
+        ws["garch_var"] = out.pop("var_path")
+        out["charts"] = [chart("curve", "vol_path", "GARCH vol")]
+        return out
+
+    def _dgp_stress(self, params: Figures, ws: Workspace) -> Figures:
+        series = self._series_or_refuse("compute.dgp_stress needs a return or price series.")
+        dgp = str(params.get("dgp") or "gbm").lower()
+        out = dict(
+            dgp_stress(
+                series,
+                dgp=dgp,
+                n_paths=int(params.get("n_paths") or 200),
+                seed=int(params.get("seed") or 7),
+                backtest_fn=self.backtest_fn,
+            )
+        )
+        out["charts"] = [chart("hist", "sharpe_hist", "Sharpe under the DGP")]
+        return out
+
+    def _grinold_alpha(self, params: Figures, ws: Workspace) -> Figures:
+        panel, _ = self._panel_and_controls()
+        ic = params.get("ic")
+        if ic is None:
+            raise UnsupportedOp("compute.grinold_alpha needs params.ic, the information coefficient.")
+        vols = params.get("vols") if isinstance(params.get("vols"), dict) else None
+        out = dict(grinold_alpha(panel, ic=float(ic), vols=vols))
+        ws["alpha"] = out.pop("alpha")
+        return out
+
+    def _breadth_ir(self, params: Figures, ws: Workspace) -> Figures:
+        ic = params.get("ic")
+        n_names = params.get("n_names")
+        if ic is None:
+            raise UnsupportedOp("compute.breadth_ir needs params.ic.")
+        if n_names is None:
+            try:
+                panel, _ = self._panel_and_controls()
+                n_names = len(panel)
+            except UnsupportedOp:
+                n_names = 0
+        holdings = params.get("holdings") if isinstance(params.get("holdings"), dict) else None
+        ideal = params.get("ideal") if isinstance(params.get("ideal"), dict) else ws.get("alpha")
+        if isinstance(ideal, dict) and not holdings:
+            ideal = None
+        return dict(
+            breadth_ir(
+                ic=float(ic),
+                n_names=int(n_names or 0),
+                holdings=holdings,
+                ideal=ideal if isinstance(ideal, dict) else None,
+            )
+        )
+
+    def _detone_cov(self, params: Figures, ws: Workspace) -> Figures:
+        R, names, skipped = self._returns_panel()
+        sample = cov_from_returns(R, method=str(params.get("estimator") or "sample"))
+        cov = detone_cov(sample)
+        ws["cov"] = cov
+        ws["cov_names"] = names
+        out = cov_diagnostics(cov)
+        out["method"] = "detone"
+        out["n_skipped"] = len(skipped)
+        out["n_obs"] = int(R.shape[0])
+        explained = variance_explained(cov)
+        if explained:
+            out["variance_explained"] = explained
+        tri = triangle(cov, names)
+        if tri is not None:
+            out["triangle"] = tri
+        hints = []
+        if tri is not None:
+            hints.append(chart("triangle", "triangle", "detoned covariance"))
+        if explained:
+            hints.append(chart("rows", "variance_explained", "eigenvalue share"))
+        if hints:
+            out["charts"] = hints
+        return out
 
     # ── emit / record ──────────────────────────────────────────────────────
     #

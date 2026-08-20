@@ -299,6 +299,10 @@ def test_boot_never_prints_the_caller_s_data(capsys, monkeypatch):
     assert "1234" not in printed, "a price reached the boot screen"
     assert "AAPL" not in printed, "a ticker reached the boot screen"
     assert "2 series" in printed, "the SHAPE should still be reported"
+    assert "A L P H A E N G I N E" in printed
+    assert "the research loop, on your machine" in printed
+    assert "your data never leaves." in printed
+    assert "Your data stays on this machine" not in printed
 
 
 def test_boot_warns_when_there_is_no_key(capsys, monkeypatch):
@@ -380,6 +384,20 @@ def test_a_later_frame_moves():
     a = cli.surface_lines(0.0, rows=6, cols=24)
     b = cli.surface_lines(1.7, rows=6, cols=24)
     assert a != b
+
+
+def test_process_runs_offline_without_an_account():
+    """Like demo: no key, no network, figures only."""
+    out = subprocess.run(
+        [sys.executable, "-m", "alphaengine", "process"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "n_trials" in out.stdout
+    assert "monte_carlo" in out.stdout
+    assert "your data never leaves." in out.stdout
+    assert "1234" not in out.stdout
 
 
 def test_classify_load_picks_the_door(tmp_path):

@@ -26,6 +26,7 @@ __all__ = [
     "denoise_cov",
     "detone_cov",
     "cov_diagnostics",
+    "variance_explained",
 ]
 
 _RND = 6
@@ -134,6 +135,19 @@ def detone_cov(cov: np.ndarray) -> np.ndarray:
     residual = residual / np.outer(d, d)
     np.fill_diagonal(residual, 1.0)
     return residual * np.outer(vol, vol)
+
+
+def variance_explained(cov: np.ndarray, *, cap: int = 32) -> list[dict[str, Any]]:
+    """Leading eigenvalue shares. A PCA sketch, not the matrix."""
+    C = np.asarray(cov, dtype=float)
+    if C.ndim != 2 or C.shape[0] != C.shape[1] or C.shape[0] < 1:
+        return []
+    evals = np.clip(np.linalg.eigvalsh(C), 0.0, None)[::-1]
+    total = float(evals.sum())
+    if total <= 0:
+        return []
+    n = min(int(cap), int(evals.size))
+    return [{"k": i + 1, "share": round(float(evals[i] / total), _RND)} for i in range(n)]
 
 
 def cov_diagnostics(cov: np.ndarray) -> dict[str, Any]:

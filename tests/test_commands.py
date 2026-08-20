@@ -152,7 +152,7 @@ def test_an_unknown_verb_suggests_rather_than_shrugs(capsys):
 def test_the_short_help_names_the_path_not_every_verb():
     """`help` is how you start. `commands` is the directory."""
     text = cli._help_text()
-    for verb in ("demo", "login", "load", "screen", "validate", "run"):
+    for verb in ("demo", "process", "login", "load", "screen", "validate", "run"):
         assert verb in text, f"{verb} is the short path and missing from help"
     assert "commands" in text
     assert "Type a question" in text
@@ -193,7 +193,7 @@ def test_the_readme_leads_with_the_os_and_not_the_library():
     assert text.index("## What it answers") < text.index("## Writing your own")
 
 
-@pytest.mark.parametrize("verb", ["run", "demo", "workflows", "commands"])
+@pytest.mark.parametrize("verb", ["run", "demo", "process", "workflows", "commands"])
 def test_the_readme_names_every_headline_command(verb):
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     assert f"`{verb}" in text or f"alphaengine {verb}" in text
