@@ -129,7 +129,12 @@ def compute_var_cvar(
     record(
         "parametric_var",
         "z * std(r, ddof=1) * sqrt(horizon), z = normsinv(confidence), as a positive percent",
-        inputs={"n_obs": int(n_obs), "confidence": confidence, "horizon_days": int(horizon_days), "z": round(z, 6)},
+        inputs={
+            "n_obs": int(n_obs),
+            "confidence": confidence,
+            "horizon_days": int(horizon_days),
+            "z": round(z, 6),
+        },
         series={"returns": arr},
         result=result["parametric"]["var_pct"],
     )
