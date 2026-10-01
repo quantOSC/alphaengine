@@ -33,6 +33,8 @@ from typing import Any
 import numpy as np
 from statsmodels.tsa.stattools import adfuller
 
+from .trace import record
+
 # Pair-trading thresholds (documented so a caller can audit / override).
 MIN_OBSERVATIONS = 126
 COINTEGRATION_P_THRESHOLD = 0.05
@@ -395,6 +397,13 @@ def compute_spread_signal(
     if math.isfinite(hedge_ratio) and b[-1] > 0:
         share_ratio_at_close = float(hedge_ratio * a[-1] / b[-1])
 
+    record(
+        "hedge_ratio",
+        "total least squares slope of log(a) on log(b)",
+        inputs={"n_observations": n, "symbol_a": symbol_a, "symbol_b": symbol_b},
+        series={"spread": spread, "log_a": log_a, "log_b": log_b},
+        result=round(float(hedge_ratio), 4),
+    )
     return {
         "ticker_a": symbol_a,
         "ticker_b": symbol_b,

@@ -18,6 +18,8 @@ import math
 
 import numpy as np
 
+from .trace import record
+
 _PPY = 252  # trading periods per year
 
 
@@ -105,4 +107,40 @@ def performance_report(
             out["alpha_annualized_pct"] = _clean(round(alpha_per * ppy * 100, 2))
             out["information_ratio"] = _clean(round(ir, 4))
 
+    shared = {"n_obs": int(n), "risk_free_rate": float(risk_free_rate), "periods_per_year": ppy}
+    record(
+        "sharpe_annualized",
+        "mean(r - rf/ppy) / std(r, ddof=1) * sqrt(ppy)",
+        inputs=shared,
+        series={"returns": arr},
+        result=out["sharpe_annualized"],
+    )
+    record(
+        "sortino_ratio",
+        "mean(excess) / sqrt(mean(min(excess, 0)^2)) * sqrt(ppy)",
+        inputs=shared,
+        series={"returns": arr, "downside": downside},
+        result=out["sortino_ratio"],
+    )
+    record(
+        "calmar_ratio",
+        "annualized_return / abs(max_drawdown)",
+        inputs=shared,
+        series={"equity": eq},
+        result=out["calmar_ratio"],
+    )
+    record(
+        "max_drawdown_pct",
+        "min(equity/cummax(equity) - 1), reported as a positive percent",
+        inputs=shared,
+        series={"equity": eq, "drawdown": drawdown},
+        result=out["max_drawdown_pct"],
+    )
+    record(
+        "annualized_return_pct",
+        "(1 + total_return) ** (ppy / n) - 1",
+        inputs=shared,
+        series={"equity": eq},
+        result=out["annualized_return_pct"],
+    )
     return out

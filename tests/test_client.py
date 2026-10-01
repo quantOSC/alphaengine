@@ -12,7 +12,7 @@ import pytest
 from alphaengine.agent import AgentDriver, RefusedChoice
 from alphaengine.client import MAX_FIGURE_LIST, Offline, StepExecutor, UnsupportedOp, connect
 from alphaengine.client.executor import COST_POINTS, CURVE_POINTS, IC_POINTS, _bucketed, _last, _mean
-from alphaengine.client.session import Session
+from alphaengine.client.session import ServerError, Session
 
 
 def prices(seed: int = 42, n: int = 600) -> np.ndarray:
@@ -750,3 +750,75 @@ def test_the_core_does_not_truncate_a_sequence_before_the_executor_buckets_it():
 
     assert MAX_PERIODS >= IC_POINTS
     assert MAX_PERIODS <= MAX_FIGURE_LIST
+
+
+def _longest_list(node: object) -> int:
+    if isinstance(node, dict):
+        return max((_longest_list(v) for v in node.values()), default=0)
+    if isinstance(node, (list, tuple)):
+        nested = max((_longest_list(v) for v in node), default=0)
+        return max(len(node), nested)
+    return 0
+
+
+class _TraceSession(Session):
+    """One performance step, then close. Traces are a second POST."""
+
+    def __init__(self, *, reject: bool = False) -> None:
+        super().__init__(base_url="fake://", api_key=None)
+        self.posts: list[tuple[str, dict]] = []
+        self.reject = reject
+
+    def _post(self, path, body):
+        self.posts.append((path, body))
+        if path.endswith("/traces"):
+            if self.reject:
+                raise ServerError(404, "no trace route")
+            return {}
+        if path.endswith("/steps"):
+            return {
+                "run_id": "r1",
+                "status": "closed",
+                "permitted": [],
+                "artifact": {"workflow": "measure"},
+            }
+        return {
+            "run_id": "r1",
+            "status": "open",
+            "selection": "any",
+            "permitted": [{"step_id": "s1", "op": "compute.performance_report", "params": {}}],
+        }
+
+
+def test_series_travel_on_the_trace_and_not_inside_figures():
+    """A 600-point series is a series. Figures still refuse that. The trace does not."""
+    returns = np.random.default_rng(2).normal(0.0004, 0.01, 600).tolist()
+    session = _TraceSession()
+    run = session.open("measure", data=returns)
+    run.drive()
+
+    assert run.status == "closed"
+    steps = [body for path, body in session.posts if path.endswith("/steps")]
+    traces = [body for path, body in session.posts if path.endswith("/traces")]
+    assert len(steps) == 1
+    assert len(traces) == 1
+    assert _longest_list(steps[0]["figures"]) <= MAX_FIGURE_LIST
+    assert "lines" not in steps[0]
+    line = next(item for item in traces[0]["lines"] if item["id"] == "sharpe_annualized")
+    assert len(line["series"]["returns"]) == 600
+    assert line["formula"]
+    assert traces[0]["op"] == "compute.performance_report"
+    assert traces[0]["step_id"] == "s1"
+    assert run.trace_rejected is None
+    assert run.traces[0]["lines"][0]["id"]
+
+
+def test_a_rejected_trace_does_not_fail_the_run():
+    returns = np.random.default_rng(2).normal(0.0004, 0.01, 40).tolist()
+    session = _TraceSession(reject=True)
+    run = session.open("measure", data=returns)
+    run.drive()
+    assert run.status == "closed"
+    assert run.trace_rejected
+    assert "404" in run.trace_rejected
+    assert any(path.endswith("/steps") for path, _ in session.posts)

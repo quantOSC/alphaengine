@@ -27,6 +27,8 @@ import math
 import numpy as np
 import statsmodels.api as sm
 
+from .trace import record
+
 VIF_MAX_THRESHOLD = 10.0
 _DEFAULT_RFR = 0.04
 
@@ -84,8 +86,13 @@ def decompose_factors(
 
     `factor_returns` = {"market": [...], "size": [...]...}. Returns alpha
     (annualized %), factor betas + t-stats, R²/adj-R², residual vol, and a VIF
-    multicollinearity diagnostic. Excess returns use the supplied rfr (annual),
+    multicollinearity diagnostic.     Excess returns use the supplied rfr (annual),
     defaulting to 4%.
+
+    That 4% is not the same default as ``performance_report``, which uses 0.
+    A missing rate there must not invent a T-bill. This default is the rate
+    the backend copy used when the caller did not pass one. Pass
+    ``risk_free_rate`` explicitly when the two have to agree.
     """
     factor_names = list(factor_returns.keys())
     if not factor_names:
@@ -118,6 +125,13 @@ def decompose_factors(
         tstats[name] = _clean(round(float(model.tvalues[i + 1]), 2))
 
     alpha_pvalue = float(model.pvalues[0])
+    record(
+        "factor_alpha",
+        "annualised intercept of excess portfolio returns on the factor panel, HAC errors",
+        inputs={"n_observations": int(min_len), "risk_free_rate": rfr, "n_factors": len(factor_names)},
+        series={"portfolio_excess": y_excess},
+        result=round(float(model.params[0] * 252 * 100), 2),
+    )
     return {
         "alpha": _clean(round(float(model.params[0] * 252 * 100), 2)),
         "alpha_tstat": _clean(round(float(model.tvalues[0]), 2)),

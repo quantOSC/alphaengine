@@ -1,0 +1,369 @@
+"""One line of the session.
+
+`run <workflow>` is scripted. Anything else is a sentence, and the model may
+only choose among workflows and steps the server already permitted.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+from ..cli import (
+    QUESTION_VERBS,
+    ProjectError,
+    _apply_flags,
+    _ask,
+    _describe_source,
+    _drive,
+    _explain_offline,
+    _extract_flags,
+    _help_text,
+    _is_workflow,
+    _near_verb,
+    _repl_gap,
+    _report,
+    _split_run,
+    dim,
+    load_project,
+    preflight,
+    project_grid,
+    red,
+    resolve_data,
+    say,
+    yellow,
+)
+from ..client import Offline, ServerError
+
+
+@dataclass
+class Desk:
+    """What the session is holding. Mutated by `submit`."""
+
+    session: Any
+    url: str
+    args: Any
+    data: Any = None
+    backtest_fn: Any = None
+    loaded: str | None = None
+    last: Any = None
+    think: Callable[[str], str] | None = None
+    keyed: bool = False
+    pending_secret: str | None = None
+    pinned_model: str | None = None
+    book: Any = None
+
+
+def submit(desk: Desk, line: str) -> bool:
+    """Handle one line. True means the session should close."""
+    line = line.strip()
+    if not line:
+        return False
+
+    line, inline_flags = _extract_flags(line)
+    if inline_flags:
+        try:
+            desk.data, desk.backtest_fn = _apply_flags(
+                inline_flags, desk.session, desk.data, desk.backtest_fn
+            )
+            desk.loaded = _describe_source(inline_flags) or desk.loaded
+        except (ProjectError, ValueError) as exc:
+            say(red(str(exc)))
+            return False
+        except Exception as exc:  # noqa: BLE001 — a server refusal, said plainly
+            say(red(str(exc)))
+            return False
+        if not line.strip():
+            return False
+
+    if line.split()[:1] == ["alphaengine"]:
+        line = line.partition(" ")[2].strip()
+        if not line:
+            return False
+    if line.startswith("/"):
+        line = line[1:].lstrip()
+
+    verb, _, rest = line.partition(" ")
+    if verb in QUESTION_VERBS and not rest:
+        verb, rest = "run", QUESTION_VERBS[verb]
+    rest = rest.strip()
+
+    if verb in ("quit", "exit"):
+        return True
+    if verb == "help":
+        say(_help_text())
+        return False
+    if verb == "demo":
+        from ..cli import cmd_demo
+
+        cmd_demo(desk.args if desk.args is not None else _ns(desk))
+        return False
+    if verb == "process":
+        from ..cli import cmd_process
+
+        cmd_process(
+            _ns(desk, dgp=rest or "gbm", data=None, project=None, universe=None),
+            data=desk.data,
+        )
+        return False
+    if verb == "models":
+        from ..cli import cmd_models
+
+        cmd_models(_ns(desk))
+        return False
+    if verb == "model":
+        _pin_model(desk, rest)
+        return False
+    if verb == "trace":
+        from ..cli import cmd_trace
+
+        cmd_trace(_ns(desk, run_id=rest or getattr(desk.last, "run_id", None)))
+        return False
+    if verb == "book":
+        _book(desk, rest)
+        return False
+    if verb in ("commands", "?"):
+        from ..cli import cmd_commands
+
+        cmd_commands(_ns(desk, verb=rest))
+        return False
+    if verb == "workflows":
+        from ..cli import cmd_workflows
+
+        cmd_workflows(_ns(desk))
+        return False
+    if verb == "runs":
+        from ..cli import cmd_runs
+
+        cmd_runs(_ns(desk, limit=25))
+        return False
+    if verb == "gaps":
+        from ..cli import cmd_gaps
+
+        cmd_gaps(_ns(desk))
+        return False
+    if verb == "tonight":
+        from ..cli import cmd_tonight
+
+        cmd_tonight(_ns(desk, budget=0))
+        return False
+    if verb == "logout":
+        _logout(desk)
+        return False
+    if verb in ("key", "keys", "login"):
+        _key(desk, rest)
+        return False
+    if verb == "status":
+        if desk.last is None:
+            say(dim("no run yet"))
+        else:
+            say(f"{desk.last.run_id}  {desk.last.status}")
+        return False
+    if verb == "load":
+        _load_spec(desk, rest)
+        return False
+    if verb in ("universe", "data"):
+        _load_named(desk, verb, rest)
+        return False
+    if verb == "project":
+        try:
+            desk.data, desk.backtest_fn = load_project(rest)
+            desk.loaded = rest
+            say(dim(f"project: {rest}"))
+        except ProjectError as exc:
+            say(red(str(exc)))
+        return False
+
+    if verb == "run" and rest:
+        name, flags = _split_run(rest)
+        if name and " " not in name and _is_workflow(desk.session, name):
+            _scripted(desk, name, flags)
+            return False
+
+    if verb == "run" and not rest:
+        say(red("run what? try `workflows`, or just describe what you want."))
+        return False
+
+    if " " not in line:
+        near = _near_verb(line)
+        if near:
+            say(dim(f"  No command {line!r}. Did you mean `{near}`?"))
+            say(dim("  Type it again as a sentence if you meant it as a question."))
+            return False
+
+    _sentence(desk, line)
+    return False
+
+
+def _ns(desk: Desk, **extra: Any) -> Any:
+    import argparse
+
+    base = desk.args
+    return argparse.Namespace(
+        url=getattr(base, "url", None),
+        key=getattr(base, "key", None),
+        **extra,
+    )
+
+
+def _logout(desk: Desk) -> None:
+    import os
+
+    from ..cli import _session, cmd_logout
+
+    cmd_logout(_ns(desk))
+    for name in ("QUANTOS_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+        os.environ.pop(name, None)
+    desk.session, desk.url = _session(getattr(desk.args, "url", None), getattr(desk.args, "key", None))
+    desk.keyed = False
+    desk.pending_secret = None
+
+
+def _key(desk: Desk, rest: str) -> None:
+    which = (rest.split() or [""])[0].lower()
+    names = {
+        "quantos": "QUANTOS_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }
+    if which not in names:
+        say(dim("key quantos, key anthropic, or key openai. The next line is the key, and it stays hidden."))
+        return
+    desk.pending_secret = names[which]
+    say(dim(f"Paste the {which} key. It is hidden, then stored for this machine."))
+
+
+def _pin_model(desk: Desk, rest: str) -> None:
+    import os
+
+    from ..model import available_models, pin_model
+
+    if not rest:
+        pinned = os.environ.get("ALPHAENGINE_PROVIDER") or os.environ.get("ALPHAENGINE_MODEL")
+        say(dim("  pinned: " + (pinned or "none (first usable)")))
+        for label, model in available_models():
+            say(f"    {label}/{model}")
+        return
+    provider, model_name = pin_model(rest)
+    desk.pinned_model = f"{provider or ''}/{model_name or rest}".strip("/")
+    say(dim(f"model {desk.pinned_model}"))
+
+
+def _book(desk: Desk, rest: str) -> None:
+    from ..book import Book
+
+    if desk.book is None:
+        desk.book = Book()
+    book = desk.book
+    if rest in ("status", "monitor"):
+        say(str(book.monitor()))
+        return
+    if rest:
+        if isinstance(desk.data, dict) and rest in desk.data:
+            book.add(rest, desk.data[rest])
+            say(dim(f"sleeve {rest}"))
+        else:
+            say(yellow("load data first, then `book <name>`"))
+        return
+    names = book.names
+    say(dim("empty book") if not names else "sleeves: " + ", ".join(names))
+
+
+def _load_spec(desk: Desk, rest: str) -> None:
+    from ..cli import _open_spec, classify_load
+
+    if not rest:
+        say(red("load what? a file, a project module, or a universe name."))
+        return
+    try:
+        kind = classify_load(rest)
+        desk.data, desk.backtest_fn, desk.loaded = _open_spec(
+            kind, rest, desk.session, desk.data, desk.backtest_fn
+        )
+        say(dim(f"loaded {desk.loaded}"))
+    except (ProjectError, ValueError) as exc:
+        say(red(str(exc)))
+    except Exception as exc:  # noqa: BLE001
+        say(red(str(exc)))
+
+
+def _load_named(desk: Desk, verb: str, rest: str) -> None:
+    import argparse
+
+    if not rest:
+        say(red(f"{verb} what? try `{verb} <name>`."))
+        return
+    try:
+        ns = argparse.Namespace(
+            project=None,
+            data=rest if verb == "data" else None,
+            universe=rest if verb == "universe" else None,
+            symbol=None,
+        )
+        loaded, _ = resolve_data(ns, desk.session)
+        if loaded is not None:
+            desk.data = loaded
+            desk.loaded = f"{verb}:{rest}"
+            say(dim(f"loaded {desk.loaded}"))
+    except (ProjectError, ValueError) as exc:
+        say(red(str(exc)))
+    except Exception as exc:  # noqa: BLE001
+        say(red(str(exc)))
+
+
+def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
+    try:
+        if flags:
+            desk.data, desk.backtest_fn = _apply_flags(flags, desk.session, desk.data, desk.backtest_fn)
+            desk.loaded = _describe_source(flags) or desk.loaded
+        gap = preflight(desk.session.workflows(), name, data=desk.data, backtest_fn=desk.backtest_fn)
+        if gap:
+            say(yellow(_repl_gap(gap, name)))
+            return
+        grid = project_grid()
+        desk.last = desk.session.open(
+            name,
+            data=desk.data,
+            backtest_fn=desk.backtest_fn,
+            **({"grid": grid} if grid else {}),
+        )
+        _drive(desk.last)
+        _report(desk.last)
+    except Offline:
+        _explain_offline(desk.url)
+    except ServerError as exc:
+        from ..cli import refused
+
+        refused(exc)
+    except (ProjectError, ValueError) as exc:
+        say(red(str(exc)))
+
+
+def _sentence(desk: Desk, line: str) -> None:
+    from ..cli import _apply_flags as apply_flags
+    from ..cli import _stored_universes, _universe_named_in
+
+    if desk.data is None:
+        named = _universe_named_in(line, desk.session)
+        if not named:
+            named, _ready = _stored_universes(desk.session)
+        if named:
+            try:
+                desk.data, desk.backtest_fn = apply_flags(
+                    ["--universe", named], desk.session, desk.data, desk.backtest_fn
+                )
+                desk.loaded = f"universe:{named}"
+            except Exception as exc:  # noqa: BLE001
+                say(dim(f"  ({named} is registered and could not be loaded: {exc})"))
+
+    run = _ask(
+        desk.session,
+        desk.url,
+        line,
+        data=desk.data,
+        backtest_fn=desk.backtest_fn,
+        think=desk.think,
+    )
+    if run is not None:
+        desk.last = run

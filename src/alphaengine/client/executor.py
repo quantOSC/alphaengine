@@ -12,11 +12,12 @@ WHAT THIS DELIBERATELY DOES NOT CONTAIN
     The absence is the design: an executor that knew the sequence would be a
     second, worse copy of the server's job, and the two would drift.
 
-WHAT COMES BACK IS FIGURES, NEVER SERIES
-    Every handler returns scalars and small structures. A server that asked for
-    a return series would be refused, and none does: the whole arrangement rests
-    on the data staying put, so the client enforces its own half rather than
-    trusting the other end.
+WHAT COMES BACK AS FIGURES IS NEVER A SERIES
+    Every handler returns scalars and small structures. `_guard` refuses a list
+    longer than `MAX_FIGURE_LIST` inside that payload, matching the server.
+    The series a line was computed on travels separately, on `last_lines`, and
+    `Run.step` posts those to `/traces`. A rejection there does not fail the
+    step. Study ingest is unchanged and still refuses series.
 
 THE WORKSPACE
     Some operations read what an earlier one produced: a deflated Sharpe needs
@@ -79,6 +80,7 @@ from ..core import (
 )
 from ..core.allocate import cov_from_returns
 from ..core.covariance import cov_diagnostics, returns_matrix, triangle
+from ..core.trace import collecting
 from ..core.walkforward import walk_forward
 from ..sweep import sweep as run_sweep
 
@@ -289,6 +291,8 @@ class StepExecutor:
         self.data = data
         self.backtest_fn = backtest_fn
         self.workspace: dict[str, Any] = {}
+        #: Math lines from the last successful `execute`. Series live here, not in figures.
+        self.last_lines: list[dict[str, Any]] = []
         self._handlers: dict[str, Handler] = {
             "data.resolve": self._resolve,
             "data.describe": self._resolve,
@@ -366,7 +370,11 @@ class StepExecutor:
             raise UnsupportedOp(
                 f"{op!r} is not executable by this build. Supply a handler for it, or upgrade alphaengine."
             )
-        return _guard(handler(dict(params or {}), self.workspace))
+        self.last_lines = []
+        with collecting() as collector:
+            figures = _guard(handler(dict(params or {}), self.workspace))
+        self.last_lines = [line.to_dict() for line in collector.lines]
+        return figures
 
     # ── handlers ───────────────────────────────────────────────────────────
     def _resolve(self, params: Figures, ws: Workspace) -> Figures:

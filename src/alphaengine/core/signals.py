@@ -41,6 +41,7 @@ import numpy as np
 
 from .panel import newey_west_tstat
 from .series_shapes import series_values
+from .trace import record
 
 #: The longest per-period sequence a reading reports, and the longest bounded
 #: name list beside it.
@@ -210,7 +211,7 @@ def information_coefficient(signal: dict, prices: dict, *, horizon: int = DEFAUL
         if len(ics) > 1 and float(arr.std(ddof=1)) > 0:
             t_stat = round(float(arr.mean() / (arr.std(ddof=1) / np.sqrt(len(ics)))), _RND)
 
-    return {
+    result = {
         "mean_ic": mean_ic,
         "ic_t_stat": t_stat,
         "n_periods": len(ics),
@@ -220,6 +221,14 @@ def information_coefficient(signal: dict, prices: dict, *, horizon: int = DEFAUL
         "skipped": skipped[:MAX_PERIODS],
         "horizon": horizon,
     }
+    record(
+        "mean_ic",
+        "mean Spearman rank correlation of the signal with non-overlapping forward returns",
+        inputs={"horizon": horizon, "n_periods": len(ics), "n_names": len(names)},
+        series={"ic_by_period": ics},
+        result=mean_ic,
+    )
+    return result
 
 
 def signal_icir(
@@ -325,7 +334,7 @@ def quantile_returns(
     if means[0] is not None and means[-1] is not None:
         spread = round(means[-1] - means[0], _RND)
 
-    return {
+    result = {
         "quantile_mean_pct": means,
         "spread_pct": spread,
         "n_periods": n_periods,
@@ -334,6 +343,14 @@ def quantile_returns(
         "n_names": len(names),
         "n_skipped": len(skipped),
     }
+    record(
+        "quantile_spread",
+        "mean forward return of the top quantile minus the bottom, in percent",
+        inputs={"horizon": horizon, "quantiles": quantiles, "n_periods": n_periods},
+        series={"quantile_mean_pct": [v if v is not None else float("nan") for v in means]},
+        result=spread,
+    )
+    return result
 
 
 def signal_decay(signal: dict, prices: dict, *, horizons: tuple[int, ...] = (1, 5, 21, 63)) -> dict:
@@ -357,11 +374,19 @@ def signal_decay(signal: dict, prices: dict, *, horizons: tuple[int, ...] = (1, 
                 half_life = float(h)
                 break
 
-    return {
+    result = {
         "horizons": list(cleaned),
         "ic_at_horizon": out,
         "half_life_periods": half_life,
     }
+    record(
+        "signal_half_life",
+        "first horizon whose |IC| is at most half the one-step |IC|",
+        inputs={"horizons": len(cleaned)},
+        series={"ic_at_horizon": [v if v is not None else float("nan") for v in out]},
+        result=half_life,
+    )
+    return result
 
 
 __all__ = [

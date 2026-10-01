@@ -69,4 +69,11 @@ is what a changed figure costs. The API may still move underneath it.
 # Monte Carlo trial count, Grinold alpha / breadth / TC, a frozen chart
 # vocabulary, and a terminal boot that is the README banner in glyphs.
 # New figures are a public contract from this release; old numbers did not move.
-__version__ = "0.8.0"
+#
+# 0.9.0: `run_backtest(..., fill_timing="next_open")` no longer fills the first
+# bar with that bar's own signal. A signal is known at the close, and the open
+# of the same bar printed before it. The first fill is now the next bar's open.
+# Close fills are unchanged. No golden in tests/test_goldens.py moves. The
+# same release makes the full-screen terminal the only session, and posts each
+# math line's series on `/traces` without putting those series inside figures.
+__version__ = "0.9.0"

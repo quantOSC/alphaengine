@@ -24,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from .series_shapes import series_values
+from .trace import record
 
 DEFAULT_SMA_WINDOWS = [50, 150, 200]
 RSI_OVERBOUGHT = 70.0
@@ -200,6 +201,41 @@ def technical_features(
                 "pct_of_close": round(atr / last * 100.0, 4) if last != 0 else None,
             }
 
+        if isinstance(res.get("rsi"), dict):
+            record(
+                "rsi",
+                "Wilder RSI: 100 - 100/(1 + avg_gain/avg_loss), seeded on the first window",
+                inputs={"symbol": str(sym), "window": rsi_window, "n_obs": n},
+                series={"close": closes},
+                result=res["rsi"]["value"],
+            )
+        for w, block in res.get("sma", {}).items():
+            if block is not None:
+                record(
+                    "sma",
+                    "mean of the trailing window of closes",
+                    inputs={"symbol": str(sym), "window": int(w), "n_obs": n},
+                    series={"close": closes},
+                    result=block["value"],
+                )
+        for w, block in res.get("ema", {}).items():
+            if block is not None:
+                record(
+                    "ema",
+                    "SMA seed, then alpha=2/(window+1)",
+                    inputs={"symbol": str(sym), "window": int(w), "n_obs": n},
+                    series={"close": closes},
+                    result=block["value"],
+                )
+        atr_block = res.get("atr")
+        if isinstance(atr_block, dict) and atr_block.get("available", True) and "value" in atr_block:
+            record(
+                "atr",
+                "Wilder smoothing of true range",
+                inputs={"symbol": str(sym), "window": atr_window, "n_obs": n},
+                series={"close": closes},
+                result=atr_block["value"],
+            )
         features[sym] = res
 
     return {

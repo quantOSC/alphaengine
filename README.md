@@ -19,23 +19,45 @@
 </p>
 
 ```bash
-pip install alphaengine
-alphaengine demo          # the whole offline half, no account, no data of your own
-alphaengine process       # fit a DGP to the demo walk and stress it
+pip install alphaengine                 # library and one-shot commands
+pip install "alphaengine[tui]"          # the full-screen session
+alphaengine demo                        # offline. no account, no data of yours
+alphaengine                             # the session
+alphaengine process                     # fit a DGP to the demo walk and stress it
 ```
 
-<p align="center">
-  <img src="docs/assets/session.png" alt="The session canvas: tracked ALPHAENGINE over a teal plateau and amber ridge, then your data never leaves." width="92%">
-</p>
+If the shell cannot find `alphaengine`, this always works:
 
-The session is the product. Sign in, load something, then ask:
+```bash
+python -m alphaengine demo
+python -m alphaengine
+```
+
+```
+┌──────────┬─────────────────────────────────────┬──────────────────┐
+│ ● maths  │  Ask in plain English.              │  sharpe          │
+│   always │                                     │  mean / std √252 │
+│ ○ flows  │  > which names are overbought?      │  ▁▂▃▅▇█▇▅▃       │
+│ ○ ask    │                                     │  0    0.0012     │
+│          │  chose screen_universe              │  1   -0.0040     │
+│ loaded   │                                     │                  │
+│  sp500   │                                     │                  │
+└──────────┴─────────────────────────────────────┴──────────────────┘
+```
+
+There is one session, and it is this screen. A sentence picks a workflow.
+`run <name>` follows that workflow exactly. The math pane opens when a run
+has a statistic to show.
 
 ```bash
 alphaengine
-❯ login
-❯ load prices.csv
-❯ screen
+> login
+> load prices.csv
+> screen
 ```
+
+Prices stay on this machine. A math line's series can travel on its own trace
+so it can be charted. The figures posted with the step stay summaries.
 
 ---
 
@@ -150,6 +172,17 @@ distinction is the whole of the data boundary below.
 </p>
 
 ---
+
+## What's new in 0.9.0
+
+`next_open` fills wait for a prior close. The first bar of a next-open backtest
+no longer trades that bar's own signal at that bar's open. Close fills are
+unchanged, and the published goldens do not move.
+
+The session is the full-screen terminal (`pip install "alphaengine[tui]"`).
+Each statistic keeps its formula, inputs, and series. Those series post to
+`/api/harness/runs/{id}/traces`. A portal that rejects the trace does not fail
+the run.
 
 ## What's new in 0.8.0
 

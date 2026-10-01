@@ -21,6 +21,8 @@ import math
 import numpy as np
 from scipy import stats
 
+from .trace import record
+
 
 def _clean(val):
     if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
@@ -124,4 +126,26 @@ def compute_var_cvar(
         "tail_observations": int(tail.size),
     }
 
+    record(
+        "parametric_var",
+        "z * std(r, ddof=1) * sqrt(horizon), z = normsinv(confidence), as a positive percent",
+        inputs={"n_obs": int(n_obs), "confidence": confidence, "horizon_days": int(horizon_days), "z": round(z, 6)},
+        series={"returns": arr},
+        result=result["parametric"]["var_pct"],
+    )
+    if "historical" in result:
+        record(
+            "historical_var",
+            "abs(percentile(r, (1-confidence)*100)) * sqrt(horizon), as a positive percent",
+            inputs={"n_obs": int(n_obs), "confidence": confidence, "horizon_days": int(horizon_days)},
+            series={"returns": arr},
+            result=result["historical"]["var_pct"],
+        )
+    record(
+        "cvar",
+        "abs(mean(r where r <= historical VaR cutoff)), as a positive percent",
+        inputs={"n_obs": int(n_obs), "confidence": confidence, "tail_observations": int(tail.size)},
+        series={"returns": arr, "tail": tail},
+        result=result["cvar"]["cvar_pct"],
+    )
     return result

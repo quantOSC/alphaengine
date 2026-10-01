@@ -104,6 +104,13 @@ class Run:
     #: public vocabulary and a stage name is not.
     figures: Figures = field(default_factory=dict)
 
+    #: Math lines posted to `/traces` for this run, one payload per successful step.
+    #: Kept even when the portal rejects them, so the session can still inspect
+    #: every line at full length.
+    traces: list[Figures] = field(default_factory=list)
+    #: Set when the trace POST is refused. The step itself still stands.
+    trace_rejected: str | None = None
+
     #: What the last failed step said, for a caller that renders failures.
     #: Cleared on the next success — this is display state, not the record;
     #: the record is the server-side trace, which keeps every attempt.
@@ -182,6 +189,7 @@ class Run:
     def step(self, step: Figures) -> Figures:
         """Execute one permitted step locally and report the figures."""
         attempt_id = uuid.uuid4().hex
+        succeeded = False
         try:
             figures = self.executor.execute(step["op"], step.get("params"))
             # RECORDED BEFORE THE ROUND TRIP, so an agent asked to choose the
@@ -191,6 +199,7 @@ class Run:
                 self.figures[str(step["op"])] = figures
             body = {"step_id": step["step_id"], "attempt_id": attempt_id, "figures": figures}
             self.last_error = None
+            succeeded = True
         except Exception as exc:  # noqa: BLE001 — reported, never swallowed; see below
             # Report the failure rather than dropping it — OR crashing. A
             # silently skipped step is a gap the server cannot see, and an
@@ -207,8 +216,39 @@ class Run:
             }
             self.last_error = str(exc)
         directive = self.session._post(f"/api/harness/runs/{self.run_id}/steps", body)
+        # After the figures, never inside them. A rejected trace must not turn
+        # a finished step into a failed one, and it must not ride in the body
+        # the server already knows how to guard.
+        if succeeded:
+            self._report_trace(step, attempt_id)
         self._absorb(directive)
         return directive
+
+    def _report_trace(self, step: Figures, attempt_id: str) -> None:
+        """POST the math lines. A refusal is recorded and does not fail the step.
+
+        Figures already went out, and they are what the run is. The trace is
+        the series those figures were computed from. The server that exists
+        today rejects a long list, so this call is allowed to fail.
+        """
+        lines = list(self.executor.last_lines)
+        if not lines:
+            return
+        from .._version import __version__
+
+        payload: Figures = {
+            "step_id": step.get("step_id"),
+            "attempt_id": attempt_id,
+            "op": step.get("op"),
+            "engine": f"alphaengine@{__version__}",
+            "lines": lines,
+        }
+        self.traces.append(payload)
+        try:
+            self.session._post(f"/api/harness/runs/{self.run_id}/traces", payload)
+            self.trace_rejected = None
+        except (ServerError, Offline, OSError, ValueError, TypeError) as exc:
+            self.trace_rejected = str(exc)
 
     def drive(self, *, max_steps: int = 200, max_attempts: int = 2) -> Run:
         """Run to completion: execute what is permitted until stopped or closed.

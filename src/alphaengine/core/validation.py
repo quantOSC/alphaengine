@@ -20,6 +20,8 @@ import math
 import numpy as np
 from scipy import stats
 
+from .trace import record
+
 _EULER = 0.5772156649015329
 
 
@@ -97,7 +99,7 @@ def deflated_sharpe(
     sr0 = expected_max_sharpe(max(2, n_trials), std_for_max)
     dsr = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0)
 
-    return {
+    out = {
         "n_obs": int(n),
         "n_trials": int(n_trials),
         "sharpe_per_period": round(sr, 4),
@@ -111,6 +113,28 @@ def deflated_sharpe(
         # The headline shown INSTEAD of raw Sharpe.
         "verdict": ("likely_noise" if dsr < 0.5 else "marginal" if dsr < 0.9 else "robust"),
     }
+    record(
+        "deflated_sharpe",
+        "PSR(SR*) where SR* is the expected maximum Sharpe across n_trials",
+        inputs={"n_obs": int(n), "n_trials": int(n_trials), "sharpe_per_period": round(sr, 4)},
+        series={"returns": arr},
+        result=round(dsr, 4),
+    )
+    record(
+        "psr_vs_zero",
+        "norm.cdf( (SR - 0) * sqrt(n-1) / sqrt(1 - skew*SR + ((kurt-1)/4)*SR^2) )",
+        inputs={"n_obs": int(n), "skew": round(skew, 4), "kurtosis": round(kurt, 4)},
+        series={"returns": arr},
+        result=round(psr0, 4),
+    )
+    record(
+        "sr0_expected_max",
+        "sigma_SR * ((1-gamma)*Phi^{-1}(1-1/N) + gamma*Phi^{-1}(1-1/(N*e)))",
+        inputs={"n_trials": int(max(2, n_trials)), "trials_sharpe_std": round(std_for_max, 4)},
+        series={"returns": arr},
+        result=round(sr0, 4),
+    )
+    return out
 
 
 def min_track_record_length(
@@ -145,7 +169,7 @@ def min_track_record_length(
     z = float(stats.norm.ppf(confidence))
     mintrl = 1.0 + (1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) * (z / (sr - sr_benchmark)) ** 2
     mintrl = max(1.0, float(mintrl))
-    return {
+    out = {
         "n_obs": int(n),
         "sharpe_per_period": round(sr, 4),
         "confidence": confidence,
@@ -154,6 +178,14 @@ def min_track_record_length(
         "sufficient": bool(n >= mintrl),
         "shortfall_obs": max(0, int(math.ceil(mintrl - n))),
     }
+    record(
+        "min_track_record_length",
+        "1 + (1 - skew*SR + ((kurt-1)/4)*SR^2) * (Z_alpha / (SR - SR*))^2",
+        inputs={"n_obs": int(n), "confidence": confidence, "sharpe_per_period": round(sr, 4)},
+        series={"returns": arr},
+        result=round(mintrl, 1),
+    )
+    return out
 
 
 # ── PBO via CSCV ────────────────────────────────────────────────────────
@@ -216,7 +248,7 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
 
     logits_arr = np.asarray(logits)
     pbo = float(np.mean(logits_arr <= 0.0)) if logits_arr.size else float("nan")
-    return {
+    out = {
         "pbo": round(pbo, 4),
         "n_partitions": int(logits_arr.size),
         "n_configs": int(N),
@@ -224,6 +256,14 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
         "logit_mean": round(float(np.mean(logits_arr)), 4) if logits_arr.size else None,
         "verdict": ("overfit" if pbo > 0.5 else "acceptable" if pbo > 0.2 else "robust"),
     }
+    record(
+        "pbo",
+        "fraction of CSCV partitions where the in-sample best ranks below the OOS median",
+        inputs={"n_configs": int(N), "n_splits": int(n_splits), "n_partitions": int(logits_arr.size)},
+        series={"logit": logits_arr},
+        result=round(pbo, 4),
+    )
+    return out
 
 
 # ── CPCV, Combinatorial Purged Cross-Validation (single return stream) ──────
@@ -358,4 +398,17 @@ def cpcv_score(
         )
     else:
         out["verdict"] = "likely_noise" if med_sr <= 0 else "inconclusive"
+    record(
+        "cpcv_sharpe",
+        "annualised Sharpe of each purged and embargoed held-out path",
+        inputs={
+            "n_groups": n_groups,
+            "n_test_groups": n_test_groups,
+            "purge": purge,
+            "embargo": embargo,
+            "n_paths": int(sh.size),
+        },
+        series={"sharpe_annualized": sh},
+        result=out["sharpe_annualized"]["median"],
+    )
     return out

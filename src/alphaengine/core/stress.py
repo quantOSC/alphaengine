@@ -28,6 +28,7 @@ from typing import Any
 import numpy as np
 
 from .series_shapes import series_values
+from .trace import record
 
 _RND = 6
 _TRADING_DAYS = 252
@@ -89,7 +90,7 @@ def subperiod_stability(returns: Any, *, segments: int = DEFAULT_SEGMENTS) -> di
     if total > 0:
         share = round(float(np.max(pnl) / total), _RND)
 
-    return {
+    out = {
         "segment_sharpes": [None if s is None else round(s, _RND) for s in sharpes],
         "worst_segment_sharpe": (
             None if any(s is None for s in sharpes) else round(min(s for s in sharpes if s is not None), _RND)
@@ -98,6 +99,14 @@ def subperiod_stability(returns: Any, *, segments: int = DEFAULT_SEGMENTS) -> di
         "n_segments": segments,
         "n_obs": int(arr.size),
     }
+    record(
+        "share_of_pnl_in_best_segment",
+        "max(segment pnl) / sum(|segment pnl|)",
+        inputs={"n_segments": segments, "n_obs": int(arr.size)},
+        series={"returns": arr, "segment_pnl": pnl},
+        result=share,
+    )
+    return out
 
 
 def cost_ladder(
@@ -132,13 +141,21 @@ def cost_ladder(
             dies_at = level
             break
 
-    return {
+    out = {
         "bps_levels": levels,
         "sharpe_at_bps": [None if s is None else round(s, _RND) for s in sharpes],
         "dies_at_bps": dies_at,
         "turnover": round(float(turnover), _RND),
         "n_obs": int(arr.size),
     }
+    record(
+        "sharpe_at_bps",
+        "annualised Sharpe of returns minus turnover * bps/10000",
+        inputs={"turnover": round(float(turnover), _RND), "n_obs": int(arr.size)},
+        series={"returns": arr, "sharpe_at_bps": [s if s is not None else float("nan") for s in sharpes]},
+        result=dies_at,
+    )
+    return out
 
 
 def drawdown_anatomy(returns: Any) -> dict:
@@ -179,7 +196,7 @@ def drawdown_anatomy(returns: Any) -> dict:
     if trough <= -0.10:
         episodes_over_10 += 1
 
-    return {
+    out = {
         # POSITIVE loss magnitude, the convention everywhere in this codebase.
         "max_drawdown_pct": round(float(-dd.min()) * 100.0, _RND),
         "longest_underwater_periods": int(longest),
@@ -187,6 +204,14 @@ def drawdown_anatomy(returns: Any) -> dict:
         "time_underwater_share": round(float(underwater.mean()), _RND),
         "n_obs": int(arr.size),
     }
+    record(
+        "max_drawdown_pct",
+        "min(equity/cummax(equity) - 1), as a positive percent",
+        inputs={"n_obs": int(arr.size)},
+        series={"returns": arr, "drawdown": dd},
+        result=round(float(-dd.min()) * 100.0, _RND),
+    )
+    return out
 
 
 def overlap_stats(candidate: Any, book: Any) -> dict:
@@ -209,11 +234,20 @@ def overlap_stats(candidate: Any, book: Any) -> dict:
         return {"correlation": None, "beta_to_book": None, "n_obs": int(depth)}
 
     cov = float(np.mean((c - c.mean()) * (b - b.mean())))
-    return {
-        "correlation": round(cov / (sc * sb) * depth / (depth - 1), _RND),
+    correlation = round(cov / (sc * sb) * depth / (depth - 1), _RND)
+    out = {
+        "correlation": correlation,
         "beta_to_book": round(cov / (sb * sb) * depth / (depth - 1), _RND),
         "n_obs": int(depth),
     }
+    record(
+        "correlation",
+        "sample correlation of the candidate with the book, on the shared tail",
+        inputs={"n_obs": int(depth)},
+        series={"candidate": c, "book": b},
+        result=correlation,
+    )
+    return out
 
 
 __all__ = [

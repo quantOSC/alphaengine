@@ -48,6 +48,7 @@ from typing import Any
 import numpy as np
 
 from .technical import _extract, _sma, _wilder_rsi
+from .trace import record
 
 # A shortlist, not a data export. The harness refuses any list over 64 elements
 # on both sides of the wire, and a screen that wanted to return more than this
@@ -251,6 +252,13 @@ def screen_universe(
         out["rank"] = position
         rows.append(out)
 
+    record(
+        "screen_score",
+        f"rank passing names by {rank_by}",
+        inputs={"rank_by": rank_by, "n_passing": len(passing), "descending": bool(descending)},
+        series={"score": [float(row["score"]) for row in passing]},
+        result=rows[0]["symbol"] if rows else None,
+    )
     return {
         "rows": rows,
         "rank_by": rank_by,

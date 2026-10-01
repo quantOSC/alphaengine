@@ -23,8 +23,10 @@ WHAT THIS LIBRARY IS NOT
 
 OFFLINE BY CONSTRUCTION
     Importing this module makes no network call and needs no account. numpy and
-    scipy, nothing else. Everything above runs on a laptop with the wifi off,
-    and your data never leaves the machine.
+    scipy, nothing else. Everything above runs on a laptop with the wifi off.
+    A workflow run can also send a math trace — the formula, its inputs, and
+    the series that line was computed on — to the portal on its own channel.
+    Study ingest still refuses anything series-shaped.
 """
 
 from typing import Any

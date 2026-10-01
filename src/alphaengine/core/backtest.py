@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import math
 
+from .trace import record
+
 MIN_BARS = 2
 
 # action keyword -> target weight; None means "hold" (carry the prior weight).
@@ -229,8 +231,14 @@ def run_backtest(
             if bar is None:
                 continue
             if fill_open:
+                # A signal is known at the close. The first bar has no prior
+                # close, so there is nothing to fill — using this bar's own
+                # signal at this bar's open would trade a price that printed
+                # before the signal existed.
+                if idx == 0:
+                    continue
                 fillp = bar["open"] if bar["open"] is not None else bar["close"]
-                ref_date = all_dates[idx - 1] if idx > 0 else d  # act on prior close's signal
+                ref_date = all_dates[idx - 1]
             else:
                 fillp = bar["close"]
                 ref_date = d
@@ -298,6 +306,17 @@ def run_backtest(
     final_equity = equity_curve[-1] if equity_curve else float(initial_capital)
     total_return_pct = round((final_equity / float(initial_capital) - 1.0) * 100.0, 4)
 
+    record(
+        "equity",
+        "marked equity after each bar; the residual close updates the trade log only",
+        inputs={
+            "n_bars": len(dates_out),
+            "fill_timing": "next_open" if fill_open else "close",
+            "initial_capital": float(initial_capital),
+        },
+        series={"equity": equity_curve, "returns": returns},
+        result=total_return_pct,
+    )
     return {
         "n_bars": len(dates_out),
         "dates": dates_out,
@@ -709,6 +728,18 @@ def score_backtest(
     # C2, turnover + net-of-cost vs gross Sharpe (from the sim's cost bookkeeping).
     costs = _cost_report(bt, perf, risk_free_rate)
 
+    record(
+        "verdict",
+        "edge requires a recorded n_trials, dsr >= 0.9, and pbo <= 0.2 when pbo is present",
+        inputs={
+            "n_trials": validation["n_trials"],
+            "n_trials_source": source,
+            "deflated_sharpe": dsr_val,
+            "pbo": pbo_val,
+        },
+        series={"returns": [float(r) for r in returns if r is not None]},
+        result=validation["verdict"],
+    )
     return {
         "performance": perf,
         "validation": validation,

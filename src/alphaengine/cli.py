@@ -93,15 +93,18 @@ satisfied structurally rather than promised.
 from __future__ import annotations
 
 import argparse
+import contextvars
 import importlib
 import json
 import math
 import os
 import pathlib
+import re
 import sys
 import threading
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
@@ -303,7 +306,31 @@ QUESTION_FOR_WORKFLOW: dict[str, str] = {w: v for v, w in QUESTION_VERBS.items()
 ELLIPSIS = "…" if _UNICODE_OK else "..."
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_SINK: contextvars.ContextVar[Callable[[str], None] | None] = contextvars.ContextVar(
+    "alphaengine_narration", default=None
+)
+
+
+@contextmanager
+def narration_to(sink: Callable[[str], None]) -> Iterator[None]:
+    """Send `say` and the working line to `sink` instead of the console.
+
+    The full-screen session reuses this module's run loop. A spinner written
+    to stdout would paint over that session, so the sink replaces both.
+    """
+    token = _SINK.set(sink)
+    try:
+        yield
+    finally:
+        _SINK.reset(token)
+
+
 def say(*parts: str) -> None:
+    sink = _SINK.get()
+    if sink is not None:
+        sink(_ANSI.sub("", " ".join(parts)))
+        return
     print(*parts, flush=True)
 
 
@@ -615,6 +642,10 @@ class Working:
 
     def __enter__(self) -> Working:
         self._started = time.monotonic()
+        sink = _SINK.get()
+        if sink is not None:
+            sink(self.plain)
+            return self
         if not _tty():
             return self
         self._nlines = _write_block(self._block(0))
@@ -1610,6 +1641,9 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                 found = _found(seen, run)
                 say(f"  {_accent(ON)}  {found or bold(op)}")
                 say(f"     {dim(NEST)} {took}")
+                rejected = getattr(run, "trace_rejected", None)
+                if rejected:
+                    say(yellow(f"    portal did not accept the series trace: {rejected}"))
 
             if run.status != "open":
                 return
@@ -3021,7 +3055,7 @@ def offer_key(which: str = "quantos") -> bool:
     Only ever called on an interactive terminal — a prompt in a CI log is a
     hang, so callers check `_tty()` first.
     """
-    if not _tty():
+    if not _tty() or _SINK.get() is not None:
         return False
     try:
         answer = input(bold("  Enter a key now? ") + dim("[Y/n] ")).strip().lower()
@@ -3128,6 +3162,7 @@ def _ask(
     data: Any,
     backtest_fn: Any,
     workspace_id: str | None = None,
+    think: Callable[[str], str] | None = None,
 ) -> Any:
     """Natural language → a workflow chosen and driven by the user's own model.
 
@@ -3152,11 +3187,13 @@ def _ask(
     # The lesson generalises: stream a call whose output is PROSE, never one
     # whose output is a wire format. `on_thought` already narrates this one, in
     # the words a person wrote it in.
-    try:
-        think, label = build_think()
-    except NoModelConfigured as exc:
-        say(yellow(str(exc)))
-        return None
+    label = "your model"
+    if think is None:
+        try:
+            think, label = build_think()
+        except NoModelConfigured as exc:
+            say(yellow(str(exc)))
+            return None
 
     provider, _, model_name = label.partition("/")
     sink = EventSink(session=session if os.environ.get(_ENV_KEY) else None)
@@ -3406,355 +3443,20 @@ def _wrap(text: str, width: int = 76) -> list[str]:
     return out
 
 
-def _repl_prompt(*, keyed: bool) -> str:
-    """The composer. Gold when the agent rung is live, otherwise quiet."""
-    from .model import available_models
-
-    mark = f"{PROMPT} "
-    if keyed and available_models():
-        return _accent(mark)
-    if keyed:
-        return green(mark)
-    return bold(mark)
+def cmd_session(args: argparse.Namespace) -> int:
+    """The full-screen session. One-shot commands stay on this parser."""
+    try:
+        from .tui.app import launch
+    except ImportError:
+        say("The session is a full-screen terminal.")
+        say("Install it with:  pip install 'alphaengine[tui]'")
+        return 2
+    return launch(args)
 
 
 def cmd_repl(args: argparse.Namespace) -> int:
-    """A session. The point is that a run is watchable and repeatable without
-    retyping a command line each time."""
-    from .client import Offline, ServerError
-    from .complete import enable as enable_complete
-    from .events import EventSink
-    from .repl import SLASH, SessionState
-
-    session, url = _session(args.url, args.key)
-    try:
-        data, backtest_fn = resolve_data(args, session)
-        workspace_id = None
-    except (ProjectError, ValueError) as exc:
-        say(red(str(exc)))
-        return 2
-
-    boot(
-        url,
-        project=args.project,
-        data=data,
-        keyed=bool(args.key or os.environ.get(_ENV_KEY)),
-        session=session,
-    )
-
-    # Named on the status line so "is my data in, and from where" is answerable
-    # without running a command. `--universe` and `--data` are recorded too,
-    # because "loaded" without a source is the half-answer that let a run with
-    # no data look like a run with data.
-    loaded_project = args.project or (
-        f"universe:{args.universe}"
-        if getattr(args, "universe", None)
-        else (f"file:{pathlib.Path(args.data).name}" if getattr(args, "data", None) else None)
-    )
-    state = SessionState(
-        data=data,
-        backtest_fn=backtest_fn,
-        loaded_project=loaded_project,
-        sink=EventSink(session=session if os.environ.get(_ENV_KEY) or args.key else None),
-    )
-    from .commands import COMMANDS
-
-    enable_complete(verbs=[c.verb for c in COMMANDS if c.verb.isalpha()] + list(SLASH))
-    last = None
-    while True:
-        try:
-            # Reprinted each turn rather than once at boot: a `project` or `key`
-            # mid-session changes it, and a status line that can be stale is
-            # worse than none.
-            say(
-                status_line(
-                    url, data=data, project=loaded_project, keyed=bool(os.environ.get(_ENV_KEY) or args.key)
-                )
-            )
-            line = input(_repl_prompt(keyed=bool(os.environ.get(_ENV_KEY) or args.key))).strip()
-        except (EOFError, KeyboardInterrupt):
-            say("")
-            return 0
-        if not line:
-            continue
-        # FLAGS FIRST, WHATEVER THE LINE IS. A command and a sentence are not
-        # alternatives here: `screen my book --universe sp100` is both, and the
-        # prompt used to force a choice between them.
-        line, inline_flags = _extract_flags(line)
-        if line.startswith("/"):
-            line = line[1:].lstrip()
-        if inline_flags:
-            try:
-                data, backtest_fn = _apply_flags(inline_flags, session, data, backtest_fn)
-                loaded_project = _describe_source(inline_flags) or loaded_project
-            except (ProjectError, ValueError) as exc:
-                say(red(str(exc)))
-                continue
-            except Exception as exc:  # noqa: BLE001 - a server refusal, said plainly
-                say(red(str(exc)))
-                continue
-            if not line.strip():
-                continue  # the flags WERE the instruction
-
-        # `alphaengine demo` at this prompt is somebody following the tool's own
-        # instructions: every message it prints shows the shell form, because
-        # that is the form that works in a shell. Stripping the binary name here
-        # costs one line and removes a whole class of "I typed what it told me
-        # to" and got a research question back.
-        if line.split()[:1] == ["alphaengine"]:
-            line = line.partition(" ")[2].strip()
-            if not line:
-                continue
-
-        verb, _, rest = line.partition(" ")
-        # THE QUESTIONS ARE COMMANDS HERE TOO. `screen` alone runs the
-        # workflow; `screen my tech universe` stays a sentence for the agent —
-        # a bare verb is an instruction, a verb in a sentence is a question.
-        if verb in QUESTION_VERBS and not rest:
-            verb, rest = "run", QUESTION_VERBS[verb]
-        rest = rest.strip()
-
-        if verb in ("quit", "exit"):
-            return 0
-        if verb == "help":
-            say(_help_text())
-            continue
-        if verb == "demo":
-            # A SHELL SUBCOMMAND ONLY, until now. So the single thing every
-            # refusal recommends to a stuck user -- "see it work on the built-in
-            # example first" -- was the one thing this prompt could not do.
-            cmd_demo(args)
-            continue
-        if verb == "process":
-            cmd_process(
-                argparse.Namespace(dgp=rest or "gbm", data=None, project=None, universe=None),
-                data=data,
-            )
-            continue
-        if verb in ("commands", "?"):
-            cmd_commands(argparse.Namespace(verb=rest))
-            continue
-        if verb == "workflows":
-            cmd_workflows(args)
-            continue
-        if verb == "runs":
-            # THE SESSION HAS ONE TOO, and it is the same record. A quant
-            # mid-session asking "what have I already tried" should not have to
-            # leave to find out.
-            cmd_runs(argparse.Namespace(url=args.url, key=args.key, limit=25))
-            continue
-        if verb == "gaps":
-            # AND THE OTHER HALF: what has NOT been tried. Same reason it is in
-            # the session — the moment you want it is mid-flight.
-            cmd_gaps(argparse.Namespace(url=args.url, key=args.key))
-            continue
-        if verb == "tonight":
-            cmd_tonight(argparse.Namespace(url=args.url, key=args.key, budget=0))
-            continue
-        if verb == "status":
-            say(dim("no run yet") if last is None else f"{last.run_id}  {last.status}")
-            if state.book.names:
-                say(dim("  book: " + ", ".join(state.book.names)))
-            if state.pinned_model:
-                say(dim("  model: " + state.pinned_model))
-            if state.last_shortlist:
-                say(dim("  shortlist: " + ", ".join(state.last_shortlist[:8])))
-            continue
-        if verb == "logout":
-            cmd_logout(args)
-            from .auth import MANAGED
-
-            for name in MANAGED:
-                os.environ.pop(name, None)
-            session, url = _session(args.url, args.key)
-            state.sink.session = None
-            continue
-        if verb == "models":
-            cmd_models(args)
-            continue
-        if verb == "model":
-            from .model import available_models, pin_model
-
-            if not rest:
-                pinned = os.environ.get("ALPHAENGINE_PROVIDER") or os.environ.get("ALPHAENGINE_MODEL")
-                ready = available_models()
-                say(dim("  pinned: " + (pinned or "none (first usable)")))
-                for label, model in ready:
-                    say(f"    {label}/{model}")
-            else:
-                provider, model_name = pin_model(rest)
-                state.pinned_model = f"{provider or ''}/{model_name or rest}".strip("/")
-                say(green(f"  model {state.pinned_model}"))
-            continue
-        if verb == "trace":
-            cmd_trace(argparse.Namespace(run_id=rest or getattr(last, "run_id", None)))
-            continue
-        if verb in ("quiet", "verbose"):
-            state.quiet = verb == "quiet"
-            args.quiet = state.quiet
-            say(dim("  quiet" if state.quiet else "  verbose"))
-            continue
-        if verb == "book":
-            if rest in ("status", "monitor"):
-                say(str(state.book.monitor()))
-            if rest:
-                if isinstance(data, dict) and rest in data:
-                    state.book.add(rest, data[rest])
-                    say(dim(f"  sleeve {rest}"))
-                else:
-                    say(yellow("  load data first, then `book <name>`"))
-            else:
-                names = state.book.names
-                say(dim("  empty book") if not names else "  sleeves: " + ", ".join(names))
-            continue
-        if verb in ("login", "key", "keys"):
-            which = rest
-            if not which and verb == "login" and not (os.environ.get(_ENV_KEY) or args.key):
-                which = "quantos"
-            if which:
-                if enter_key(which):
-                    # The session was built with the old key, so rebuild it or
-                    # the newly-entered credential would not be used until
-                    # restart — which looks exactly like the key not working.
-                    session, url = _session(args.url, args.key)
-                    state.sink.session = session
-            else:
-                for ln in ladder_lines(keyed=bool(os.environ.get(_ENV_KEY) or args.key)):
-                    say(ln)
-                say("")
-                say(dim("  `login` · `login anthropic` · `login openai` · `login gemini`"))
-            continue
-        if verb in ("load", "universe", "data", "project"):
-            if not rest:
-                hint = "load prices.csv  |  load research.momentum  |  load <universe>"
-                say(red(f"{verb} what? try `{hint}`."))
-                continue
-            kind = {"data": "data", "universe": "universe", "project": "project"}.get(
-                verb, classify_load(rest)
-            )
-            try:
-                data, backtest_fn, loaded_project = _open_spec(kind, rest, session, data, backtest_fn)
-            except (ProjectError, ValueError) as exc:
-                say(red(str(exc)))
-            except Exception as exc:  # noqa: BLE001 - a server refusal, said plainly
-                say(red(str(exc)))
-            continue
-        # A COMMAND WORD AT THE START OF A SENTENCE IS STILL A SENTENCE.
-        #
-        # `run a query into the S&P 500 and see which stocks are outperforming`
-        # was parsed as `run` + a workflow named "a query into the S&P 500 …",
-        # and the server answered "no workflow named …". The most natural way to
-        # phrase an agentic request begins with a verb, so the one parse rule
-        # that mattered was throwing every good request away.
-        #
-        # `run` means the scripted path ONLY when what follows is a single token
-        # naming a real workflow. Anything else is a request, which is what the
-        # user obviously meant.
-        if verb == "run" and rest:
-            name, flags = _split_run(rest)
-            if name and _is_workflow(session, name):
-                # FLAGS WORK IN HERE NOW. They are the same flags the shell
-                # takes, because a message that says "--universe sp100" has to
-                # mean the same thing wherever it is read -- and the preflight
-                # message says exactly that.
-                try:
-                    if flags:
-                        data, backtest_fn = _apply_flags(flags, session, data, backtest_fn)
-                        loaded_project = _describe_source(flags) or loaded_project
-                except (ProjectError, ValueError) as exc:
-                    say(red(str(exc)))
-                    continue
-
-                gap = preflight(session.workflows(), name, data=data, backtest_fn=backtest_fn)
-                if gap:
-                    say(yellow(_repl_gap(gap, name)))
-                    continue
-                rest = name
-            else:
-                rest = rest if not flags else name
-
-        if verb == "run" and rest and (" " not in rest) and _is_workflow(session, rest):
-            try:
-                last = session.open(
-                    rest,
-                    data=data,
-                    backtest_fn=backtest_fn,
-                    **({"grid": project_grid()} if project_grid() else {}),
-                )
-                _drive(last)
-                _report(last)
-            except Offline:
-                _explain_offline(url)
-            except ServerError as exc:
-                refused(exc)
-                # A session holds its credential, so a key entered now does
-                # nothing until the session is rebuilt — which is exactly the
-                # bug that makes "I entered my key and it still says denied".
-                if is_auth_error(exc) and offer_key():
-                    session, url = _session(args.url, args.key)
-                    say(dim("  Try that again."))
-            continue
-
-        if verb == "run" and not rest:
-            say(red("run what? try `workflows`, or just describe what you want."))
-            continue
-
-        # A TYPO IS NOT A RESEARCH QUESTION. Falling through to the agent is
-        # the right default, and it means one mistyped verb costs a model call
-        # and returns something unrelated to what was asked. A single-word input
-        # that is nearly a command is almost certainly that command.
-        if " " not in line:
-            near = _near_verb(line)
-            if near:
-                say(dim(f"  No command {line!r}. Did you mean `{near}`?"))
-                say(dim("  Type it again as a sentence if you meant it as a question."))
-                continue
-
-        # ── ANYTHING ELSE IS A REQUEST, NOT A TYPO ─────────────────────────
-        #
-        # This used to answer "unknown command", which is the wrong default for
-        # a research tool: the interesting input is a sentence about what you
-        # are trying to find out, and the commands above are the shortcuts.
-        # Falling through to the agent makes the prompt behave the way a quant
-        # would expect after using any modern coding harness.
-        #
-        # THE SPLIT MATTERS AND IS VISIBLE. `run <workflow>` is SCRIPTED — the
-        # workflow owns the sequence, two runs over the same data give the same
-        # path, and the artifact is reproducible. A sentence is EXPLORATORY — a
-        # model chooses each step from what the server permits, and two runs can
-        # differ. Both are legitimate; conflating them is not, so the run says
-        # which one it was.
-        # A QUESTION MAY NAME ITS OWN DATA. "screen my sp100 universe" is a
-        # complete instruction: the workflow is inferable and so is the data.
-        # Requiring the user to load it first, in a separate command, is the
-        # fork this whole change exists to remove. And a question that names
-        # nothing — "run deep analysis on the given universe" — still reaches
-        # the account's ONLY stored universe, because from where the signed-in
-        # user stands, that data is given.
-        if data is None:
-            named = _universe_named_in(line, session)
-            if not named:
-                named, _ready = _stored_universes(session)
-            if named:
-                try:
-                    data, backtest_fn = _apply_flags(["--universe", named], session, data, backtest_fn)
-                    loaded_project = f"universe:{named}"
-                except Exception as exc:  # noqa: BLE001
-                    say(dim(f"  ({named} is registered and could not be loaded: {exc})"))
-
-        last = (
-            _ask(
-                session,
-                url,
-                line,
-                data=data,
-                backtest_fn=backtest_fn,
-                workspace_id=workspace_id,
-            )
-            or last
-        )
-        if last is not None:
-            state.remember_run(last, line)
+    """One session. The full-screen terminal is it."""
+    return cmd_session(args)
 
 
 # ── entry point ────────────────────────────────────────────────────────────
@@ -4024,7 +3726,7 @@ def main(argv: list[str] | None = None) -> int:
         "models": cmd_models,
         "trace": cmd_trace,
         "run": cmd_run,
-        None: cmd_repl,  # bare `alphaengine` opens a session
+        None: cmd_session,  # bare `alphaengine` opens the full-screen session
     }
     for verb in QUESTION_VERBS:
         handlers[verb] = cmd_run
