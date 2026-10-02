@@ -16,6 +16,28 @@ from .dispatch import Desk, submit
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
+_COMMANDS = (
+    "login",
+    "enter model key",
+    "load <name>",
+    "screen",
+    "diagnose",
+    "signal",
+    "validate",
+    "stress",
+    "overlap",
+    "size",
+    "monitor",
+    "run <name>",
+    "workflows",
+    "help",
+    "quit",
+)
+_URL_AFTER = {
+    "AZURE_OPENAI_API_KEY": "AZURE_OPENAI_ENDPOINT",
+    "ALPHAENGINE_API_KEY": "ALPHAENGINE_BASE_URL",
+}
+
 _CSS = """
 Screen { background: #0b0d10; }
 #status {
@@ -27,12 +49,12 @@ Screen { background: #0b0d10; }
 }
 #body { height: 1fr; }
 #rail {
-    width: 26;
-    min-width: 26;
+    width: 28;
+    min-width: 28;
     background: #101318;
     color: #c5cdd6;
     padding: 1 1;
-    overflow: hidden;
+    overflow: auto;
 }
 #transcript {
     width: 1fr;
@@ -106,6 +128,7 @@ class QuantOSApp(App[None]):
             keyed=keyed,
         )
         self._universes: list[str] = []
+        self._stored: set[str] = set()
         self._lines: list[dict[str, Any]] = []
         self.busy = False
         self.rail_text = ""
@@ -133,18 +156,11 @@ class QuantOSApp(App[None]):
         log = self.query_one("#transcript", RichLog)
         log.write("Ask in plain English.")
         log.write("A sentence picks a workflow.  run <name> follows it exactly.")
+        log.write("login signs you in.  enter model key pastes whichever key you use.")
         log.write("")
         log.write("help lists what you can type.  quit leaves.")
         self.query_one(Input).focus()
-        try:
-            rows = self.desk.session.universes()
-        except Exception:  # noqa: BLE001 — the ladder still stands without the list
-            rows = []
-        self._universes = [
-            str(row.get("name") or row.get("id") or "") for row in rows if isinstance(row, dict)
-        ]
-        self._universes = [name for name in self._universes if name]
-        self._refresh_rail()
+        self._sync_account()
 
     def _refresh_rail(self) -> None:
         from ..model import available_models, keys_without_sdk
@@ -158,7 +174,7 @@ class QuantOSApp(App[None]):
         elif keyed and stranded:
             ask_note = "sdk missing"
         elif keyed:
-            ask_note = "add a model key"
+            ask_note = "enter model key"
         else:
             ask_note = "sign in first"
 
@@ -170,7 +186,8 @@ class QuantOSApp(App[None]):
         else:
             loaded = "nothing"
 
-        lines = [
+        lines = ["commands", *[f"  {name}" for name in _COMMANDS], ""]
+        lines += [
             f"{on}  the maths",
             "    offline, always",
             "",
@@ -186,11 +203,13 @@ class QuantOSApp(App[None]):
             "universes",
         ]
         if self._universes:
-            lines.extend(f"  {_fit(name, 20)}" for name in self._universes[:12])
+            for name in self._universes[:12]:
+                mark = " stored" if name in self._stored else ""
+                lines.append(f"  {_fit(name, 20 - len(mark))}{mark}")
         else:
             lines.append("  none in reach")
         if not keyed:
-            lines += ["", "key quantos", "signs you in"]
+            lines += ["", "login", "signs you in"]
         self.rail_text = "\n".join(lines)
         self.query_one("#rail", Static).update(self.rail_text)
 
@@ -213,6 +232,12 @@ class QuantOSApp(App[None]):
         if self.desk.pending_secret:
             self._accept_secret(text)
             return
+        if self.desk.pending_provider:
+            self._accept_provider(text)
+            return
+        if self.desk.pending_url:
+            self._accept_url(text)
+            return
         self.busy = True
         self.query_one("#transcript", RichLog).write(f"> {text}")
 
@@ -231,6 +256,43 @@ class QuantOSApp(App[None]):
         if env is None or not value:
             log.write("nothing entered.")
             return
+        if env == "MODEL_KEY":
+            self._take_model_key(value, log, prompt)
+            return
+        self._store_credential(env, value, log, prompt)
+
+    def _take_model_key(self, value: str, log: RichLog, prompt: Input) -> None:
+        from .dispatch import env_for_model_key
+
+        found = env_for_model_key(value)
+        if found is None:
+            self.desk.held_key = value
+            self.desk.pending_provider = True
+            prompt.password = False
+            prompt.placeholder = "anthropic, openai, gemini, groq, openrouter, azure, gateway"
+            log.write("Which provider is this key for?")
+            return
+        self._store_credential(found, value, log, prompt)
+
+    def _accept_provider(self, text: str) -> None:
+        from ..cli import _KEY_PROMPTS
+
+        which = text.strip().lower()
+        prompt = self.query_one(Input)
+        log = self.query_one("#transcript", RichLog)
+        if which not in _KEY_PROMPTS or which == "quantos":
+            log.write("Try anthropic, openai, gemini, groq, openrouter, azure, or gateway.")
+            return
+        value = self.desk.held_key or ""
+        self.desk.held_key = None
+        self.desk.pending_provider = False
+        prompt.placeholder = "Ask in plain English, or run <workflow>"
+        if not value:
+            log.write("nothing entered.")
+            return
+        self._store_credential(_KEY_PROMPTS[which][0], value, log, prompt)
+
+    def _store_credential(self, env: str, value: str, log: RichLog, prompt: Input) -> None:
         os.environ[env] = value
         if env == "QUANTOS_API_KEY":
             from ..cli import _session
@@ -247,6 +309,96 @@ class QuantOSApp(App[None]):
             log.write(f"{env} accepted.  stored at {path}")
         except (OSError, ValueError) as exc:
             log.write(f"{env} accepted for this process.  ({exc})")
+        follow = _URL_AFTER.get(env)
+        if follow and not os.environ.get(follow):
+            self.desk.pending_url = follow
+            prompt.placeholder = f"paste {follow}"
+            log.write(f"Now paste {follow}. It is not hidden.")
+        elif env != "QUANTOS_API_KEY":
+            self._say_model_ready(log)
+        if env == "QUANTOS_API_KEY":
+            self._sync_account()
+        else:
+            self._refresh_rail()
+
+    def _accept_url(self, value: str) -> None:
+        env = self.desk.pending_url
+        self.desk.pending_url = None
+        prompt = self.query_one(Input)
+        prompt.placeholder = "Ask in plain English, or run <workflow>"
+        log = self.query_one("#transcript", RichLog)
+        if env is None or not value:
+            log.write("nothing entered.")
+            return
+        os.environ[env] = value
+        try:
+            from ..auth import save_key
+
+            save_key(env, value)
+        except (OSError, ValueError):
+            pass
+        log.write(f"{env} set.")
+        self._say_model_ready(log)
+        self._refresh_rail()
+
+    def _say_model_ready(self, log: RichLog) -> None:
+        from ..model import _SDK, available_models, keys_without_sdk
+
+        stranded = keys_without_sdk()
+        ready = available_models()
+        if stranded:
+            installs = " or ".join(f"pip install {_SDK[label]}" for label in stranded)
+            log.write(f"Key stored. The SDK is not installed yet: {installs}")
+            return
+        if ready:
+            label, model = ready[0]
+            log.write(f"Model ready: {label}/{model}. Ask in plain English.")
+
+    def _sync_account(self) -> None:
+        """Refresh portal universes. One stored book loads itself."""
+        from ..cli import _narrow_to_universe, _stored_universes, narration_to
+
+        notes: list[str] = []
+
+        def sink(chunk: str) -> None:
+            notes.append(chunk)
+
+        try:
+            rows = self.desk.session.universes()
+        except Exception:  # noqa: BLE001 — offline or unsigned still boots
+            rows = []
+        self._stored = set()
+        names: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or row.get("id") or "")
+            if not name:
+                continue
+            names.append(name)
+            if (row.get("definition") or {}).get("cache_id"):
+                self._stored.add(name)
+        self._universes = names
+
+        if self.desk.data is None and self.desk.keyed:
+            with narration_to(sink):
+                wanted, ready = _stored_universes(self.desk.session)
+                if wanted:
+                    try:
+                        self.desk.data = _narrow_to_universe(self.desk.session, wanted, None)
+                        self.desk.loaded = f"universe:{wanted}"
+                    except Exception as exc:  # noqa: BLE001
+                        notes.append(str(exc))
+                elif len(ready) > 1:
+                    notes.append(
+                        "Stored on your account: " + ", ".join(ready) + ".  Type load <name> to use one."
+                    )
+        log = self.query_one("#transcript", RichLog)
+        for note in notes:
+            plain = _plain(note)
+            if plain.strip():
+                self.transcript.append(plain)
+                log.write(plain)
         self._refresh_rail()
 
     def _run_line(self, text: str) -> None:
@@ -274,7 +426,19 @@ class QuantOSApp(App[None]):
             prompt = self.query_one(Input)
             prompt.password = True
             prompt.placeholder = "paste the key (hidden)"
-        self._refresh_rail()
+        elif self.desk.pending_provider:
+            prompt = self.query_one(Input)
+            prompt.password = False
+            prompt.placeholder = "anthropic, openai, gemini, groq, openrouter, azure, gateway"
+        elif self.desk.pending_url:
+            prompt = self.query_one(Input)
+            prompt.password = False
+            prompt.placeholder = f"paste {self.desk.pending_url}"
+        if self.desk.account_dirty:
+            self.desk.account_dirty = False
+            self._sync_account()
+        else:
+            self._refresh_rail()
         self._load_lines()
         self.busy = False
         if quitting:

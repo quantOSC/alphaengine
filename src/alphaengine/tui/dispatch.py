@@ -51,6 +51,10 @@ class Desk:
     think: Callable[[str], str] | None = None
     keyed: bool = False
     pending_secret: str | None = None
+    pending_url: str | None = None
+    pending_provider: bool = False
+    held_key: str | None = None
+    account_dirty: bool = False
     pinned_model: str | None = None
     book: Any = None
 
@@ -83,6 +87,11 @@ def submit(desk: Desk, line: str) -> bool:
             return False
     if line.startswith("/"):
         line = line[1:].lstrip()
+
+    if line.lower() == "enter model key":
+        desk.pending_secret = "MODEL_KEY"
+        say(dim("Paste the model key. It stays hidden. The provider is read from the key."))
+        return False
 
     verb, _, rest = line.partition(" ")
     if verb in QUESTION_VERBS and not rest:
@@ -210,28 +219,58 @@ def _ns(desk: Desk, **extra: Any) -> Any:
 def _logout(desk: Desk) -> None:
     import os
 
+    from ..auth import MANAGED
     from ..cli import _session, cmd_logout
 
     cmd_logout(_ns(desk))
-    for name in ("QUANTOS_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+    for name in MANAGED:
         os.environ.pop(name, None)
     desk.session, desk.url = _session(getattr(desk.args, "url", None), getattr(desk.args, "key", None))
     desk.keyed = False
     desk.pending_secret = None
+    desk.pending_url = None
+    desk.pending_provider = False
+    desk.held_key = None
+    desk.pinned_model = None
+    if str(desk.loaded or "").startswith("universe:"):
+        desk.data = None
+        desk.backtest_fn = None
+        desk.loaded = None
+    desk.account_dirty = True
 
 
 def _key(desk: Desk, rest: str) -> None:
+    from ..cli import _KEY_PROMPTS
+
     which = (rest.split() or [""])[0].lower()
-    names = {
-        "quantos": "QUANTOS_API_KEY",
-        "anthropic": "ANTHROPIC_API_KEY",
-        "openai": "OPENAI_API_KEY",
-    }
-    if which not in names:
-        say(dim("key quantos, key anthropic, or key openai. The next line is the key, and it stays hidden."))
+    if not which:
+        if not desk.keyed:
+            which = "quantos"
+        else:
+            say(dim("Already signed in. Type `enter model key` and paste it."))
+            return
+    if which not in _KEY_PROMPTS:
+        say(dim(f"Unknown {which!r}. Try: {', '.join(_KEY_PROMPTS)}"))
         return
-    desk.pending_secret = names[which]
-    say(dim(f"Paste the {which} key. It is hidden, then stored for this machine."))
+    env, what = _KEY_PROMPTS[which]
+    desk.pending_secret = env
+    say(dim(f"Paste the {which} key. {what} It stays hidden, then this machine keeps it."))
+
+
+def env_for_model_key(value: str) -> str | None:
+    """Which env var this key belongs in, when the prefix says so."""
+    text = value.strip()
+    if text.startswith("sk-ant-"):
+        return "ANTHROPIC_API_KEY"
+    if text.startswith("sk-or-"):
+        return "OPENROUTER_API_KEY"
+    if text.startswith("gsk_"):
+        return "GROQ_API_KEY"
+    if text.startswith("AIza"):
+        return "GEMINI_API_KEY"
+    if text.startswith("sk-"):
+        return "OPENAI_API_KEY"
+    return None
 
 
 def _pin_model(desk: Desk, rest: str) -> None:

@@ -76,4 +76,8 @@ is what a changed figure costs. The API may still move underneath it.
 # Close fills are unchanged. No golden in tests/test_goldens.py moves. The
 # same release makes the full-screen terminal the only session, and posts each
 # math line's series on `/traces` without putting those series inside figures.
-__version__ = "0.9.0"
+#
+# 0.9.1 IS THE SESSION, NOT THE MATHS. No computed value moved. A signed-in
+# account loads its one stored universe from the portal. `enter model key`
+# takes whichever provider key is pasted. The left pane lists the commands.
+__version__ = "0.9.1"

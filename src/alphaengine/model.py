@@ -328,13 +328,12 @@ def build_think(
         )
 
     raise NoModelConfigured(
-        "No model key found. The agentic path runs under YOUR account, so it "
-        "needs your key in this shell:\n"
-        "    ANTHROPIC_API_KEY=...   or   OPENAI_API_KEY=...\n"
-        "    or GEMINI_API_KEY / GROQ_API_KEY / OPENROUTER_API_KEY /\n"
-        "    AZURE_OPENAI_API_KEY / ALPHAENGINE_API_KEY+ALPHAENGINE_BASE_URL\n"
-        "Nothing here stores it, and the scripted path (`run <workflow>`) needs "
-        "no model at all."
+        "No model key found. In the session, type `enter model key` and paste it.\n"
+        "Or set the key in this shell: ANTHROPIC_API_KEY, OPENAI_API_KEY, "
+        "GEMINI_API_KEY, GROQ_API_KEY, OPENROUTER_API_KEY, "
+        "AZURE_OPENAI_API_KEY, or ALPHAENGINE_API_KEY with ALPHAENGINE_BASE_URL.\n"
+        "Nothing here sends that key to QuantOS, and the scripted path "
+        "(`run <workflow>`) needs no model at all."
     )
 
 
