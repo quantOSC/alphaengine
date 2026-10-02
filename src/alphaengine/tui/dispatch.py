@@ -27,11 +27,16 @@ from ..cli import (
     _split_run,
     dim,
     load_project,
+    match_thesis,
+    pop_flag,
     preflight,
     project_grid,
     red,
     resolve_data,
     say,
+    thesis_id_of,
+    thesis_label,
+    thesis_text,
     yellow,
 )
 from ..client import Offline, ServerError
@@ -57,6 +62,8 @@ class Desk:
     account_dirty: bool = False
     pinned_model: str | None = None
     book: Any = None
+    thesis: dict[str, Any] | None = None
+    thesis_declined: bool = False
 
 
 def submit(desk: Desk, line: str) -> bool:
@@ -66,6 +73,9 @@ def submit(desk: Desk, line: str) -> bool:
         return False
 
     line, inline_flags = _extract_flags(line)
+    thesis_query, inline_flags = pop_flag(inline_flags, "--thesis")
+    if thesis_query and not _pin_thesis(desk, thesis_query):
+        return False
     if inline_flags:
         try:
             desk.data, desk.backtest_fn = _apply_flags(
@@ -78,8 +88,8 @@ def submit(desk: Desk, line: str) -> bool:
         except Exception as exc:  # noqa: BLE001 — a server refusal, said plainly
             say(red(str(exc)))
             return False
-        if not line.strip():
-            return False
+    if not line.strip():
+        return False
 
     if line.split()[:1] == ["alphaengine"]:
         line = line.partition(" ")[2].strip()
@@ -132,6 +142,9 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "book":
         _book(desk, rest)
         return False
+    if verb in ("thesis", "theses"):
+        _thesis(desk, rest)
+        return False
     if verb in ("commands", "?"):
         from ..cli import cmd_commands
 
@@ -164,6 +177,8 @@ def submit(desk: Desk, line: str) -> bool:
         _key(desk, rest)
         return False
     if verb == "status":
+        if desk.thesis:
+            say(dim(f"thesis {thesis_label(desk.thesis)}"))
         if desk.last is None:
             say(dim("no run yet"))
         else:
@@ -232,6 +247,8 @@ def _logout(desk: Desk) -> None:
     desk.pending_provider = False
     desk.held_key = None
     desk.pinned_model = None
+    desk.thesis = None
+    desk.thesis_declined = False
     if str(desk.loaded or "").startswith("universe:"):
         desk.data = None
         desk.backtest_fn = None
@@ -351,7 +368,66 @@ def _load_named(desk: Desk, verb: str, rest: str) -> None:
         say(red(str(exc)))
 
 
+def _thesis_rows(desk: Desk) -> list[dict[str, Any]] | None:
+    try:
+        rows = desk.session.theses()
+    except Exception as exc:  # noqa: BLE001 — offline or unsigned, said plainly
+        say(red(str(exc)))
+        return None
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _pin_thesis(desk: Desk, query: str) -> bool:
+    """Pin one thesis. False leaves the previous pin alone."""
+    rows = _thesis_rows(desk)
+    if rows is None:
+        return False
+    chosen, candidates = match_thesis(rows, query)
+    if chosen is None:
+        if candidates:
+            say(yellow("Which thesis? " + ", ".join(thesis_label(r) for r in candidates)))
+        else:
+            say(yellow(f"No thesis named {query!r}."))
+        return False
+    if not thesis_id_of(chosen):
+        say(yellow(f"{thesis_label(chosen)} has no id, so a run cannot be attached to it."))
+        return False
+    desk.thesis = chosen
+    desk.thesis_declined = False
+    say(dim(f"thesis {thesis_label(chosen)}"))
+    text = thesis_text(chosen)
+    if text:
+        say(dim("  " + (text if len(text) <= 240 else text[:237] + "...")))
+    return True
+
+
+def _thesis(desk: Desk, rest: str) -> None:
+    if rest.lower() in ("clear", "none", "off"):
+        desk.thesis = None
+        desk.thesis_declined = True
+        say(dim("thesis cleared"))
+        return
+    if rest:
+        _pin_thesis(desk, rest)
+        return
+    rows = _thesis_rows(desk)
+    if rows is None:
+        return
+    if not rows:
+        say(dim("No theses on this account."))
+        return
+    selected = thesis_id_of(desk.thesis) if desk.thesis else ""
+    for row in rows:
+        mark = "  selected" if selected and thesis_id_of(row) == selected else ""
+        say(f"  {thesis_label(row)}{mark}")
+    if desk.thesis is None and len(rows) > 1:
+        say(dim("Type thesis <name> to use one."))
+
+
 def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
+    thesis_query, flags = pop_flag(flags, "--thesis")
+    if thesis_query and not _pin_thesis(desk, thesis_query):
+        return
     try:
         if flags:
             desk.data, desk.backtest_fn = _apply_flags(flags, desk.session, desk.data, desk.backtest_fn)
@@ -361,10 +437,14 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
             say(yellow(_repl_gap(gap, name)))
             return
         grid = project_grid()
+        pinned = thesis_id_of(desk.thesis) if desk.thesis else ""
+        if desk.thesis:
+            say(dim(f"  thesis  {thesis_label(desk.thesis)}"))
         desk.last = desk.session.open(
             name,
             data=desk.data,
             backtest_fn=desk.backtest_fn,
+            thesis_id=pinned or None,
             **({"grid": grid} if grid else {}),
         )
         _drive(desk.last)
@@ -396,6 +476,7 @@ def _sentence(desk: Desk, line: str) -> None:
             except Exception as exc:  # noqa: BLE001
                 say(dim(f"  ({named} is registered and could not be loaded: {exc})"))
 
+    pinned = desk.thesis
     run = _ask(
         desk.session,
         desk.url,
@@ -403,6 +484,9 @@ def _sentence(desk: Desk, line: str) -> None:
         data=desk.data,
         backtest_fn=desk.backtest_fn,
         think=desk.think,
+        thesis_id=thesis_id_of(pinned) or None if pinned else None,
+        thesis_name=thesis_label(pinned) if pinned else None,
+        thesis_statement=thesis_text(pinned) if pinned else None,
     )
     if run is not None:
         desk.last = run

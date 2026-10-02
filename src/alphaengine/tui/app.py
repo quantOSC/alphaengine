@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import time
 from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Input, ListItem, ListView, RichLog, Sparkline, Static
 
-from ..cli import narration_to, resolve_data
+from ..cli import narration_to, resolve_data, thesis_id_of, thesis_label
 from .dispatch import Desk, submit
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -20,6 +21,7 @@ _COMMANDS = (
     "login",
     "enter model key",
     "load <name>",
+    "thesis",
     "screen",
     "diagnose",
     "signal",
@@ -37,6 +39,7 @@ _URL_AFTER = {
     "AZURE_OPENAI_API_KEY": "AZURE_OPENAI_ENDPOINT",
     "ALPHAENGINE_API_KEY": "ALPHAENGINE_BASE_URL",
 }
+_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
 _CSS = """
 Screen { background: #0b0d10; }
@@ -131,6 +134,8 @@ class QuantOSApp(App[None]):
         self._stored: set[str] = set()
         self._lines: list[dict[str, Any]] = []
         self.busy = False
+        self.activity = ""
+        self._started = 0.0
         self.rail_text = ""
         self.formula_text = ""
         self.transcript: list[str] = []
@@ -160,6 +165,7 @@ class QuantOSApp(App[None]):
         log.write("")
         log.write("help lists what you can type.  quit leaves.")
         self.query_one(Input).focus()
+        self.set_interval(0.2, self._tick_working)
         self._sync_account()
 
     def _refresh_rail(self) -> None:
@@ -200,6 +206,9 @@ class QuantOSApp(App[None]):
             "loaded",
             f"  {loaded}",
             "",
+            "thesis",
+            f"  {_fit(thesis_label(self.desk.thesis) if self.desk.thesis else 'none')}",
+            "",
             "universes",
         ]
         if self._universes:
@@ -239,6 +248,11 @@ class QuantOSApp(App[None]):
             self._accept_url(text)
             return
         self.busy = True
+        self.activity = text
+        self._started = time.monotonic()
+        prompt = self.query_one(Input)
+        prompt.disabled = True
+        self._paint_working()
         self.query_one("#transcript", RichLog).write(f"> {text}")
 
         def go() -> None:
@@ -393,6 +407,17 @@ class QuantOSApp(App[None]):
                     notes.append(
                         "Stored on your account: " + ", ".join(ready) + ".  Type load <name> to use one."
                     )
+        if self.desk.keyed and self.desk.thesis is None and not self.desk.thesis_declined:
+            try:
+                theses = [r for r in self.desk.session.theses() if isinstance(r, dict) and thesis_id_of(r)]
+            except Exception:  # noqa: BLE001 — offline or unsigned still boots
+                theses = []
+            if len(theses) == 1:
+                self.desk.thesis = theses[0]
+                notes.append(f"thesis {thesis_label(theses[0])}")
+            elif len(theses) > 1:
+                named = ", ".join(thesis_label(r) for r in theses[:8])
+                notes.append(f"Theses on your account: {named}.  Type thesis <name> to use one.")
         log = self.query_one("#transcript", RichLog)
         for note in notes:
             plain = _plain(note)
@@ -401,46 +426,64 @@ class QuantOSApp(App[None]):
                 log.write(plain)
         self._refresh_rail()
 
+    def _tick_working(self) -> None:
+        if self.busy:
+            self._paint_working()
+
+    def _paint_working(self) -> None:
+        elapsed = time.monotonic() - self._started
+        frame = _SPIN[int(elapsed * 12) % len(_SPIN)]
+        label = _fit(self.activity or "working", 42)
+        self.query_one("#status", Static).update(f"{frame}   working   ·   {label}   ·   {elapsed:.1f}s")
+
+    def _live(self, chunk: str) -> None:
+        plain = _plain(chunk).strip()
+        if not plain:
+            return
+        self.activity = plain
+        self.transcript.append(plain)
+        self.query_one("#transcript", RichLog).write(plain)
+        if self.busy:
+            self._paint_working()
+
     def _run_line(self, text: str) -> None:
-        chunks: list[str] = []
+        quitting = False
 
         def sink(chunk: str) -> None:
-            chunks.append(chunk)
+            self.call_from_thread(self._live, chunk)
 
-        quitting = False
         try:
             with narration_to(sink):
                 quitting = submit(self.desk, text)
         except Exception as exc:  # noqa: BLE001 — the session stays up
-            chunks.append(str(exc))
-        self.call_from_thread(self._finish, chunks, quitting)
+            self.call_from_thread(self._live, str(exc))
+        self.call_from_thread(self._finish, quitting)
 
-    def _finish(self, chunks: list[str], quitting: bool) -> None:
-        log = self.query_one("#transcript", RichLog)
-        for chunk in chunks:
-            plain = _plain(chunk)
-            if plain.strip():
-                self.transcript.append(plain)
-                log.write(plain)
+    def _finish(self, quitting: bool) -> None:
+        prompt = self.query_one(Input)
+        prompt.disabled = False
         if self.desk.pending_secret:
-            prompt = self.query_one(Input)
             prompt.password = True
             prompt.placeholder = "paste the key (hidden)"
         elif self.desk.pending_provider:
-            prompt = self.query_one(Input)
             prompt.password = False
             prompt.placeholder = "anthropic, openai, gemini, groq, openrouter, azure, gateway"
         elif self.desk.pending_url:
-            prompt = self.query_one(Input)
             prompt.password = False
             prompt.placeholder = f"paste {self.desk.pending_url}"
+        else:
+            prompt.password = False
+            prompt.placeholder = "Ask in plain English, or run <workflow>"
+        self.busy = False
+        self.activity = ""
         if self.desk.account_dirty:
             self.desk.account_dirty = False
             self._sync_account()
         else:
             self._refresh_rail()
         self._load_lines()
-        self.busy = False
+        if not quitting:
+            prompt.focus()
         if quitting:
             self.exit()
 

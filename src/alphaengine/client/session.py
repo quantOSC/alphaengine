@@ -335,6 +335,7 @@ class Session:
         backtest_fn: Any = None,
         handlers: dict[str, Handler] | None = None,
         workspace_id: str | None = None,
+        thesis_id: str | None = None,
         **inputs: Any,
     ) -> Run:
         """Open a run. `data` and `backtest_fn` stay on this machine.
@@ -345,10 +346,15 @@ class Session:
         into the pod's book. Without it the run is complete, correct, and
         attached to nothing — which is why several finished mechanisms on the
         platform had never once received input.
+
+        `thesis_id` names a thesis the portal already holds. The statement
+        stays on this machine; the id is how the run is attached to it.
         """
         body: Figures = {"workflow": workflow, "version": version, "inputs": inputs}
         if workspace_id:
             body["workspace_id"] = workspace_id
+        if thesis_id:
+            body["thesis_id"] = thesis_id
         directive = self._post("/api/harness/runs", body)
         run = Run(
             session=self,
@@ -486,17 +492,19 @@ class Session:
         q = f"?budget={int(budget)}" if budget else ""
         return self._get(f"/api/harness/plan{q}")
 
-    # ── THE THESIS AND SLEEVE METHODS ARE GONE (0.5.0) ─────────────────────
-    #
-    # `theses()`, `propose_sleeve()` and `sleeves()` backed `--thesis` and
-    # `--sleeve`. Their routes — /api/me/theses, /api/me/proposals/from-os and
-    # /api/me/sleeves — were part of the thesis object model, which came out with
-    # the retired agent desk it was built around.
-    #
-    # A breaking change, and a deliberate one: they created a PROPOSAL from a
-    # screen, which is the one thing this package ever made, and the loop that
-    # object served now runs through assignments and the deliver pin instead.
-    # See the 0.5.0 note in the README.
+    def theses(self) -> list[Figures]:
+        """Theses on this account. Names and statements. No market data.
+
+        ``GET /api/me/theses`` returns ``{"theses": [{"id", "name", "statement"}]}``.
+        ``summary`` is accepted as the statement when ``statement`` is absent.
+        The id is what a later ``open`` sends back as ``thesis_id``. This call
+        does not create a thesis and does not write a proposal.
+        """
+        return list(self._get("/api/me/theses").get("theses") or [])
+
+    # `propose_sleeve()` and `sleeves()` backed `--sleeve` and wrote a proposal
+    # to `/api/me/proposals/from-os` and `/api/me/sleeves`. Those left with the
+    # agent desk in 0.5.0. Selecting a thesis is the read above, not that writer.
 
     def post_event(self, run_id: str, event: dict[str, Any]) -> Figures:
         """Allowlisted model/run event. 404-tolerant at the sink, not here.

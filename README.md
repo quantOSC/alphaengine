@@ -288,6 +288,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 |---|---|---|
 | `book [<name> \| status]` | show or load sleeves on the multi-strategy book | session |
 | `load <file \| module \| universe>` | a CSV, a project module, or a portal universe | session |
+| `thesis [<name> \| clear]` | choose a portal thesis for the next run | session |
 | `universe <name>` | same as load: a universe registered in the portal | session |
 | `data <file>` | same as load: a local CSV or parquet | session |
 | `project <module>` | same as load: a module with data and backtest_fn | session |
@@ -318,6 +319,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--project MODULE` | a module exposing `data` and `backtest_fn` |
 | `--data FILE` | a local CSV: wide, long, or a single series |
 | `--universe NAME` | a universe registered in the portal, with its stored closes |
+| `--thesis NAME` | a thesis on this account; the run is attached to it |
 | `--symbol TICKER` | one name out of a loaded universe; its closes become the return series |
 | `--label TEXT` | what to call the artifact this run produces |
 | `--input K=V` | a workflow input; repeatable |
@@ -353,6 +355,7 @@ alphaengine run size_position --data returns.csv
 alphaengine run validate_study --project research.momentum
 alphaengine models
 alphaengine trace
+alphaengine run screen_universe --thesis momentum
 alphaengine logout
 alphaengine version
 ```

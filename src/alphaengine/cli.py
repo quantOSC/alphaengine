@@ -1708,11 +1708,28 @@ def cmd_run(args: argparse.Namespace) -> int:
         # named one explicitly. Without this, a sweep received `grid={}`.
         if "grid" not in inputs and project_grid():
             inputs["grid"] = project_grid()
+        thesis_id = None
+        named_thesis = getattr(args, "thesis", None)
+        if named_thesis:
+            chosen, candidates = match_thesis(session.theses(), str(named_thesis))
+            if chosen is None:
+                if candidates:
+                    names = ", ".join(thesis_label(r) for r in candidates)
+                    say(yellow(f"Which thesis? {names}"))
+                else:
+                    say(yellow(f"No thesis named {named_thesis!r} on this account."))
+                return 2
+            thesis_id = thesis_id_of(chosen)
+            if not thesis_id:
+                say(yellow(f"{thesis_label(chosen)} has no id, so a run cannot be attached to it."))
+                return 2
+            say(dim(f"  thesis  {thesis_label(chosen)}"))
         run = session.open(
             args.workflow,
             data=data,
             backtest_fn=backtest_fn,
             workspace_id=workspace_id,
+            thesis_id=thesis_id,
             **inputs,
         )
         _drive(run, quiet=args.quiet)
@@ -2235,7 +2252,7 @@ def _extract_flags(line: str) -> tuple[str, list[str]]:
     i = 0
     while i < len(parts):
         tok = parts[i]
-        if tok in ("--data", "--universe", "--project", "--symbol") and i + 1 < len(parts):
+        if tok in ("--data", "--universe", "--project", "--symbol", "--thesis") and i + 1 < len(parts):
             flags += [tok, parts[i + 1]]
             i += 2
             continue
@@ -2355,6 +2372,58 @@ def _stored_universes(session: Any, question: str = "") -> tuple[str | None, lis
     if named:
         return max(named, key=len), ready
     return (ready[0] if len(ready) == 1 else None), ready
+
+
+def thesis_label(row: dict[str, Any]) -> str:
+    """The name a person types. The id is what the run carries."""
+    return str(row.get("name") or row.get("title") or row.get("id") or "").strip()
+
+
+def thesis_text(row: dict[str, Any]) -> str:
+    """The statement, under whichever key the portal sent it."""
+    for key in ("statement", "summary", "body", "text"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def thesis_id_of(row: dict[str, Any]) -> str:
+    return str(row.get("id") or row.get("thesis_id") or "").strip()
+
+
+def match_thesis(rows: list[Any], query: str) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """One thesis, or the candidates when the name matches more than one.
+
+    Exact name or id wins. A unique substring is enough. Several matches are
+    returned so the caller can name them instead of guessing.
+    """
+    usable = [r for r in rows if isinstance(r, dict)]
+    q = query.strip().casefold()
+    exact = [r for r in usable if thesis_label(r).casefold() == q or thesis_id_of(r).casefold() == q]
+    if len(exact) == 1:
+        return exact[0], []
+    if len(exact) > 1:
+        return None, exact
+    partial = [r for r in usable if q and q in thesis_label(r).casefold()]
+    if len(partial) == 1:
+        return partial[0], []
+    return None, partial
+
+
+def pop_flag(flags: list[str], name: str) -> tuple[str | None, list[str]]:
+    """Take one ``--name value`` out of a flag list. The rest stay in order."""
+    kept: list[str] = []
+    value: str | None = None
+    i = 0
+    while i < len(flags):
+        if flags[i] == name and i + 1 < len(flags):
+            value = flags[i + 1]
+            i += 2
+            continue
+        kept.append(flags[i])
+        i += 1
+    return value, kept
 
 
 def _split_run(rest: str) -> tuple[str, list[str]]:
@@ -3162,6 +3231,9 @@ def _ask(
     data: Any,
     backtest_fn: Any,
     workspace_id: str | None = None,
+    thesis_id: str | None = None,
+    thesis_name: str | None = None,
+    thesis_statement: str | None = None,
     think: Callable[[str], str] | None = None,
 ) -> Any:
     """Natural language → a workflow chosen and driven by the user's own model.
@@ -3212,14 +3284,20 @@ def _ask(
         return None
 
     say(f"  {_accent(STAR)}  {dim(label)}")
+    if thesis_name:
+        say(dim(f"  thesis  {thesis_name}"))
+    goal = request
+    if thesis_statement:
+        goal = f"{request}\n\nThesis:\n{thesis_statement}"
 
     # Choosing the workflow is the same shape as choosing a step: an index into
     # a list the server produced. Reusing `AgentDriver.pick` rather than writing
     # a second selector keeps one place where a model's answer is validated.
     driver = AgentDriver(
         think,
-        goal=request,
+        goal=goal,
         on_thought=lambda why: say(f"  {_accent(STAR)}  {_c('2;3', why)}"),
+        on_step=lambda line: say(f"  {line}"),
         sink=sink,
         provider=provider or None,
         model=model_name or None,
@@ -3297,6 +3375,7 @@ def _ask(
             data=data,
             backtest_fn=backtest_fn,
             workspace_id=workspace_id,
+            thesis_id=thesis_id,
             **({"grid": project_grid()} if project_grid() else {}),
         )
         sink.bind(run.run_id)
@@ -3520,6 +3599,7 @@ def build_parser() -> argparse.ArgumentParser:
     r = sub.add_parser("run", parents=[common], help="run one workflow to completion")
     r.add_argument("workflow")
     r.add_argument("--label", help="what to call the artifact")
+    r.add_argument("--thesis", help="name or id of a thesis on this account; attached to the run")
     r.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
     r.add_argument("--quiet", action="store_true", help="only the result")
     r.add_argument("--stream", action="store_true", help="print the answer after the citation guard")
@@ -3532,6 +3612,7 @@ def build_parser() -> argparse.ArgumentParser:
     for verb, workflow in QUESTION_VERBS.items():
         q = sub.add_parser(verb, parents=[common], help=f"run {workflow}")
         q.add_argument("--label", help="what to call the artifact")
+        q.add_argument("--thesis", help="name or id of a thesis on this account; attached to the run")
         q.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
         q.add_argument("--quiet", action="store_true", help="only the result")
         q.add_argument("--stream", action="store_true", help="print the answer after the citation guard")

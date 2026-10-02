@@ -80,4 +80,8 @@ is what a changed figure costs. The API may still move underneath it.
 # 0.9.1 IS THE SESSION, NOT THE MATHS. No computed value moved. A signed-in
 # account loads its one stored universe from the portal. `enter model key`
 # takes whichever provider key is pasted. The left pane lists the commands.
-__version__ = "0.9.1"
+#
+# 0.9.2 IS THE SESSION, NOT THE MATHS. No computed value moved. A command
+# shows that it is working, and a run writes each step as it happens. A thesis
+# on the account can be pinned, and the run opened after that carries its id.
+__version__ = "0.9.2"

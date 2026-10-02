@@ -110,6 +110,73 @@ def test_a_scripted_run_opens_the_sharpe_line_at_full_length() -> None:
             assert "sqrt" in app.formula_text
             table = app.query_one("#series", DataTable)
             assert table.row_count == 40
+            assert any("compute.performance_report" in line for line in app.transcript)
+
+
+def test_a_thesis_is_selected_and_sent_with_the_run() -> None:
+    class _Theses(_DeskSession):
+        def _get(self, path: str):
+            if path.endswith("/theses"):
+                return {
+                    "theses": [
+                        {"id": "th1", "name": "momentum", "statement": "Large-cap momentum still pays."},
+                        {"id": "th2", "name": "quality", "statement": "Quality compounds."},
+                    ]
+                }
+            return super()._get(path)
+
+    async def body() -> None:
+        app = QuantOSApp(session=_Theses(), url="fake://", data=_returns(), keyed=True, think=_think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause()
+            assert "momentum" in app.transcript[-1] or any("momentum" in line for line in app.transcript)
+            assert "none" in app.rail_text
+            field = app.query_one(Input)
+            field.focus()
+            field.value = "thesis momentum"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            assert app.desk.thesis is not None
+            assert app.desk.thesis["id"] == "th1"
+            assert "momentum" in app.rail_text
+
+            field.value = "run measure"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            opens = [body for path, body in app.desk.session.posts if path.endswith("/runs")]
+            assert opens and opens[-1].get("thesis_id") == "th1"
+
+            field.value = "which of my names are overbought"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            opens = [body for path, body in app.desk.session.posts if path.endswith("/runs")]
+            assert opens[-1].get("thesis_id") == "th1"
+            assert any("thesis" in line and "momentum" in line for line in app.transcript)
+
+            field.value = "thesis clear"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            assert app.desk.thesis is None
+
+    asyncio.run(body())
+
+
+def test_one_thesis_is_pinned_at_sign_in() -> None:
+    class _One(_DeskSession):
+        def _get(self, path: str):
+            if path.endswith("/theses"):
+                return {"theses": [{"id": "th1", "name": "momentum", "summary": "It still pays."}]}
+            return super()._get(path)
+
+    async def body() -> None:
+        app = QuantOSApp(session=_One(), url="fake://", data=_returns(), keyed=True, think=_think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause()
+            assert app.desk.thesis is not None
+            assert app.desk.thesis["id"] == "th1"
+            assert "momentum" in app.rail_text
+
+    asyncio.run(body())
 
     asyncio.run(body())
 
@@ -214,6 +281,9 @@ def test_a_sentence_uses_the_fake_model_to_choose_a_workflow() -> None:
             field.value = "which of my names are overbought"
             await pilot.press("enter")
             await _wait(pilot, app)
-            assert any("screen_universe" in line for line in app.transcript)
+            text = "\n".join(app.transcript)
+            assert "screen_universe" in text
+            assert "the question is a screen" in text
+            assert "compute.performance_report" in text
 
     asyncio.run(body())

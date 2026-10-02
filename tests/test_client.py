@@ -822,3 +822,28 @@ def test_a_rejected_trace_does_not_fail_the_run():
     assert run.trace_rejected
     assert "404" in run.trace_rejected
     assert any(path.endswith("/steps") for path, _ in session.posts)
+
+
+def test_open_attaches_a_thesis_by_id():
+    session = _TraceSession()
+    run = session.open("measure", data=[0.01, -0.01], thesis_id="th1")
+    assert run.run_id == "r1"
+    body = next(body for path, body in session.posts if path.endswith("/runs"))
+    assert body["thesis_id"] == "th1"
+    assert "statement" not in body
+
+
+def test_a_thesis_name_matches_exactly_and_does_not_guess():
+    from alphaengine.cli import match_thesis, thesis_text
+
+    rows = [
+        {"id": "a", "name": "momentum book", "summary": "pays"},
+        {"id": "b", "name": "momentum sleeve"},
+    ]
+    chosen, extra = match_thesis(rows, "momentum book")
+    assert chosen is not None and chosen["id"] == "a"
+    assert thesis_text(chosen) == "pays"
+    assert extra == []
+    chosen, extra = match_thesis(rows, "momentum")
+    assert chosen is None
+    assert {row["id"] for row in extra} == {"a", "b"}

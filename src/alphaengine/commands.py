@@ -84,6 +84,7 @@ FLAGS: dict[str, Flag] = {
     "project": Flag("--project", "MODULE", "a module exposing `data` and `backtest_fn`"),
     "data": Flag("--data", "FILE", "a local CSV: wide, long, or a single series"),
     "universe": Flag("--universe", "NAME", "a universe registered in the portal, with its stored closes"),
+    "thesis": Flag("--thesis", "NAME", "a thesis on this account; the run is attached to it"),
     "symbol": Flag(
         "--symbol", "TICKER", "one name out of a loaded universe; its closes become the return series"
     ),
@@ -352,7 +353,19 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "alphaengine run size_position --data returns.csv",
             "alphaengine run validate_study --project research.momentum",
         ),
-        flags=("project", "data", "universe", "symbol", "label", "input", "quiet", "stream", "url", "key"),
+        flags=(
+            "project",
+            "data",
+            "universe",
+            "symbol",
+            "thesis",
+            "label",
+            "input",
+            "quiet",
+            "stream",
+            "url",
+            "key",
+        ),
     ),
     Command(
         verb="<anything else>",
@@ -453,6 +466,29 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "`validate` needs `load research.momentum` and a screen does not."
         ),
         examples=("load prices.csv", "load research.momentum", "load sp500"),
+    ),
+    Command(
+        verb="thesis",
+        group="data",
+        args="[<name> | clear]",
+        scope="repl",
+        purpose="choose a portal thesis for the next run",
+        body=(
+            "Lists the theses on this account, or pins one. A pinned thesis rides on "
+            "every following run, question, and workflow as thesis_id. The statement "
+            "stays on this machine and is given to your model as context. It is not "
+            "written into the figures.\n\n"
+            "`thesis clear` unpins it. One thesis on the account is pinned at sign-in. "
+            "Several are named and not guessed.\n\n"
+            "The shell spelling is `--thesis <name>` on `run`, `screen`, `diagnose`, "
+            "and the other question commands."
+        ),
+        examples=(
+            "thesis",
+            "thesis momentum",
+            "thesis clear",
+            "alphaengine run screen_universe --thesis momentum",
+        ),
     ),
     Command(
         verb="universe",

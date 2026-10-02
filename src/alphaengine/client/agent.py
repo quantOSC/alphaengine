@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections.abc import Callable
 from typing import Any, Protocol
 
@@ -115,6 +116,7 @@ class AgentDriver:
         *,
         goal: str,
         on_thought: Callable[[str], None] | None = None,
+        on_step: Callable[[str], None] | None = None,
         max_steps: int = 60,
         sink: Any | None = None,
         provider: str | None = None,
@@ -126,6 +128,9 @@ class AgentDriver:
         # A loop you cannot watch is a loop you cannot trust, and that applies
         # doubly when something non-deterministic is making the choices.
         self.on_thought = on_thought or (lambda _s: None)
+        # A second narrator for the step itself, so a watched run can show the
+        # op while it is still running and the duration once it returns.
+        self.on_step = on_step or (lambda _s: None)
         self.max_steps = max_steps
         self.history: list[str] = []
         self.sink = sink
@@ -215,21 +220,27 @@ class AgentDriver:
                     break
 
             step = run.permitted[self.pick(run.permitted)]
+            op = str(step.get("op") or "?")
+            self.on_step(f"{n + 1}  {op}")
             before = run.status
+            started = time.monotonic()
             run.step(step)
+            took = time.monotonic() - started
             n += 1
 
             still = any(p.get("step_id") == step.get("step_id") for p in run.permitted)
             if still and before == "open" and run.status == "open":
                 key = str(step.get("step_id"))
                 failures[key] = failures.get(key, 0) + 1
-                self.history.append(f"{step.get('op')} could not be executed here")
+                self.history.append(f"{op} could not be executed here")
+                self.on_step(f"{n}  {op}  could not be executed  {took:.1f}s")
                 if failures[key] >= 2:
                     run.status = "abandoned"
                     run.stopped = {"reason": "step_failed", "op": step.get("op")}
                     return run
             else:
-                self.history.append(f"{step.get('op')} done")
+                self.history.append(f"{op} done")
+                self.on_step(f"{n}  {op}  {took:.1f}s")
 
         if run.status == "open" and n >= self.max_steps:
             raise AgentRefusal(
