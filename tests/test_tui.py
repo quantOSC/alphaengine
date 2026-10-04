@@ -287,3 +287,71 @@ def test_a_sentence_uses_the_fake_model_to_choose_a_workflow() -> None:
             assert "compute.performance_report" in text
 
     asyncio.run(body())
+
+
+def _book() -> dict[str, list[float]]:
+    return {
+        "AAA": [100.0 + i for i in range(40)],
+        "BBB": [50.0 + i * 0.5 for i in range(40)],
+        "CCC": [80.0 - i * 0.2 for i in range(40)],
+    }
+
+
+def test_correlation_opens_the_full_matrix_and_keeps_the_universe() -> None:
+    async def body() -> None:
+        book = _book()
+        app = QuantOSApp(session=_DeskSession(), url="fake://", data=book, keyed=True, think=_think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause()
+            field = app.query_one(Input)
+            field.focus()
+            field.value = "correlation"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            assert app.desk.matrix is not None
+            assert app.desk.matrix["kind"] == "correlation"
+            assert app.desk.matrix["names"] == ["AAA", "BBB", "CCC"]
+            assert len(app.desk.matrix["values"]) == 3
+            table = app.query_one("#series", DataTable)
+            assert table.row_count == 3
+            assert "correlation" in app.formula_text
+            assert set(app.desk.data) == {"AAA", "BBB", "CCC"}
+
+    asyncio.run(body())
+
+
+def test_check_overlap_builds_the_book_from_the_other_names() -> None:
+    class _Overlap(_DeskSession):
+        def _get(self, path: str):
+            if path.endswith("/workflows"):
+                return {
+                    "workflows": [
+                        {
+                            "name": "check_overlap",
+                            "requires": ["returns", "book_returns"],
+                            "reproducible": True,
+                            "agency": "scripted",
+                        }
+                    ]
+                }
+            return super()._get(path)
+
+    async def body() -> None:
+        book = _book()
+        app = QuantOSApp(session=_Overlap(), url="fake://", data=book, keyed=True, think=_think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause()
+            field = app.query_one(Input)
+            field.focus()
+            field.value = "run check_overlap --symbol AAA"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            assert app.desk.last is not None
+            payload = app.desk.last.executor.data
+            assert "returns" in payload and "book_returns" in payload
+            assert len(payload["returns"]) == len(payload["book_returns"])
+            assert set(app.desk.data) == {"AAA", "BBB", "CCC"}
+            text = "\n".join(app.transcript)
+            assert "equal-weight" in text
+
+    asyncio.run(body())

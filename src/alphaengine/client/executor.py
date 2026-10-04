@@ -788,6 +788,22 @@ class StepExecutor:
                     out["rolling_window"] = window
                     out["max_rolling_correlation"] = round(max(clean), 6)
                     out["min_rolling_correlation"] = round(min(clean), 6)
+        if isinstance(self.data, dict):
+            symbol = self.data.get("symbol")
+            if symbol:
+                out["symbol"] = str(symbol)
+            book_names = self.data.get("book_names")
+            if isinstance(book_names, list):
+                out["n_book_names"] = len(book_names)
+                if len(book_names) <= MAX_FIGURE_LIST:
+                    out["book_names"] = [str(name) for name in book_names]
+        hints = []
+        if out.get("overlap_scatter"):
+            hints.append(chart("scatter", "overlap_scatter", "candidate vs the book"))
+        if out.get("rolling_correlation"):
+            hints.append(chart("curve", "rolling_correlation", "rolling correlation"))
+        if hints:
+            out["charts"] = hints
         return out
 
     # ── the rest of the modeling week, previously library-only ─────────────

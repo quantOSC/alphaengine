@@ -491,6 +491,48 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         ),
     ),
     Command(
+        verb="correlation",
+        group="data",
+        args="",
+        scope="repl",
+        purpose="the correlation of every loaded name with every other name",
+        body=(
+            "Runs on the universe already loaded. Closes become returns. The full "
+            "matrix stays on this machine and opens on the right of the session.\n\n"
+            "`covariance` is the same panel as a sample covariance. "
+            "`cointegration` screens the closes, pairwise, and needs the factors extra.\n\n"
+            "`check_overlap` is a different question: one name against the equal-weight "
+            "of the others. Name it with `run check_overlap --symbol MU`. With no name, "
+            "that command shows this matrix instead of refusing."
+        ),
+        examples=("correlation", "run check_overlap --symbol MU"),
+    ),
+    Command(
+        verb="covariance",
+        group="data",
+        args="",
+        scope="repl",
+        purpose="the sample covariance of every loaded name with every other name",
+        body=(
+            "Same panel as `correlation`: the universe already loaded, closes "
+            "turned into returns, full matrix on the right of the session."
+        ),
+        examples=("covariance",),
+    ),
+    Command(
+        verb="cointegration",
+        group="data",
+        args="",
+        scope="repl",
+        purpose="which loaded names are cointegrated",
+        body=(
+            "Engle-Granger across the loaded closes, every pair. Needs the factors "
+            "extra (`pip install 'alphaengine[factors]'`). A hundred names is a few "
+            "thousand tests and takes a while. The pairs open on the right."
+        ),
+        examples=("cointegration",),
+    ),
+    Command(
         verb="universe",
         group="data",
         args="<name>",

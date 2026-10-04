@@ -506,6 +506,44 @@ class Session:
     # to `/api/me/proposals/from-os` and `/api/me/sleeves`. Those left with the
     # agent desk in 0.5.0. Selecting a thesis is the read above, not that writer.
 
+    def file_panel(
+        self,
+        figures: Figures,
+        *,
+        thesis_id: str | None = None,
+        label: str | None = None,
+    ) -> Figures:
+        """File a client-computed panel so the portal can draw it.
+
+        Correlation, covariance, and cointegration are not catalogue workflows.
+        Their matrix does not fit a `triangle` figure, so it travels here as
+        `figures.matrix` plus `figures.names`. A 404 means this portal has no
+        panels route yet: the maths already happened on this machine, and the
+        missing route must not fail that.
+        """
+        from .._version import __version__
+
+        kind = str(figures.get("kind") or "panel")
+        n = figures.get("n_names")
+        body: Figures = {
+            "kind": kind,
+            "label": label or (f"{kind}  {n} names" if n else kind),
+            "engine": f"alphaengine@{__version__}",
+            "figures": figures,
+        }
+        if thesis_id:
+            body["thesis_id"] = thesis_id
+        try:
+            out = self._post("/api/me/panels", body)
+        except ServerError as exc:
+            if exc.status in (404, 405):
+                return {"filed": False, "reason": "missing"}
+            return {"filed": False, "reason": str(exc)}
+        except Offline:
+            return {"filed": False, "reason": "offline"}
+        panel_id = out.get("id") if isinstance(out, dict) else None
+        return {"filed": True, "id": panel_id}
+
     def post_event(self, run_id: str, event: dict[str, Any]) -> Figures:
         """Allowlisted model/run event. 404-tolerant at the sink, not here.
 

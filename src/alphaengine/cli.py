@@ -1131,6 +1131,22 @@ def preflight(catalogue: list[dict[str, Any]], name: str, *, data: Any, backtest
     if not missing:
         return None
 
+    # check_overlap wants one candidate and a separate book. A loaded universe
+    # already holds both: name one symbol and the other names are the book.
+    # Telling somebody to pass --symbol and then discarding the rest of the
+    # names was the loop. The session builds that book itself; this message is
+    # the shell form of the same move.
+    if name == "check_overlap" and _looks_like_universe(data) and isinstance(data, dict):
+        example = next(iter(sorted(str(k) for k in data)), "MU")
+        return (
+            f"check_overlap compares ONE name with the equal-weight of the others, "
+            f"and a universe of {len(data)} names is loaded.\n"
+            f"      run check_overlap --symbol {example}\n"
+            "  That name is the candidate. The other names are the book.\n"
+            "  For every name against every other name:\n"
+            "      run correlation"
+        )
+
     # THE ANSWER THE LOADED DATA MAKES POSSIBLE, before the generic doors. A
     # user with a universe loaded who is told "load a universe" is in a loop
     # with no exit — the real move is naming which of their names to measure.
@@ -1653,16 +1669,107 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                 return
 
 
+def _publish_panel(session: Any, result: dict[str, Any], *, thesis_id: str | None = None) -> None:
+    """Hand the matrix or the pair table to the portal. A missing route is not a failure."""
+    if session is None or not hasattr(session, "file_panel"):
+        return
+    from .client.executor import _guard
+    from .core.relations import portal_figures
+
+    figures = portal_figures(result)
+    try:
+        _guard(figures)
+    except ValueError as exc:
+        say(yellow(str(exc)))
+        return
+    filed = session.file_panel(figures, thesis_id=thesis_id)
+    if not isinstance(filed, dict):
+        return
+    if filed.get("filed"):
+        say(dim("  filed to the portal"))
+        return
+    if filed.get("reason") == "missing":
+        say(dim("  held on this machine; the portal has no panels route yet"))
+        return
+    if filed.get("reason") and filed.get("reason") != "offline":
+        say(dim(f"  held on this machine ({filed.get('reason')})"))
+
+
+def _print_cross(
+    data: Any,
+    kind: str,
+    *,
+    session: Any = None,
+    thesis_id: str | None = None,
+) -> int:
+    from .core.relations import cointegration, correlation, covariance, summary_lines
+
+    try:
+        if kind == "correlation":
+            result = correlation(data)
+        elif kind == "covariance":
+            result = covariance(data)
+        else:
+            result = cointegration(data)
+    except ValueError as exc:
+        say(red(str(exc)))
+        return 2
+    for line in summary_lines(result):
+        say(line)
+    _publish_panel(session, result, thesis_id=thesis_id)
+    return 0
+
+
+def _overlap_payload(data: Any, symbol: str) -> dict[str, Any] | None:
+    """Candidate plus the equal-weight of the other loaded names, or None."""
+    from .core.relations import overlap_against_the_rest
+
+    if not _looks_like_universe(data):
+        return None
+    try:
+        prepared = overlap_against_the_rest(data, symbol)
+    except ValueError as exc:
+        say(red(str(exc)))
+        return None
+    others = len(prepared["book_names"])
+    say(dim(f"  {prepared['symbol']} against the equal-weight of {others} other names."))
+    return {"returns": prepared["returns"], "book_returns": prepared["book_returns"]}
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from .client import Offline, ServerError
+    from .core.relations import KINDS
 
     session, url = _session(args.url, args.key)
+    kind = KINDS.get(str(args.workflow).lower().replace("-", "_"))
+    if kind:
+        try:
+            data, _fn = resolve_data(args, session)
+        except (ProjectError, ValueError) as exc:
+            say(red(str(exc)))
+            return 2
+        return _print_cross(data, kind, session=session)
+    symbol = getattr(args, "symbol", None)
+    resolve_args = args
+    if args.workflow == "check_overlap" and symbol:
+        resolve_args = argparse.Namespace(**vars(args))
+        resolve_args.symbol = None
     try:
-        data, backtest_fn = resolve_data(args, session)
+        data, backtest_fn = resolve_data(resolve_args, session)
         workspace_id = None
     except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
         return 2
+    if args.workflow == "check_overlap" and _looks_like_universe(data):
+        if symbol:
+            payload = _overlap_payload(data, str(symbol))
+            if payload is None:
+                return 2
+            data = payload
+        else:
+            say("  check_overlap measures one name against the equal-weight of the others.")
+            say(dim("  No name was given, so this is every name against every other name."))
+            return _print_cross(data, "correlation", session=session)
 
     inputs: dict[str, Any] = {}
     for pair in args.input or []:
@@ -3390,6 +3497,22 @@ def _ask(
                 data = _narrow_to_universe(session, wanted, None)
             except Exception as exc:  # noqa: BLE001 - reachable and unloadable: say so, refuse below
                 say(yellow(f"  {wanted} is on your account and could not be loaded: {exc}"))
+
+    # check_overlap on a universe is one name against the equal-weight of the
+    # rest. Collapsing --symbol here used to throw the book away, which is why
+    # the next line was "needs book_returns, and none was loaded."
+    if name == "check_overlap" and _looks_like_universe(data):
+        sym = _symbol_in(request, data)
+        if sym:
+            payload = _overlap_payload(data, sym)
+            if payload is None:
+                return None
+            data = payload
+        else:
+            say("  check_overlap measures one name against the equal-weight of the others.")
+            say(dim("  No name was given, so this is every name against every other name."))
+            _print_cross(data, "correlation", session=session, thesis_id=thesis_id)
+            return None
 
     # "size MU" against a loaded universe is a complete instruction: the name
     # the question mentions picks the series out of the caller's own data.

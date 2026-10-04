@@ -12,7 +12,14 @@ KINDS
     hist      {edges, counts}     histogram
     cost      {bps, sharpe}       cost ladder
     scatter   {x, y}              overlap
-    triangle  {a, b, v}           covariance heatmap
+    triangle  {a, b, v}           covariance heatmap, only when the
+                                  upper triangle fits in 512 cells
+    matrix    names + matrix      full square heatmap. `names[i]` labels
+                                  `matrix[i][j]`. Each row is at most 512
+                                  long, so a book larger than that is truncated
+                                  and `truncated` is true. This is the shape a
+                                  100-name correlation uses; `triangle` cannot
+                                  carry it.
     rows      bounded dict rows   table
     quantiles [float]             bar
 
@@ -32,6 +39,7 @@ CHART_KINDS = frozenset(
         "cost",
         "scatter",
         "triangle",
+        "matrix",
         "rows",
         "quantiles",
     }

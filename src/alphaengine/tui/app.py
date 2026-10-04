@@ -26,6 +26,8 @@ _COMMANDS = (
     "thesis",
     "screen   diagnose   signal",
     "validate   stress   overlap",
+    "correlation   covariance",
+    "cointegration",
     "size   monitor",
     "run <name>",
     "workflows",
@@ -592,6 +594,10 @@ class QuantOSApp(App[None]):
             self.exit()
 
     def _load_lines(self) -> None:
+        matrix = getattr(self.desk, "matrix", None)
+        if matrix:
+            self._show_matrix(matrix)
+            return
         run = self.desk.last
         collected: list[dict[str, Any]] = []
         for payload in getattr(run, "traces", None) or []:
@@ -601,9 +607,12 @@ class QuantOSApp(App[None]):
                     collected.append({**line, "op": op})
         self._lines = collected
         inspector = self.query_one("#inspector", Vertical)
+        inspector.styles.width = 30
         view = self.query_one("#lines", ListView)
+        view.display = True
         for child in list(view.children):
             child.remove()
+        self.query_one("#inspector-title", Static).update("math")
         if not self._lines:
             inspector.display = False
             self.formula_text = ""
@@ -613,6 +622,48 @@ class QuantOSApp(App[None]):
             label = _fit(f"{line.get('id', '?')}  {line.get('op', '')}", 40)
             view.append(ListItem(Static(label), name=str(index)))
         self._show_line(0)
+
+    def _show_matrix(self, result: dict[str, Any]) -> None:
+        """The full name-by-name matrix. It does not fit a figure, so it stays here."""
+        inspector = self.query_one("#inspector", Vertical)
+        inspector.display = True
+        inspector.styles.width = 56
+        kind = str(result.get("kind") or "matrix")
+        names = list(result.get("names") or [])
+        self.query_one("#inspector-title", Static).update(kind)
+        self.formula_text = f"{kind} across {len(names)} names"
+        self.query_one("#formula", Static).update(self.formula_text)
+        n_obs = result.get("n_obs")
+        detail = f"{len(names)} names"
+        if n_obs:
+            detail += f"   {n_obs} observations"
+        self.query_one("#inputs", Static).update(detail)
+        view = self.query_one("#lines", ListView)
+        view.display = False
+        self.query_one("#spark", Sparkline).display = False
+        table = self.query_one("#series", DataTable)
+        table.display = True
+        table.clear(columns=True)
+        if kind == "cointegration":
+            for column in ("a", "b", "p", "half-life"):
+                table.add_column(column)
+            for row in (result.get("rows") or [])[:40]:
+                if row.get("p") is None and not row.get("cointegrated"):
+                    continue
+                table.add_row(
+                    str(row.get("a") or ""),
+                    str(row.get("b") or ""),
+                    "" if row.get("p") is None else str(row.get("p")),
+                    "" if row.get("half_life") is None else str(row.get("half_life")),
+                )
+            return
+        table.add_column("")
+        for name in names:
+            table.add_column(str(name))
+        values = result.get("values") or []
+        for i, name in enumerate(names):
+            cells = values[i] if i < len(values) else []
+            table.add_row(str(name), *["" if cell is None else str(cell) for cell in cells])
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "lines":

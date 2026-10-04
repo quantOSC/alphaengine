@@ -92,4 +92,10 @@ is what a changed figure costs. The API may still move underneath it.
 # 0.9.4 IS THE SESSION, NOT THE MATHS. No computed value moved. The session
 # opens on the desk: what is loaded, the thesis on its own lines, and the
 # next thing to type.
-__version__ = "0.9.4"
+#
+# 0.9.5 IS THE SESSION, NOT THE MATHS. No golden moved. Correlation, covariance,
+# and cointegration run on the universe already loaded, and the square matrix
+# is filed for the portal. check_overlap keeps that universe: one named symbol
+# against the equal-weight of the others. The correlation and beta are the
+# same numbers; the step now also names the candidate and the book.
+__version__ = "0.9.5"

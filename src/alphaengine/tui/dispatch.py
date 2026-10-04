@@ -41,6 +41,9 @@ from ..cli import (
     yellow,
 )
 from ..client import Offline, ServerError
+from ..core.relations import KINDS as _CROSS
+
+_OVERLAP = {"overlap", "check_overlap"}
 
 
 @dataclass
@@ -65,6 +68,7 @@ class Desk:
     book: Any = None
     thesis: dict[str, Any] | None = None
     thesis_declined: bool = False
+    matrix: dict[str, Any] | None = None
 
 
 def submit(desk: Desk, line: str) -> bool:
@@ -74,6 +78,24 @@ def submit(desk: Desk, line: str) -> bool:
         return False
 
     line, inline_flags = _extract_flags(line)
+    # `--symbol` on check_overlap must not collapse the universe before the
+    # book is built. Every other workflow still wants that collapse.
+    peeled_symbol = ""
+    tokens = [tok.lower().replace("-", "_") for tok in line.split()]
+    overlap_line = bool(tokens) and (
+        tokens[0] in _OVERLAP or (len(tokens) > 1 and tokens[0] == "run" and tokens[1] in _OVERLAP)
+    )
+    if overlap_line and "--symbol" in inline_flags:
+        kept: list[str] = []
+        i = 0
+        while i < len(inline_flags):
+            if inline_flags[i] == "--symbol" and i + 1 < len(inline_flags):
+                peeled_symbol = inline_flags[i + 1]
+                i += 2
+                continue
+            kept.append(inline_flags[i])
+            i += 1
+        inline_flags = kept
     thesis_query, inline_flags = pop_flag(inline_flags, "--thesis")
     if thesis_query and not _pin_thesis(desk, thesis_query):
         return False
@@ -200,8 +222,25 @@ def submit(desk: Desk, line: str) -> bool:
             say(red(str(exc)))
         return False
 
+    if verb in _CROSS or verb in _OVERLAP:
+        if verb in _OVERLAP:
+            _overlap(desk, "")
+        else:
+            _cross(desk, _CROSS[verb])
+        return False
+
     if verb == "run" and rest:
         name, flags = _split_run(rest)
+        key = name.lower().replace("-", "_")
+        if key in _CROSS:
+            _cross(desk, _CROSS[key])
+            return False
+        if key in _OVERLAP:
+            tail = " ".join(flags)
+            if peeled_symbol and "--symbol" not in flags:
+                tail = f"--symbol {peeled_symbol} {tail}".strip()
+            _overlap(desk, tail)
+            return False
         if name and " " not in name and _is_workflow(desk.session, name):
             _scripted(desk, name, flags)
             return False
@@ -425,7 +464,85 @@ def _thesis(desk: Desk, rest: str) -> None:
         say(dim("Type thesis <name> to use one."))
 
 
+def _cross(desk: Desk, kind: str) -> None:
+    """Correlation, covariance, or cointegration on the names already loaded."""
+    from ..core.relations import as_closes, cointegration, correlation, covariance, summary_lines
+
+    if not isinstance(desk.data, dict) or not desk.data:
+        say(yellow("Load a universe first. These run on the names you already have."))
+        return
+    if kind == "cointegration":
+        n = len(as_closes(desk.data))
+        pairs = n * (n - 1) // 2
+        if pairs > 20:
+            say(dim(f"  screening {pairs} pairs across {n} names"))
+    try:
+        if kind == "correlation":
+            result = correlation(desk.data)
+        elif kind == "covariance":
+            result = covariance(desk.data)
+        else:
+            result = cointegration(desk.data)
+    except ValueError as exc:
+        say(red(str(exc)))
+        return
+    desk.matrix = result
+    for line in summary_lines(result):
+        say(line)
+    from ..cli import _publish_panel
+
+    _publish_panel(desk.session, result, thesis_id=thesis_id_of(desk.thesis) or None)
+
+
+def _overlap(desk: Desk, rest: str) -> None:
+    """One name against the equal-weight of the other loaded names.
+
+    `check_overlap` is not a correlation matrix. It asks whether a single
+    candidate is the book again. With a universe loaded, the book is the
+    other names. With no name named, the useful run is the full matrix.
+    """
+    from ..cli import _looks_like_universe
+    from ..core.relations import overlap_against_the_rest
+
+    symbol = ""
+    flags = rest.split()
+    if "--symbol" in flags:
+        i = flags.index("--symbol")
+        if i + 1 < len(flags):
+            symbol = flags[i + 1]
+    elif flags and not flags[0].startswith("--"):
+        symbol = flags[0]
+
+    say("  check_overlap measures one name against the equal-weight of the others.")
+    if not symbol or not _looks_like_universe(desk.data):
+        if _looks_like_universe(desk.data):
+            say(dim("  No name was given, so this is every name against every other name."))
+            _cross(desk, "correlation")
+            return
+        say(yellow("Load a universe, or name one series and a book."))
+        return
+    try:
+        prepared = overlap_against_the_rest(desk.data, symbol)
+    except ValueError as exc:
+        say(red(str(exc)))
+        return
+    others = len(prepared["book_names"])
+    say(dim(f"  {prepared['symbol']} against the equal-weight of {others} other names."))
+    held = desk.data
+    desk.data = {
+        "returns": prepared["returns"],
+        "book_returns": prepared["book_returns"],
+        "symbol": prepared["symbol"],
+        "book_names": prepared["book_names"],
+    }
+    try:
+        _scripted(desk, "check_overlap", [])
+    finally:
+        desk.data = held
+
+
 def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
+    desk.matrix = None
     thesis_query, flags = pop_flag(flags, "--thesis")
     if thesis_query and not _pin_thesis(desk, thesis_query):
         return
@@ -462,7 +579,23 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
 
 def _sentence(desk: Desk, line: str) -> None:
     from ..cli import _apply_flags as apply_flags
-    from ..cli import _stored_universes, _universe_named_in
+    from ..cli import _stored_universes, _symbol_in, _universe_named_in
+    from ..core.relations import as_closes
+
+    low = line.lower()
+    if isinstance(desk.data, dict) and as_closes(desk.data):
+        if "cointegrat" in low:
+            _cross(desk, "cointegration")
+            return
+        if "covariance" in low:
+            _cross(desk, "covariance")
+            return
+        if "correlation" in low or "correlate" in low:
+            _cross(desk, "correlation")
+            return
+        if "overlap" in low:
+            _overlap(desk, _symbol_in(line, desk.data) or "")
+            return
 
     if desk.data is None:
         named = _universe_named_in(line, desk.session)

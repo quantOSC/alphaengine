@@ -289,6 +289,9 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `book [<name> \| status]` | show or load sleeves on the multi-strategy book | session |
 | `load <file \| module \| universe>` | a CSV, a project module, or a portal universe | session |
 | `thesis [<name> \| clear]` | choose a portal thesis for the next run | session |
+| `correlation` | the correlation of every loaded name with every other name | session |
+| `covariance` | the sample covariance of every loaded name with every other name | session |
+| `cointegration` | which loaded names are cointegrated | session |
 | `universe <name>` | same as load: a universe registered in the portal | session |
 | `data <file>` | same as load: a local CSV or parquet | session |
 | `project <module>` | same as load: a module with data and backtest_fn | session |
