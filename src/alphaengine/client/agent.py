@@ -89,7 +89,11 @@ The goal, in the researcher's words:
 What has happened so far:
 {history}
 
-You may choose exactly ONE of these permitted steps:
+What has already been measured:
+{measured}
+
+You may choose exactly ONE of these permitted steps. Do not choose a step the
+history says has already finished.
 {options}
 
 Reply with ONLY a JSON object:
@@ -98,6 +102,67 @@ Reply with ONLY a JSON object:
 Choose the index of the step that best advances the goal. You may not invent a
 step, and you may not choose anything not listed above.
 """
+
+_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "this",
+        "that",
+        "these",
+        "those",
+        "with",
+        "from",
+        "into",
+        "over",
+        "once",
+        "your",
+        "you",
+        "are",
+        "was",
+        "were",
+        "been",
+        "have",
+        "has",
+        "had",
+        "does",
+        "did",
+        "can",
+        "what",
+        "which",
+        "where",
+        "when",
+        "who",
+        "how",
+        "and",
+        "or",
+        "not",
+        "for",
+        "its",
+        "about",
+        "just",
+        "than",
+        "then",
+        "them",
+        "they",
+        "my",
+        "our",
+        "of",
+        "to",
+        "in",
+        "on",
+        "is",
+        "it",
+        "be",
+        "as",
+        "at",
+        "by",
+        "if",
+        "so",
+        "we",
+    }
+)
 
 
 class AgentDriver:
@@ -144,14 +209,14 @@ class AgentDriver:
         and cannot name an op. This wrapper is the prompt+goal layer that USES it.
         """
 
-        def choose(permitted: list[Figures], _figures: Figures) -> int:
-            return self.pick(permitted)
+        def choose(permitted: list[Figures], figures: Figures) -> int:
+            return self.pick(permitted, figures)
 
         return choose
 
     # ── the one decision ───────────────────────────────────────────────────
 
-    def pick(self, permitted: list[Figures]) -> int:
+    def pick(self, permitted: list[Figures], figures: Any = None) -> int:
         """Return an INDEX into `permitted`. Never a step, never an op name.
 
         The index is the safety property. A model cannot name an operation the
@@ -172,6 +237,7 @@ class AgentDriver:
         prompt = _PROMPT.format(
             goal=self.goal,
             history="\n".join(f"  - {h}" for h in self.history[-12:]) or "  (nothing yet)",
+            measured=summarize_figures(figures),
             options=options,
         )
         raw = self.think(prompt)
@@ -213,34 +279,63 @@ class AgentDriver:
         """
         n = 0
         failures: dict[str, int] = {}
+        done_ids: set[str] = set()
+        done_sigs: set[str] = set()
         while run.status == "open" and n < self.max_steps:
             if not run.permitted:
                 run.resume()
                 if run.status != "open" or not run.permitted:
                     break
 
-            step = run.permitted[self.pick(run.permitted)]
-            op = str(step.get("op") or "?")
-            self.on_step(f"{n + 1}  {op}")
-            before = run.status
-            started = time.monotonic()
-            run.step(step)
-            took = time.monotonic() - started
-            n += 1
+            fresh = [p for p in run.permitted if not _already_done(p, done_ids, done_sigs)]
+            if not fresh:
+                op = str((run.permitted[0] or {}).get("op") or "?")
+                self.on_step(f"stop     {op} already finished")
+                self.history.append(f"{op} already finished; not running it again")
+                run.status = "stopped"
+                run.stopped = {"reason": "already finished", "op": op}
+                return run
 
-            still = any(p.get("step_id") == step.get("step_id") for p in run.permitted)
-            if still and before == "open" and run.status == "open":
-                key = str(step.get("step_id"))
-                failures[key] = failures.get(key, 0) + 1
-                self.history.append(f"{op} could not be executed here")
-                self.on_step(f"{n}  {op}  could not be executed  {took:.1f}s")
-                if failures[key] >= 2:
-                    run.status = "abandoned"
-                    run.stopped = {"reason": "step_failed", "op": step.get("op")}
-                    return run
+            if getattr(run, "selection", None) == "all":
+                batch = list(fresh)
+            elif len(fresh) == 1:
+                batch = fresh
             else:
-                self.history.append(f"{op} done")
-                self.on_step(f"{n}  {op}  {took:.1f}s")
+                batch = [fresh[self.pick(fresh, getattr(run, "figures", None))]]
+
+            for step in batch:
+                op = str(step.get("op") or "?")
+                self.on_step(f"step {n + 1:<2}  {op}")
+                before = run.status
+                started = time.monotonic()
+                run.step(step)
+                took = time.monotonic() - started
+                n += 1
+
+                still = any(p.get("step_id") == step.get("step_id") for p in run.permitted)
+                if still and before == "open" and run.status == "open":
+                    key = str(step.get("step_id"))
+                    failures[key] = failures.get(key, 0) + 1
+                    self.history.append(f"{op} could not be executed here")
+                    self.on_step(f"         could not be executed   {took:.1f}s")
+                    if failures[key] >= 2:
+                        run.status = "abandoned"
+                        run.stopped = {"reason": "step_failed", "op": step.get("op")}
+                        return run
+                else:
+                    sid = str(step.get("step_id") or "")
+                    if sid:
+                        done_ids.add(sid)
+                    done_sigs.add(_signature(step))
+                    found = _finding(getattr(run, "figures", None), op)
+                    note = f"{op} finished"
+                    if found:
+                        note += f" ({found})"
+                    self.history.append(note)
+                    detail = f"         {found}   {took:.1f}s" if found else f"         {took:.1f}s"
+                    self.on_step(detail)
+                if run.status != "open":
+                    return run
 
         if run.status == "open" and n >= self.max_steps:
             raise AgentRefusal(
@@ -251,6 +346,95 @@ class AgentDriver:
 
 
 # ── parsing, which has to assume the model is sloppy ───────────────────────
+
+
+def summarize_figures(figures: Any, *, limit: int = 8) -> str:
+    """Scalars the run already produced. Lists stay out: a list is a series."""
+    if not isinstance(figures, dict) or not figures:
+        return "(nothing yet)"
+    lines: list[str] = []
+    for op, blob in figures.items():
+        if not isinstance(blob, dict):
+            continue
+        bits = _scalar_bits(blob)
+        if bits:
+            lines.append(f"  {op}: " + ", ".join(bits))
+        if len(lines) >= limit:
+            break
+    return "\n".join(lines) or "(nothing yet)"
+
+
+def _scalar_bits(blob: dict[str, Any], limit: int = 4) -> list[str]:
+    bits: list[str] = []
+    for key, value in blob.items():
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, float):
+            bits.append(f"{key}={value:.4g}")
+        elif isinstance(value, int):
+            bits.append(f"{key}={value}")
+        elif isinstance(value, str) and value.strip() and len(value) <= 80:
+            bits.append(f"{key}={value.strip()}")
+        if len(bits) >= limit:
+            break
+    return bits
+
+
+def _finding(figures: Any, op: str) -> str:
+    if not isinstance(figures, dict):
+        return ""
+    blob = figures.get(op)
+    if not isinstance(blob, dict):
+        return ""
+    return ", ".join(_scalar_bits(blob))
+
+
+def _signature(step: dict[str, Any]) -> str:
+    """Same op and same params is the same step, even with a new id."""
+    return f"{step.get('op') or ''}|{_brief(step.get('params') or {})}"
+
+
+def _already_done(step: dict[str, Any], done_ids: set[str], done_sigs: set[str]) -> bool:
+    sid = str(step.get("step_id") or "")
+    if sid and sid in done_ids:
+        return True
+    return _signature(step) in done_sigs
+
+
+def prefer_index(question: str, options: list[dict[str, Any]]) -> int | None:
+    """The one option whose own words the question uses.
+
+    None when the question does not single one out. There is no default and
+    no preferred order: a tie, or a weak overlap, goes to the model.
+    """
+    if not options:
+        return None
+    question_l = question.lower()
+    q = _content_tokens(question)
+    q_words = set(re.findall(r"[a-z0-9]+", question_l))
+    scores: list[int] = []
+    for opt in options:
+        answers = opt.get("answers")
+        if not isinstance(answers, str):
+            params = opt.get("params")
+            answers = params.get("answers") if isinstance(params, dict) else ""
+        score = len(q & _content_tokens(str(answers or "")))
+        name = str(opt.get("op") or "").lower()
+        if name and name.replace("_", " ") in question_l:
+            score += 3
+        for piece in name.split("_"):
+            if len(piece) >= 4 and piece in q_words:
+                score += 2
+        scores.append(score)
+    best = max(scores)
+    if best < 2:
+        return None
+    winners = [i for i, score in enumerate(scores) if score == best]
+    return winners[0] if len(winners) == 1 else None
+
+
+def _content_tokens(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 4 and w not in _STOPWORDS}
 
 
 def _brief(params: Any) -> str:

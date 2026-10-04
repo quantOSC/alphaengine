@@ -134,6 +134,66 @@ def test_as_choice_is_the_index_bound_primitive():
     assert callable(IndexDriver)
 
 
+def test_measured_scalars_reach_the_model_and_series_do_not():
+    """A later choice that cannot see what the last step found picks the same
+    step again. The scalars go in. A list is a series and stays out."""
+    seen: list[str] = []
+
+    def think(prompt: str) -> str:
+        seen.append(prompt)
+        return '{"choice": 1, "why": "the sweep already reported"}'
+
+    AgentDriver(think, goal="g").pick(
+        PERMITTED,
+        {"compute.sweep": {"sharpe": 0.4, "curve": [1, 2, 3], "verdict": "stop"}},
+    )
+    assert "compute.sweep" in seen[0]
+    assert "sharpe=0.4" in seen[0]
+    assert "verdict=stop" in seen[0]
+    assert "[1, 2, 3]" not in seen[0]
+
+
+def test_a_finished_step_is_not_executed_again():
+    """A new step id with the same op and the same params is the same work.
+    Running it again is how a sentence loops."""
+
+    class _Replay:
+        def __init__(self) -> None:
+            self.status = "open"
+            self.selection = "any"
+            self.permitted = [{"step_id": "s1", "op": "compute.screen", "params": {}}]
+            self.figures: dict = {}
+            self.calls = 0
+            self.stopped = None
+
+        def resume(self) -> None:
+            return None
+
+        def step(self, step: dict) -> None:
+            self.calls += 1
+            self.figures["compute.screen"] = {"sharpe": 1.25}
+            self.permitted = [{"step_id": "s9", "op": "compute.screen", "params": {}}]
+            self.status = "open"
+
+    run = _Replay()
+    AgentDriver(lambda _p: '{"choice": 0}', goal="g").drive(run)
+    assert run.calls == 1
+    assert run.status == "stopped"
+    assert run.stopped["reason"] == "already finished"
+
+
+def test_a_question_that_names_one_workflow_is_not_left_to_guess():
+    from alphaengine.client.agent import prefer_index
+
+    options = [
+        {"op": "screen_universe", "answers": "what in my universe is worth a look"},
+        {"op": "validate_study", "answers": "does this result hold up once you count the tries"},
+    ]
+    assert prefer_index("screen my universe", options) == 0
+    assert prefer_index("which of my names are overbought", options) is None
+    assert prefer_index("look at the universe and validate the study", options) is None
+
+
 def test_params_are_truncated_before_reaching_the_model():
     """A step's params can carry a parameter grid, which is frequently bigger
     intellectual property than the returns. No reason to ship all of it to a

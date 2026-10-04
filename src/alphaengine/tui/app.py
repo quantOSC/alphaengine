@@ -66,8 +66,8 @@ Screen { background: #0b0d10; }
     padding: 0 1;
 }
 #inspector {
-    width: 44;
-    min-width: 36;
+    width: 30;
+    min-width: 24;
     background: #101318;
     padding: 1 1;
     overflow: hidden;
@@ -437,6 +437,15 @@ class QuantOSApp(App[None]):
         self.query_one("#status", Static).update(f"{frame}   working   ·   {label}   ·   {elapsed:.1f}s")
 
     def _live(self, chunk: str) -> None:
+        # A working label updates the status line and does not join the trace.
+        # The step lines are the trace; a second copy of the op name is noise.
+        if chunk.startswith("\x1e"):
+            label = _plain(chunk[1:]).strip()
+            if label:
+                self.activity = label
+            if self.busy:
+                self._paint_working()
+            return
         plain = _plain(chunk).strip()
         if not plain:
             return

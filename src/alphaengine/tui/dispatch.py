@@ -22,6 +22,7 @@ from ..cli import (
     _help_text,
     _is_workflow,
     _near_verb,
+    _prior_line,
     _repl_gap,
     _report,
     _split_run,
@@ -487,6 +488,7 @@ def _sentence(desk: Desk, line: str) -> None:
         thesis_id=thesis_id_of(pinned) or None if pinned else None,
         thesis_name=thesis_label(pinned) if pinned else None,
         thesis_statement=thesis_text(pinned) if pinned else None,
+        prior=_prior_line(desk.last) if desk.last is not None else None,
     )
     if run is not None:
         desk.last = run

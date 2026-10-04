@@ -301,6 +301,19 @@ QUESTION_VERBS: dict[str, str] = {
 #: hand-maintained copies of this map is precisely the drift `commands.py`
 #: exists to prevent.
 QUESTION_FOR_WORKFLOW: dict[str, str] = {w: v for v, w in QUESTION_VERBS.items()}
+#: What each workflow answers, in a reader's words. The server publishes a name.
+#: A name is not a choice. These sentences describe the choice and say nothing
+#: about the order of steps inside it. The model sees the same sentences.
+_WORKFLOW_ANSWERS: dict[str, str] = {
+    "diagnose_data": "can I trust this data",
+    "screen_universe": "what in my universe is worth a look",
+    "evaluate_signal": "does this signal carry information",
+    "validate_study": "does this result hold up once you count the tries",
+    "stress_study": "where does it break",
+    "check_overlap": "is it new, or my book again",
+    "size_position": "how much of it should I hold",
+    "monitor_sleeve": "has anything crossed a line",
+}
 #: The held-back-rows marker. Probed like the rest: cp1252 renders a literal
 #: ellipsis as mojibake in exactly the place a user reads their result.
 ELLIPSIS = "…" if _UNICODE_OK else "..."
@@ -644,7 +657,8 @@ class Working:
         self._started = time.monotonic()
         sink = _SINK.get()
         if sink is not None:
-            sink(self.plain)
+            # The session paints this on the status line. It is not a trace line.
+            sink("\x1e" + self.plain)
             return self
         if not _tty():
             return self
@@ -900,18 +914,6 @@ def cmd_workflows(args: argparse.Namespace) -> int:
         say("The server offers no workflows.")
         return 0
 
-    # WHAT EACH ONE ANSWERS, in the reader's words. The server publishes a name,
-    # a version and an input contract -- correctly, since anything more would be
-    # workflow knowledge crossing the wire -- but a name is not a choice. These
-    # sentences live here, on the client, for exactly that reason: they describe
-    # what a reader is picking between and disclose nothing about how it works.
-    ANSWERS = {
-        "screen_universe": "what in my universe is worth a look",
-        "validate_study": "does this result hold up once you count the tries",
-        "size_position": "how much of it should I hold",
-        "monitor_sleeve": "has anything crossed a line",
-    }
-
     width = max(len(str(r.get("name"))) for r in rows)
     say("")
     for r in rows:
@@ -921,7 +923,7 @@ def cmd_workflows(args: argparse.Namespace) -> int:
         # the same question disagree. Same reasoning as a trial count that says
         # whether it was derived or asserted.
         repro = green("reproducible") if r.get("reproducible") else yellow("may differ")
-        say(f"  {bold(name.ljust(width))}   {ANSWERS.get(name, '')}")
+        say(f"  {bold(name.ljust(width))}   {_workflow_answer(r)}")
         say(f"  {' ' * width}   {dim('needs ' + needs)}  {DOT}  {repro}  {dim(str(r.get('version')))}")
     say("")
     say(dim("  alphaengine run <name> --data prices.csv   ") + dim(f"{DOT}  `commands run` for the flags"))
@@ -1619,12 +1621,12 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                     # with no why sent people to the traceback that no longer
                     # prints. The message came from the executor and was written
                     # to be read.
-                    say(f"  {red(CROSS)}  {bold(op)}")
-                    say(f"     {NEST} {took}")
+                    say(f"  step {n:<2}  {red(CROSS)}  {bold(op)}")
                     why = getattr(run, "last_error", None)
                     if why:
                         for line in str(why).splitlines():
-                            say(red(f"     {NEST} {line}"))
+                            say(red(f"           {line}"))
+                    say(f"           {took}")
                 if failures[key] >= 2:
                     run.status = "abandoned"
                     run.stopped = {
@@ -1639,11 +1641,13 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
                 # `emit.*` seal rather than measure) and printing a blank line
                 # for it would read as a stall.
                 found = _found(seen, run)
-                say(f"  {_accent(ON)}  {found or bold(op)}")
-                say(f"     {dim(NEST)} {took}")
+                say(f"  step {n:<2}  {bold(op)}")
+                if found:
+                    say(f"           {found}")
+                say(f"           {took}")
                 rejected = getattr(run, "trace_rejected", None)
                 if rejected:
-                    say(yellow(f"    portal did not accept the series trace: {rejected}"))
+                    say(yellow(f"           portal did not accept the series trace: {rejected}"))
 
             if run.status != "open":
                 return
@@ -3223,6 +3227,51 @@ def _is_workflow(session: Any, name: str) -> bool:
         return False
 
 
+def _workflow_answer(row: dict[str, Any]) -> str:
+    """What this workflow answers, from the server when it says, else the local sentence."""
+    for key in ("answers", "purpose", "description", "summary"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return _WORKFLOW_ANSWERS.get(str(row.get("name") or ""), "")
+
+
+def _catalogue_option(row: dict[str, Any]) -> dict[str, Any]:
+    """One catalogue row, as a choice the model can tell from the others.
+
+    The name alone is why every question was landing on the same workflow.
+    The sentence, what it needs, and whether it repeats are the distinction.
+    """
+    name = str(row.get("name") or "?")
+    params: dict[str, Any] = {}
+    answers = _workflow_answer(row)
+    if answers:
+        params["answers"] = answers[:180]
+    needs = [str(item) for item in (row.get("requires") or []) if str(item)]
+    if needs:
+        params["needs"] = ", ".join(needs[:6])
+    agency = row.get("agency")
+    if agency:
+        params["agency"] = str(agency)
+    if row.get("reproducible") is True:
+        params["reproducible"] = "yes"
+    elif row.get("reproducible") is False:
+        params["reproducible"] = "no"
+    return {"op": name, "params": params, "answers": answers}
+
+
+def _prior_line(run: Any) -> str:
+    """One line of what the desk already ran, so the next question is not blind."""
+    from .client.agent import summarize_figures
+
+    workflow = str((getattr(run, "artifact", None) or {}).get("workflow") or "the last run")
+    line = f"{workflow} is {getattr(run, 'status', '')}."
+    measured = summarize_figures(getattr(run, "figures", None))
+    if measured != "(nothing yet)":
+        line = f"{line} {' '.join(measured.split())[:240]}"
+    return line
+
+
 def _ask(
     session: Any,
     url: str,
@@ -3234,6 +3283,7 @@ def _ask(
     thesis_id: str | None = None,
     thesis_name: str | None = None,
     thesis_statement: str | None = None,
+    prior: str | None = None,
     think: Callable[[str], str] | None = None,
 ) -> Any:
     """Natural language → a workflow chosen and driven by the user's own model.
@@ -3245,6 +3295,7 @@ def _ask(
     without being unsafe.
     """
     from .client import AgentDriver, AgentRefusal, Offline, ServerError
+    from .client.agent import prefer_index
     from .events import EventSink
     from .model import NoModelConfigured, build_think
 
@@ -3283,12 +3334,16 @@ def _ask(
         say(dim("The server offers no workflows, so there is nothing to choose from."))
         return None
 
-    say(f"  {_accent(STAR)}  {dim(label)}")
+    say(f"  model    {dim(label)}")
     if thesis_name:
-        say(dim(f"  thesis  {thesis_name}"))
+        say(dim(f"  thesis   {thesis_name}"))
+    if prior:
+        say(dim("  prior    " + prior.splitlines()[0][:88]))
     goal = request
     if thesis_statement:
         goal = f"{request}\n\nThesis:\n{thesis_statement}"
+    if prior:
+        goal = f"{goal}\n\nAlready on the desk:\n{prior}"
 
     # Choosing the workflow is the same shape as choosing a step: an index into
     # a list the server produced. Reusing `AgentDriver.pick` rather than writing
@@ -3296,16 +3351,22 @@ def _ask(
     driver = AgentDriver(
         think,
         goal=goal,
-        on_thought=lambda why: say(f"  {_accent(STAR)}  {_c('2;3', why)}"),
+        on_thought=lambda why: say(f"  why      {why}"),
         on_step=lambda line: say(f"  {line}"),
         sink=sink,
         provider=provider or None,
         model=model_name or None,
     )
-    options = [{"op": w.get("name", "?"), "params": {"agency": w.get("agency")}} for w in catalogue]
+    options = [_catalogue_option(w) for w in catalogue]
     try:
+        say(dim("  reading  the catalogue"))
         with Working(dim("reading the catalogue"), plain="reading the catalogue"):
-            index = driver.pick(options)
+            matched = prefer_index(request, options)
+            if matched is None:
+                index = driver.pick(options)
+            else:
+                index = matched
+                say(dim("  matched  the question uses this workflow's own words"))
         chosen = catalogue[index]
     except AgentRefusal as exc:
         say(red(f"The model did not choose a workflow: {exc}"))
@@ -3364,10 +3425,7 @@ def _ask(
         return None
 
     repro = chosen.get("reproducible")
-    say(
-        f"  {_accent(ON)}  chose {bold(name)}  "
-        + (green("reproducible") if repro else yellow("not reproducible"))
-    )
+    say(f"  workflow {bold(name)}   " + (green("reproducible") if repro else yellow("exploratory")))
 
     try:
         run = session.open(
@@ -3390,6 +3448,7 @@ def _ask(
         say(red(f"The run stopped: {exc}"))
         return None
 
+    say(dim("  result"))
     _report(run)
     if run.status == "closed":
         _publish_signals(session, run, workspace_id=workspace_id, label=None)
