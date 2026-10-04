@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any
 
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.widgets import DataTable, Input, ListItem, ListView, RichLog, Sparkline, Static
@@ -17,23 +18,18 @@ from .dispatch import Desk, submit
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
+# Kept as whole lines so a short window still shows the desk above them.
 _COMMANDS = (
     "login",
     "enter model key",
     "load <name>",
     "thesis",
-    "screen",
-    "diagnose",
-    "signal",
-    "validate",
-    "stress",
-    "overlap",
-    "size",
-    "monitor",
+    "screen   diagnose   signal",
+    "validate   stress   overlap",
+    "size   monitor",
     "run <name>",
     "workflows",
-    "help",
-    "quit",
+    "help   quit",
 )
 _URL_AFTER = {
     "AZURE_OPENAI_API_KEY": "AZURE_OPENAI_ENDPOINT",
@@ -58,12 +54,13 @@ Screen { background: #0b0d10; }
     color: #c5cdd6;
     padding: 1 1;
     overflow: auto;
+    border-right: solid #1c2128;
 }
 #transcript {
     width: 1fr;
     height: 1fr;
     background: #0b0d10;
-    padding: 0 1;
+    padding: 1 2 0 2;
 }
 #inspector {
     width: 30;
@@ -84,9 +81,9 @@ Screen { background: #0b0d10; }
     height: 1;
     background: #0b0d10;
     color: #6b7380;
-    padding: 0 1;
+    padding: 0 2;
 }
-#prompt { dock: bottom; margin: 0 1; }
+#prompt { dock: bottom; margin: 0 1 0 1; }
 """
 
 
@@ -99,6 +96,23 @@ def _fit(text: str, width: int = 22) -> str:
     if len(text) <= width:
         return text
     return text[: width - 1] + "…"
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    words = " ".join(str(text).split()).split(" ")
+    if not words or words == [""]:
+        return []
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if current and len(current) + 1 + len(word) > width:
+            lines.append(current)
+            current = word
+        else:
+            current = f"{current} {word}".strip()
+    if current:
+        lines.append(current)
+    return lines
 
 
 class QuantOSApp(App[None]):
@@ -139,6 +153,7 @@ class QuantOSApp(App[None]):
         self.rail_text = ""
         self.formula_text = ""
         self.transcript: list[str] = []
+        self.turns = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
@@ -152,18 +167,12 @@ class QuantOSApp(App[None]):
                 yield Static("", id="inputs")
                 yield Sparkline([], id="spark")
                 yield DataTable(id="series", zebra_stripes=True)
-        yield Static("enter send   ·   help   ·   quit", id="hint")
+        yield Static("", id="hint")
         yield Input(placeholder="Ask in plain English, or run <workflow>", id="prompt")
 
     def on_mount(self) -> None:
         self.query_one("#series", DataTable).cursor_type = "row"
         self._refresh_rail()
-        log = self.query_one("#transcript", RichLog)
-        log.write("Ask in plain English.")
-        log.write("A sentence picks a workflow.  run <name> follows it exactly.")
-        log.write("login signs you in.  enter model key pastes whichever key you use.")
-        log.write("")
-        log.write("help lists what you can type.  quit leaves.")
         self.query_one(Input).focus()
         self.set_interval(0.2, self._tick_working)
         self._sync_account()
@@ -192,46 +201,58 @@ class QuantOSApp(App[None]):
         else:
             loaded = "nothing"
 
-        lines = ["commands", *[f"  {name}" for name in _COMMANDS], ""]
-        lines += [
+        lines = [
+            "desk",
             f"{on}  the maths",
-            "    offline, always",
-            "",
+            "    offline",
             f"{on if keyed else off}  workflows",
             "    ready" if keyed else "    sign in",
-            "",
             f"{on if ask_on else off}  ask",
             f"    {ask_note}",
             "",
             "loaded",
             f"  {loaded}",
-            "",
             "thesis",
-            f"  {_fit(thesis_label(self.desk.thesis) if self.desk.thesis else 'none')}",
-            "",
-            "universes",
         ]
+        if self.desk.thesis:
+            for piece in _wrap(thesis_label(self.desk.thesis), 22)[:3]:
+                lines.append(f"  {piece}")
+        else:
+            lines.append("  none")
+        lines += ["", "universes"]
         if self._universes:
             for name in self._universes[:12]:
                 mark = " stored" if name in self._stored else ""
                 lines.append(f"  {_fit(name, 20 - len(mark))}{mark}")
         else:
             lines.append("  none in reach")
+        lines += ["", "commands", *[f"  {name}" for name in _COMMANDS]]
         if not keyed:
             lines += ["", "login", "signs you in"]
         self.rail_text = "\n".join(lines)
         self.query_one("#rail", Static).update(self.rail_text)
 
-        bits = ["quantOS", "signed in" if keyed else "not signed in"]
+        bar = Text()
+        bar.append("quantOS", style="bold #9ecbff")
+        bar.append("   ", style="")
+        bar.append("signed in" if keyed else "not signed in", style="#c5cdd6" if keyed else "#e6b450")
         if self.desk.loaded:
-            bits.append(self.desk.loaded)
+            bar.append("   ", style="")
+            bar.append(self.desk.loaded, style="#e6edf3")
         elif self.desk.data is not None:
-            bits.append("data loaded")
-        else:
-            bits.append("no data")
+            bar.append("   data loaded", style="#e6edf3")
         if ask_on:
-            bits.append(models[0][0])
-        self.query_one("#status", Static).update("   ·   ".join(bits))
+            bar.append("   ", style="")
+            bar.append(models[0][0], style="#8b949e")
+        elif self.desk.thesis:
+            bar.append("   ", style="")
+            bar.append(_fit(thesis_label(self.desk.thesis), 28), style="#8b949e")
+        self.query_one("#status", Static).update(bar)
+        hint = Text(self._next_line(), style="#6b7380")
+        self.query_one("#hint", Static).update(hint)
+        prompt = self.query_one(Input)
+        if not (self.desk.pending_secret or self.desk.pending_provider or self.desk.pending_url):
+            prompt.placeholder = self._placeholder(ask_on)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -247,6 +268,7 @@ class QuantOSApp(App[None]):
         if self.desk.pending_url:
             self._accept_url(text)
             return
+        self.turns += 1
         self.busy = True
         self.activity = text
         self._started = time.monotonic()
@@ -368,6 +390,76 @@ class QuantOSApp(App[None]):
             label, model = ready[0]
             log.write(f"Model ready: {label}/{model}. Ask in plain English.")
 
+    def _placeholder(self, ask_on: bool) -> str:
+        if self.desk.thesis and (ask_on or self.desk.think is not None):
+            return "Ask about this thesis"
+        if ask_on or self.desk.think is not None:
+            return "Ask in plain English, or run <workflow>"
+        if not self.desk.keyed:
+            return "login"
+        return "enter model key"
+
+    def _next_line(self) -> str:
+        if not self.desk.keyed:
+            return "login signs you in.   enter model key pastes whichever key you use."
+        if self.desk.thesis:
+            return "Ask about this thesis.   screen ranks the book.   run <name> follows a workflow."
+        if self.desk.data is not None:
+            return "Ask about the loaded data.   screen ranks it.   run <name> follows a workflow."
+        return "Ask in plain English.   A sentence picks a workflow.   run <name> follows it exactly."
+
+    def _paint_desk(self, notes: list[str]) -> None:
+        """The opening card. State first, then the one next move. Not a manual."""
+        from ..cli import thesis_text
+
+        log = self.query_one("#transcript", RichLog)
+        log.clear()
+        head = Text()
+        head.append("quantOS", style="bold #9ecbff")
+        head.append("    research session", style="#6b7380")
+        log.write(head)
+        log.write("")
+
+        state = Text()
+        state.append("signed in" if self.desk.keyed else "not signed in", style="#e6edf3")
+        if self.desk.loaded:
+            state.append("     ", style="")
+            state.append(self.desk.loaded, style="#9ecbff")
+        elif self.desk.data is not None:
+            state.append("     series loaded", style="#9ecbff")
+        log.write(state)
+        log.write("")
+
+        if self.desk.thesis:
+            log.write(Text("thesis", style="bold #8b949e"))
+            name = thesis_label(self.desk.thesis)
+            for piece in _wrap(name, 62):
+                log.write(Text(piece, style="#e6edf3"))
+            statement = thesis_text(self.desk.thesis)
+            if statement and statement != name:
+                log.write("")
+                for piece in _wrap(statement, 66)[:5]:
+                    log.write(Text(piece, style="#8b949e"))
+        else:
+            log.write(Text("no thesis pinned", style="#6b7380"))
+            log.write(Text("thesis <name> chooses one, when the account has several.", style="#6b7380"))
+
+        shown = False
+        for note in notes:
+            plain = _plain(note).strip()
+            if not plain or plain.lower().startswith("thesis "):
+                continue
+            if not shown:
+                log.write("")
+                shown = True
+            for piece in _wrap(plain, 66):
+                log.write(Text(piece, style="#8b949e"))
+
+        log.write("")
+        log.write(Text("─" * 28, style="#1c2128"))
+        for piece in _wrap(self._next_line(), 66):
+            log.write(Text(piece, style="#c5cdd6"))
+
     def _sync_account(self) -> None:
         """Refresh portal universes. One stored book loads itself."""
         from ..cli import _narrow_to_universe, _stored_universes, narration_to
@@ -419,10 +511,13 @@ class QuantOSApp(App[None]):
                 named = ", ".join(thesis_label(r) for r in theses[:8])
                 notes.append(f"Theses on your account: {named}.  Type thesis <name> to use one.")
         log = self.query_one("#transcript", RichLog)
-        for note in notes:
-            plain = _plain(note)
-            if plain.strip():
-                self.transcript.append(plain)
+        kept = [_plain(note).strip() for note in notes if _plain(note).strip()]
+        for plain in kept:
+            self.transcript.append(plain)
+        if self.turns == 0:
+            self._paint_desk(kept)
+        else:
+            for plain in kept:
                 log.write(plain)
         self._refresh_rail()
 
@@ -482,7 +577,7 @@ class QuantOSApp(App[None]):
             prompt.placeholder = f"paste {self.desk.pending_url}"
         else:
             prompt.password = False
-            prompt.placeholder = "Ask in plain English, or run <workflow>"
+            self._refresh_rail()
         self.busy = False
         self.activity = ""
         if self.desk.account_dirty:

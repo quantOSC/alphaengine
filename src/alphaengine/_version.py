@@ -88,4 +88,8 @@ is what a changed figure costs. The API may still move underneath it.
 # 0.9.3 IS THE SESSION, NOT THE MATHS. No computed value moved. The math pane
 # is narrower. A sentence is shown the workflow it is choosing and what a step
 # already measured, and a finished step is not run again.
-__version__ = "0.9.3"
+#
+# 0.9.4 IS THE SESSION, NOT THE MATHS. No computed value moved. The session
+# opens on the desk: what is loaded, the thesis on its own lines, and the
+# next thing to type.
+__version__ = "0.9.4"
