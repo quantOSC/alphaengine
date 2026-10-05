@@ -132,7 +132,7 @@ class SweepResult:
         """
         best = self.best
         col = self.matrix[:, best.index]
-        dsr = deflated_sharpe(col.tolist(), n_trials=self.n_trials)
+        dsr = deflated_sharpe(col.tolist(), n_trials=self.n_trials, risk_free_rate=risk_free_rate)
         out: dict[str, Any] = {
             "n_trials": self.n_trials,
             "n_trials_source": "derived_from_grid",

@@ -110,14 +110,16 @@ def histogram(values: np.ndarray | list[float], *, bins: int = HIST_BINS) -> dic
     }
 
 
-def _sharpe(returns: np.ndarray) -> float | None:
+def _sharpe(returns: np.ndarray, *, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float | None:
     r = returns[np.isfinite(returns)]
     if r.size < 2:
         return None
     sd = float(r.std(ddof=1))
     if sd == 0 or not math.isfinite(sd):
         return None
-    return float(r.mean() / sd * math.sqrt(252.0))
+    ppy = max(int(periods_per_year), 1)
+    excess = float(r.mean()) - float(risk_free_rate) / ppy
+    return float(excess / sd * math.sqrt(ppy))
 
 
 def ou_calibrate(values: Any, *, dt: float = 1.0) -> dict[str, Any]:
@@ -390,6 +392,8 @@ def dgp_stress(
     n_paths: int = 200,
     seed: int = 7,
     backtest_fn: Any = None,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
 ) -> dict[str, Any]:
     """Replay a series (or backtest) under Monte Carlo draws from a named DGP.
 
@@ -421,11 +425,15 @@ def dgp_stress(
             try:
                 raw = backtest_fn(data={"close": px.tolist()})
                 series = as_series(raw)
-                s = _sharpe(series) if series.size else _sharpe(r)
+                s = (
+                    _sharpe(series, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
+                    if series.size
+                    else _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
+                )
             except Exception:
-                s = _sharpe(r)
+                s = _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
         else:
-            s = _sharpe(r)
+            s = _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
         if s is not None and math.isfinite(s):
             sharpes.append(float(s))
     arr = np.asarray(sharpes, dtype=float)
@@ -435,6 +443,8 @@ def dgp_stress(
     figures.update(
         {
             "dgp": name,
+            "risk_free_rate": round(float(risk_free_rate), 4),
+            "periods_per_year": max(int(periods_per_year), 1),
             "n_paths": p,
             "n_trials": p,
             "n_trials_source": "monte_carlo",

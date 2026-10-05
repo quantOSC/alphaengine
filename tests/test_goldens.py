@@ -125,7 +125,9 @@ def test_var_cvar_golden_and_sign_convention() -> None:
     got = compute_var_cvar(rets(13, 400))
     assert got["n_obs"] == 400
     assert got["confidence"] == 0.95
-    assert got["parametric"]["var_pct"] == 1.91
+    # 0.10.0 keeps the mean: max(0, -mean*h + z*std*sqrt(h)). Dropping the
+    # mean was the 1.91 figure. Daily vol is the same sample standard deviation.
+    assert got["parametric"]["var_pct"] == 1.84
     assert got["parametric"]["daily_vol_pct"] == 1.16
 
     # Losses are reported as POSITIVE magnitudes everywhere, and CVaR is at

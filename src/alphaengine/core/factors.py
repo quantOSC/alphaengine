@@ -3,7 +3,8 @@ Risk, factor decomposition over supplied portfolio + factor return streams.
 
 Lifted (math-identical) from backend/quant/factors.compute_multi_factor_loadings,
 with the FRED rfr fetch and quant.limits import removed: the caller supplies the
-risk-free rate (defaults to 0.04 annual) and the VIF threshold is inlined. OLS
+risk-free rate (default 0, excess of zero, not a Treasury bill) and the VIF
+threshold is inlined. OLS
 with HAC standard errors (statsmodels) gives factor betas, alpha, t-stats, R²,
 and a multicollinearity diagnostic (VIF).
 
@@ -30,7 +31,7 @@ import statsmodels.api as sm
 from .trace import record
 
 VIF_MAX_THRESHOLD = 10.0
-_DEFAULT_RFR = 0.04
+_DEFAULT_RFR = 0.0
 
 
 def _clean(val):
@@ -81,18 +82,22 @@ def decompose_factors(
     factor_returns: dict[str, list[float]],
     *,
     risk_free_rate: float | None = None,
+    periods_per_year: int = 252,
+    factors_are_excess: bool = True,
 ) -> dict:
     """Multi-factor regression (FF5 + Momentum style) over supplied returns.
 
     `factor_returns` = {"market": [...], "size": [...]...}. Returns alpha
     (annualized %), factor betas + t-stats, R²/adj-R², residual vol, and a VIF
-    multicollinearity diagnostic.     Excess returns use the supplied rfr (annual),
-    defaulting to 4%.
+    multicollinearity diagnostic.
 
-    That 4% is not the same default as ``performance_report``, which uses 0.
-    A missing rate there must not invent a T-bill. This default is the rate
-    the backend copy used when the caller did not pass one. Pass
-    ``risk_free_rate`` explicitly when the two have to agree.
+    The default rate is 0, the same as ``performance_report``: excess of zero,
+    not a bill. Pass the annual rate explicitly when the study uses one.
+    ``factors_are_excess`` is true for Ken French-style factors, which are
+    already above cash, so the rate is subtracted from the portfolio only.
+    Set it false when the factors are total returns. Alpha is the intercept
+    times ``periods_per_year``, an arithmetic annualization, not a CAGR.
+    HAC lags stay at 5, which is a daily-sample assumption paired with 252.
     """
     factor_names = list(factor_returns.keys())
     if not factor_names:
@@ -103,11 +108,14 @@ def decompose_factors(
         return {"error": "Need 30+ observations"}
 
     rfr = float(risk_free_rate) if risk_free_rate is not None else _DEFAULT_RFR
+    ppy = max(int(periods_per_year), 1)
     y = np.array(portfolio_returns[-min_len:], dtype=float)
-    rf_daily = rfr / 252
-    y_excess = y - rf_daily
+    rf_per = rfr / ppy
+    y_excess = y - rf_per
 
     X = np.column_stack([np.array(factor_returns[f][-min_len:], dtype=float) for f in factor_names])
+    if not factors_are_excess:
+        X = X - rf_per
 
     vifs: dict[str, float] = {}
     high_vif: list[str] = []
@@ -128,12 +136,18 @@ def decompose_factors(
     record(
         "factor_alpha",
         "annualised intercept of excess portfolio returns on the factor panel, HAC errors",
-        inputs={"n_observations": int(min_len), "risk_free_rate": rfr, "n_factors": len(factor_names)},
+        inputs={
+            "n_observations": int(min_len),
+            "risk_free_rate": rfr,
+            "periods_per_year": ppy,
+            "factors_are_excess": bool(factors_are_excess),
+            "n_factors": len(factor_names),
+        },
         series={"portfolio_excess": y_excess},
-        result=round(float(model.params[0] * 252 * 100), 2),
+        result=round(float(model.params[0] * ppy * 100), 2),
     )
     return {
-        "alpha": _clean(round(float(model.params[0] * 252 * 100), 2)),
+        "alpha": _clean(round(float(model.params[0] * ppy * 100), 2)),
         "alpha_tstat": _clean(round(float(model.tvalues[0]), 2)),
         "alpha_pvalue": _clean(round(alpha_pvalue, 4)),
         "alpha_significant_at_5pct": bool(alpha_pvalue < 0.05),
@@ -141,8 +155,14 @@ def decompose_factors(
         "factor_tstats": tstats,
         "r_squared": _clean(round(float(model.rsquared), 3)),
         "adj_r_squared": _clean(round(float(model.rsquared_adj), 3)),
-        "residual_vol": _clean(round(float(np.std(model.resid) * np.sqrt(252) * 100), 2)),
+        "residual_vol": _clean(round(float(np.std(model.resid, ddof=1) * np.sqrt(ppy) * 100), 2)),
+        "residual_vol_ddof": 1,
         "n_observations": int(min_len),
+        "risk_free_rate": round(rfr, 4),
+        "periods_per_year": ppy,
+        "factors_are_excess": bool(factors_are_excess),
+        "alpha_annualization": "arithmetic",
+        "hac_maxlags": 5,
         "model": _model_label(factor_names),
         "vifs": {k: _clean(round(v, 2)) if math.isfinite(v) else None for k, v in vifs.items()},
         "high_vif_factors": high_vif,

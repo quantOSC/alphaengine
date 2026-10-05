@@ -355,3 +355,61 @@ def test_check_overlap_builds_the_book_from_the_other_names() -> None:
             assert "equal-weight" in text
 
     asyncio.run(body())
+
+
+def test_a_later_question_is_answered_from_the_session() -> None:
+    def think(prompt: str) -> str:
+        if "already recorded" in prompt:
+            return '{"answer": "The session already measured the names against each other."}'
+        if '"choice"' in prompt:
+            return '{"choice": 0, "why": "the question is a screen"}'
+        return "The run did not measure that."
+
+    async def body() -> None:
+        app = QuantOSApp(session=_DeskSession(), url="fake://", data=_book(), keyed=True, think=think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause()
+            field = app.query_one(Input)
+            field.focus()
+            field.value = "correlation"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            assert app.desk.notes
+            field.value = "what stands out so far"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            text = "\n".join(app.transcript)
+            assert "already measured the names" in text
+            assert "screen_universe" not in text
+
+    asyncio.run(body())
+
+
+def test_portfolio_uses_the_loaded_names_and_the_session() -> None:
+    async def body() -> None:
+        app = QuantOSApp(session=_DeskSession(), url="fake://", data=_book(), keyed=True, think=_think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause()
+            field = app.query_one(Input)
+            field.focus()
+            field.value = "correlation"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            field.value = "portfolio"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            assert app.desk.portfolio is not None
+            assert app.desk.portfolio["method"] == "hrp"
+            assert app.desk.portfolio["weight_sum"] == pytest.approx(1.0, abs=1e-4)
+            assert app.desk.portfolio["session"] == ["correlation"]
+            table = app.query_one("#series", DataTable)
+            assert table.row_count == 3
+            assert "hrp" in app.formula_text
+            text = "\n".join(app.transcript)
+            assert "Ledoit-Wolf" in text
+            assert "session already recorded: correlation" in text
+            panels = [body for path, body in app.desk.session.posts if path.endswith("/panels")]
+            assert panels
+            assert panels[-1]["figures"]["kind"] == "portfolio"
+
+    asyncio.run(body())

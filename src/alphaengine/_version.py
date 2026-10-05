@@ -98,4 +98,24 @@ is what a changed figure costs. The API may still move underneath it.
 # is filed for the portal. check_overlap keeps that universe: one named symbol
 # against the equal-weight of the others. The correlation and beta are the
 # same numbers; the step now also names the candidate and the book.
-__version__ = "0.9.5"
+#
+# 0.10.0 MOVES ONE GOLDEN, ON PURPOSE. Parametric VaR is
+# max(0, -mean*h + z*std*sqrt(h)). The 0.9 figure was z*std*sqrt(h), so the
+# pinned seed goes 1.91 -> 1.84. Historical VaR and CVaR scale the same way:
+# the mean over the horizon, the shock over its square root. At one day a
+# negative percentile is still its absolute value. Daily vol is unchanged.
+# Deflated Sharpe, PBO, and the performance golden stay: the default cash
+# rate is 0, excess of zero, not a bill. The factor regression used to assume
+# 4% when the caller passed nothing; it now uses 0, and reports that, plus
+# whether the factors were already excess and that alpha is an arithmetic
+# annualization. A supplied dollar equity curve is no longer read as a return
+# by subtracting 1 from its last mark. A drawdown built from returns starts
+# at unit capital, so a loss on the first bar counts. Grinold alpha is empty
+# when no volatility is supplied, instead of treating every name as vol 1.
+# Breadth does not imply an IR until the names are declared independent or a
+# mean correlation is supplied.
+#
+# The same release answers a later question from the session record, and
+# builds a portfolio (hierarchical risk parity, or risk parity when asked)
+# from the loaded returns. Those two add no figure to the goldens.
+__version__ = "0.10.0"

@@ -135,10 +135,19 @@ def test_chart_hints_are_kind_key_title():
 
 def test_grinold_alpha_vector_stays_with_the_caller():
     panel = _cs_panel()
-    out = grinold_alpha(panel, ic=0.05)
+    missing = grinold_alpha(panel, ic=0.05)
+    assert missing["alpha"] == {}
+    assert missing["n_names"] == 0
+    assert missing["note"]
+    vols = {name: 0.20 for name in panel}
+    out = grinold_alpha(panel, ic=0.05, vols=vols)
     assert out["alpha"]
     assert out["n_names"] == 12
-    ir = breadth_ir(ic=0.05, n_names=12)
+    assert "alpha" not in str(out["note"])
+    withheld = breadth_ir(ic=0.05, n_names=12)
+    assert withheld["implied_ir"] is None
+    assert withheld["breadth_assumption"] == "not_assumed"
+    ir = breadth_ir(ic=0.05, n_names=12, independent=True)
     assert ir["transfer_coefficient"] == 1.0
     assert ir["implied_ir"] == pytest.approx(0.05 * math.sqrt(12), abs=1e-6)
 
@@ -170,8 +179,13 @@ def test_executor_grinold_strips_alpha():
     ex = StepExecutor(data=_cs_panel())
     out = ex.execute("compute.grinold_alpha", {"ic": 0.04})
     assert "alpha" not in out
+    assert out["n_names"] == 0
+    assert out["note"]
+    vols = {name: 0.20 for name in _cs_panel()}
+    priced = ex.execute("compute.grinold_alpha", {"ic": 0.04, "vols": vols})
+    assert "alpha" not in priced
     assert "alpha" in ex.workspace
-    assert out["n_names"] == 12
+    assert priced["n_names"] == 12
 
 
 def test_executor_detone_emits_charts_not_the_matrix():

@@ -208,7 +208,7 @@ from alphaengine.core import ou_calibrate, garch_calibrate, dgp_stress, grinold_
 ou = ou_calibrate(spread)            # kappa, theta, half_life; or not mean-reverting
 g = garch_calibrate(returns)         # omega, alpha, beta, persistence in (0, 1)
 s = dgp_stress(close, dgp="ou")      # n_trials = n_paths, source monte_carlo
-a = grinold_alpha(panel, ic=0.05)    # alpha vector stays here; scalars travel
+a = grinold_alpha(panel, ic=0.05, vols=vols)  # alpha stays here; missing vols are not treated as 1
 ```
 
 ---
@@ -292,6 +292,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `correlation` | the correlation of every loaded name with every other name | session |
 | `covariance` | the sample covariance of every loaded name with every other name | session |
 | `cointegration` | which loaded names are cointegrated | session |
+| `portfolio` | weights for the names already loaded | session |
 | `universe <name>` | same as load: a universe registered in the portal | session |
 | `data <file>` | same as load: a local CSV or parquet | session |
 | `project <module>` | same as load: a module with data and backtest_fn | session |

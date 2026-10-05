@@ -55,13 +55,17 @@ def _returns(values: Any) -> np.ndarray | None:
     return arr
 
 
-def _sharpe(rets: np.ndarray) -> float | None:
+def _sharpe(
+    rets: np.ndarray, *, risk_free_rate: float = 0.0, periods_per_year: int = _TRADING_DAYS
+) -> float | None:
     if rets.size < 2:
         return None
     sd = float(rets.std(ddof=1))
     if sd == 0:
         return None
-    return float(rets.mean() / sd * np.sqrt(_TRADING_DAYS))
+    ppy = max(int(periods_per_year), 1)
+    excess = float(rets.mean()) - float(risk_free_rate) / ppy
+    return float(excess / sd * np.sqrt(ppy))
 
 
 def subperiod_stability(returns: Any, *, segments: int = DEFAULT_SEGMENTS) -> dict:
@@ -175,10 +179,13 @@ def drawdown_anatomy(returns: Any) -> dict:
             "n_obs": 0 if arr is None else int(arr.size),
         }
 
-    equity = np.cumprod(1.0 + arr)
+    from .performance import wealth_from_returns
+
+    equity = wealth_from_returns(arr)
     peak = np.maximum.accumulate(equity)
     with np.errstate(divide="ignore", invalid="ignore"):
         dd = np.where(peak > 0, equity / peak - 1.0, 0.0)
+    dd = dd[1:]
 
     underwater = dd < 0
     longest = current = 0

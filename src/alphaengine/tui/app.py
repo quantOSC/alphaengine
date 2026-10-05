@@ -27,7 +27,7 @@ _COMMANDS = (
     "screen   diagnose   signal",
     "validate   stress   overlap",
     "correlation   covariance",
-    "cointegration",
+    "cointegration   portfolio",
     "size   monitor",
     "run <name>",
     "workflows",
@@ -644,6 +644,14 @@ class QuantOSApp(App[None]):
         table = self.query_one("#series", DataTable)
         table.display = True
         table.clear(columns=True)
+        if kind == "portfolio":
+            self.formula_text = f"{result.get('method') or 'hrp'} on a Ledoit-Wolf covariance"
+            self.query_one("#formula", Static).update(self.formula_text)
+            for column in ("name", "weight"):
+                table.add_column(column)
+            for row in (result.get("rows") or [])[:40]:
+                table.add_row(str(row.get("name") or ""), str(row.get("weight")))
+            return
         if kind == "cointegration":
             for column in ("a", "b", "p", "half-life"):
                 table.add_column(column)

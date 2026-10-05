@@ -470,12 +470,14 @@ class StepExecutor:
         # sampling across a trough understates the risk in exactly the
         # direction that flatters.
         best = _trial_column(result, result.best.index)
-        equity = np.cumprod(1.0 + np.asarray(best, dtype=float))
-        cum: list[float] = (equity - 1.0).tolist()
+        from ..core.performance import wealth_from_returns
+
+        wealth = wealth_from_returns(np.asarray(best, dtype=float))
+        cum: list[float] = (wealth[1:] - 1.0).tolist()
         figures["best_curve"] = [{"i": i, "v": round(v, 6)} for i, v in _bucketed(cum, CURVE_POINTS, _last)]
-        peak = np.maximum.accumulate(equity)
+        peak = np.maximum.accumulate(wealth)
         with np.errstate(divide="ignore", invalid="ignore"):
-            dd: list[float] = np.where(peak > 0, equity / peak - 1.0, 0.0).tolist()
+            dd: list[float] = np.where(peak > 0, wealth / peak - 1.0, 0.0)[1:].tolist()
         figures["drawdown_curve"] = [{"i": i, "v": round(v, 6)} for i, v in _bucketed(dd, CURVE_POINTS, min)]
         return figures
 
@@ -547,7 +549,12 @@ class StepExecutor:
             ws["verdict"] = figures
             return figures
 
-        out = deflated_sharpe(self._returns_column(ws), n_trials=n_trials)
+        rf_kwargs: dict[str, Any] = {}
+        if params.get("risk_free_rate") is not None:
+            rf_kwargs["risk_free_rate"] = float(params["risk_free_rate"])
+        if params.get("periods_per_year") is not None:
+            rf_kwargs["periods_per_year"] = int(params["periods_per_year"])
+        out = deflated_sharpe(self._returns_column(ws), n_trials=n_trials, **rf_kwargs)
         figures = {
             "deflated_sharpe": out.get("deflated_sharpe"),
             "psr_vs_zero": out.get("psr_vs_zero"),
@@ -555,6 +562,7 @@ class StepExecutor:
             "verdict": out.get("verdict"),
             "n_trials": n_trials,
             "n_trials_source": source,
+            "risk_free_rate": out.get("risk_free_rate", 0.0),
         }
         # Kept so `emit.study` can carry the verdict this run actually produced
         # rather than deriving it a second time. Two derivations of one figure
@@ -853,11 +861,17 @@ class StepExecutor:
         sweep = ws.get("sweep")
         if sweep is not None and n_trials is None:
             n_trials, source = int(sweep.n_trials), "derived_from_grid"
+        score_kwargs: dict[str, Any] = {}
+        if params.get("risk_free_rate") is not None:
+            score_kwargs["risk_free_rate"] = float(params["risk_free_rate"])
+        if params.get("periods_per_year") is not None:
+            score_kwargs["periods_per_year"] = int(params["periods_per_year"])
         scored = score_backtest(
             bt,
             n_trials=None if n_trials is None else int(n_trials),
             n_trials_source=source,
             cpcv=bool(params.get("cpcv")),
+            **score_kwargs,
         )
         ws["score"] = scored
         return {
@@ -874,6 +888,11 @@ class StepExecutor:
         sweep = ws.get("sweep")
         if sweep is not None and n_trials is None:
             n_trials = int(sweep.n_trials)
+        cpcv_kwargs: dict[str, Any] = {}
+        if params.get("risk_free_rate") is not None:
+            cpcv_kwargs["risk_free_rate"] = float(params["risk_free_rate"])
+        if params.get("periods_per_year") is not None:
+            cpcv_kwargs["periods_per_year"] = int(params["periods_per_year"])
         return dict(
             cpcv_score(
                 returns,
@@ -882,6 +901,7 @@ class StepExecutor:
                 purge=int(params.get("purge") or 1),
                 embargo=int(params.get("embargo") or 1),
                 n_trials=int(n_trials) if n_trials is not None else 1,
+                **cpcv_kwargs,
             )
         )
 
@@ -898,9 +918,13 @@ class StepExecutor:
         portfolio = _as_returns(data) or data.get("returns")
         if portfolio is None:
             raise UnsupportedOp("compute.factors found factor_returns but no portfolio returns.")
-        kwargs = {}
+        kwargs: dict[str, Any] = {}
         if params.get("risk_free_rate") is not None:
             kwargs["risk_free_rate"] = float(params["risk_free_rate"])
+        if params.get("periods_per_year") is not None:
+            kwargs["periods_per_year"] = int(params["periods_per_year"])
+        if params.get("factors_are_excess") is not None:
+            kwargs["factors_are_excess"] = bool(params["factors_are_excess"])
         return dict(decompose_factors(list(portfolio), data["factor_returns"], **kwargs))
 
     def _pairs(self, params: Figures, ws: Workspace) -> Figures:
@@ -1283,12 +1307,18 @@ class StepExecutor:
         ideal = params.get("ideal") if isinstance(params.get("ideal"), dict) else ws.get("alpha")
         if isinstance(ideal, dict) and not holdings:
             ideal = None
+        breadth_kwargs: dict[str, Any] = {}
+        if params.get("independent") is not None:
+            breadth_kwargs["independent"] = bool(params["independent"])
+        if params.get("mean_correlation") is not None:
+            breadth_kwargs["mean_correlation"] = float(params["mean_correlation"])
         return dict(
             breadth_ir(
                 ic=float(ic),
                 n_names=int(n_names or 0),
                 holdings=holdings,
                 ideal=ideal if isinstance(ideal, dict) else None,
+                **breadth_kwargs,
             )
         )
 

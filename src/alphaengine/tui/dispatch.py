@@ -7,7 +7,7 @@ only choose among workflows and steps the server already permitted.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..cli import (
@@ -44,6 +44,7 @@ from ..client import Offline, ServerError
 from ..core.relations import KINDS as _CROSS
 
 _OVERLAP = {"overlap", "check_overlap"}
+_PORTFOLIO = {"portfolio", "allocate"}
 
 
 @dataclass
@@ -69,6 +70,8 @@ class Desk:
     thesis: dict[str, Any] | None = None
     thesis_declined: bool = False
     matrix: dict[str, Any] | None = None
+    notes: list[str] = field(default_factory=list)
+    portfolio: dict[str, Any] | None = None
 
 
 def submit(desk: Desk, line: str) -> bool:
@@ -218,8 +221,13 @@ def submit(desk: Desk, line: str) -> bool:
             desk.data, desk.backtest_fn = load_project(rest)
             desk.loaded = rest
             say(dim(f"project: {rest}"))
+            _remember(desk, _loaded_note(desk))
         except ProjectError as exc:
             say(red(str(exc)))
+        return False
+
+    if verb in _PORTFOLIO:
+        _portfolio(desk, rest)
         return False
 
     if verb in _CROSS or verb in _OVERLAP:
@@ -232,6 +240,9 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "run" and rest:
         name, flags = _split_run(rest)
         key = name.lower().replace("-", "_")
+        if key in _PORTFOLIO:
+            _portfolio(desk, rest)
+            return False
         if key in _CROSS:
             _cross(desk, _CROSS[key])
             return False
@@ -378,6 +389,7 @@ def _load_spec(desk: Desk, rest: str) -> None:
             kind, rest, desk.session, desk.data, desk.backtest_fn
         )
         say(dim(f"loaded {desk.loaded}"))
+        _remember(desk, _loaded_note(desk))
     except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
     except Exception as exc:  # noqa: BLE001
@@ -402,6 +414,7 @@ def _load_named(desk: Desk, verb: str, rest: str) -> None:
             desk.data = loaded
             desk.loaded = f"{verb}:{rest}"
             say(dim(f"loaded {desk.loaded}"))
+            _remember(desk, _loaded_note(desk))
     except (ProjectError, ValueError) as exc:
         say(red(str(exc)))
     except Exception as exc:  # noqa: BLE001
@@ -489,9 +502,48 @@ def _cross(desk: Desk, kind: str) -> None:
     desk.matrix = result
     for line in summary_lines(result):
         say(line)
+    from ..context import result_note
+
+    _remember(desk, result_note(result))
     from ..cli import _publish_panel
 
-    _publish_panel(desk.session, result, thesis_id=thesis_id_of(desk.thesis) or None)
+    _publish_panel(desk.session, result, thesis_id=_thesis_id(desk))
+
+
+def _portfolio(desk: Desk, line: str) -> None:
+    """Weights for the loaded names. Session notes travel with the result."""
+    from ..context import result_note
+    from ..core.portfolio import build_portfolio
+
+    if not isinstance(desk.data, dict) or not desk.data:
+        say(yellow("Load a universe first. A portfolio is built from the names you already have."))
+        return
+    low = line.lower()
+    method = "risk_parity" if ("risk parity" in low or "equal risk" in low) else "hrp"
+    measured: list[str] | None = None
+    if desk.matrix and desk.matrix.get("kind") in ("correlation", "covariance", "cointegration"):
+        measured = [str(name) for name in (desk.matrix.get("names") or [])]
+    try:
+        result = build_portfolio(desk.data, method=method, notes=desk.notes, names=measured or None)
+    except ValueError as exc:
+        say(red(str(exc)))
+        return
+    desk.portfolio = result
+    desk.matrix = result
+    say(f"  {result['method']}  {result['n_assets']} names  Ledoit-Wolf covariance")
+    if result.get("n_skipped"):
+        say(dim(f"  {result['n_skipped']} names skipped (too short to share the history)"))
+    rows = list(result.get("rows") or [])
+    for row in rows[:8]:
+        say(f"  {row['name']}  {row['weight']}")
+    if len(rows) > 8:
+        say(dim(f"  {len(rows) - 8} more on the right"))
+    if result.get("session"):
+        say(dim("  session already recorded: " + ", ".join(result["session"])))
+    _remember(desk, result_note(result))
+    from ..cli import _publish_panel
+
+    _publish_panel(desk.session, result, thesis_id=_thesis_id(desk))
 
 
 def _overlap(desk: Desk, rest: str) -> None:
@@ -567,6 +619,8 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
         )
         _drive(desk.last)
         _report(desk.last)
+        if desk.last is not None:
+            _remember(desk, _prior_line(desk.last))
     except Offline:
         _explain_offline(desk.url)
     except ServerError as exc:
@@ -579,23 +633,11 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
 
 def _sentence(desk: Desk, line: str) -> None:
     from ..cli import _apply_flags as apply_flags
-    from ..cli import _stored_universes, _symbol_in, _universe_named_in
-    from ..core.relations import as_closes
+    from ..cli import _stored_universes, _universe_named_in
+    from ..context import consider
 
-    low = line.lower()
-    if isinstance(desk.data, dict) and as_closes(desk.data):
-        if "cointegrat" in low:
-            _cross(desk, "cointegration")
-            return
-        if "covariance" in low:
-            _cross(desk, "covariance")
-            return
-        if "correlation" in low or "correlate" in low:
-            _cross(desk, "correlation")
-            return
-        if "overlap" in low:
-            _overlap(desk, _symbol_in(line, desk.data) or "")
-            return
+    if _local_request(desk, line):
+        return
 
     if desk.data is None:
         named = _universe_named_in(line, desk.session)
@@ -607,8 +649,21 @@ def _sentence(desk: Desk, line: str) -> None:
                     ["--universe", named], desk.session, desk.data, desk.backtest_fn
                 )
                 desk.loaded = f"universe:{named}"
+                _remember(desk, _loaded_note(desk))
             except Exception as exc:  # noqa: BLE001
                 say(dim(f"  ({named} is registered and could not be loaded: {exc})"))
+        if _local_request(desk, line):
+            return
+
+    # A generic question reads the session first. A reply of "workflow" means
+    # the notes do not answer it, and the catalogue path below still runs.
+    kind, text = consider(line, desk.notes, _thinker(desk))
+    if kind == "answer":
+        say(text)
+        return
+    if kind == "refuse":
+        say(yellow(text))
+        return
 
     pinned = desk.thesis
     run = _ask(
@@ -621,7 +676,83 @@ def _sentence(desk: Desk, line: str) -> None:
         thesis_id=thesis_id_of(pinned) or None if pinned else None,
         thesis_name=thesis_label(pinned) if pinned else None,
         thesis_statement=thesis_text(pinned) if pinned else None,
-        prior=_prior_line(desk.last) if desk.last is not None else None,
+        prior=_session_prior(desk),
     )
     if run is not None:
         desk.last = run
+        _remember(desk, _prior_line(run))
+
+
+def _local_request(desk: Desk, line: str) -> bool:
+    """Run a calculation when the line names one and the data is already loaded.
+
+    A question that does not name the calculation ("what was the strongest
+    pair") falls through and is answered from the session notes.
+    """
+    from ..cli import _symbol_in
+    from ..core.relations import as_closes
+
+    if not isinstance(desk.data, dict) or not as_closes(desk.data):
+        return False
+    low = line.lower()
+    if "portfolio" in low or "allocate" in low or "risk parity" in low:
+        _portfolio(desk, line)
+        return True
+    if "cointegrat" in low:
+        _cross(desk, "cointegration")
+        return True
+    if "covariance" in low:
+        _cross(desk, "covariance")
+        return True
+    if "correlation" in low or "correlate" in low:
+        _cross(desk, "correlation")
+        return True
+    if "overlap" in low:
+        _overlap(desk, _symbol_in(line, desk.data) or "")
+        return True
+    return False
+
+
+def _thesis_id(desk: Desk) -> str | None:
+    if not desk.thesis:
+        return None
+    found = thesis_id_of(desk.thesis)
+    return found or None
+
+
+def _remember(desk: Desk, text: str) -> None:
+    from ..context import remember
+
+    desk.notes = remember(desk.notes, text)
+
+
+def _loaded_note(desk: Desk) -> str:
+    from ..context import loaded_note
+
+    return loaded_note(desk.loaded or "data", desk.data)
+
+
+def _session_prior(desk: Desk) -> str | None:
+    """Every note, plus the last run if it is not already one of them."""
+    parts = list(desk.notes)
+    if desk.last is not None:
+        line = _prior_line(desk.last)
+        if line not in parts:
+            parts.append(line)
+    if not parts:
+        return None
+    return "\n".join(parts)
+
+
+def _thinker(desk: Desk) -> Callable[[str], str] | None:
+    """The session's model, built once. No key means the catalogue path explains it."""
+    if desk.think is not None:
+        return desk.think
+    from ..model import NoModelConfigured, build_think
+
+    try:
+        think, _label = build_think()
+    except NoModelConfigured:
+        return None
+    desk.think = think
+    return think

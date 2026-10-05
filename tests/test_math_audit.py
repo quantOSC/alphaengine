@@ -176,20 +176,22 @@ def test_drawdown_is_a_positive_magnitude() -> None:
     # Two up days, then a 10% drop that stays down, then a recovery.
     returns = [0.01, 0.01, -0.10, 0.0, 0.12]
     got = drawdown_anatomy(returns)
-    equity = np.cumprod(1.0 + np.asarray(returns))
+    equity = np.concatenate(([1.0], np.cumprod(1.0 + np.asarray(returns))))
     peak = np.maximum.accumulate(equity)
     depth = float(-(equity / peak - 1.0).min()) * 100.0
     assert got["max_drawdown_pct"] == round(depth, 6)
     assert got["max_drawdown_pct"] > 0
 
 
-def test_parametric_var_is_z_sigma_sqrt_horizon() -> None:
+def test_parametric_var_includes_the_mean_over_the_horizon() -> None:
     rng = np.random.default_rng(5)
     returns = rng.normal(0.0, 0.01, 80).tolist()
     got = compute_var_cvar(returns, confidence=0.95, horizon_days=1)
     z = float(__import__("scipy").stats.norm.ppf(0.95))
     sigma = float(np.std(returns, ddof=1))
-    assert got["parametric"]["var_pct"] == round(z * sigma * 100, 2)
+    mean = float(np.mean(returns))
+    loss = max(0.0, -mean + z * sigma)
+    assert got["parametric"]["var_pct"] == round(loss * 100, 2)
 
 
 def test_performance_sortino_uses_target_semideviation_over_all_periods() -> None:
@@ -201,13 +203,13 @@ def test_performance_sortino_uses_target_semideviation_over_all_periods() -> Non
     assert report["sortino_ratio"] == round(sortino, 4)
 
 
-def test_factor_default_risk_free_rate_is_four_percent_and_performance_is_zero() -> None:
-    """The two defaults are different on purpose.
+def test_the_default_cash_rate_is_zero_until_a_bill_is_supplied() -> None:
+    """Neither formula invents a Treasury bill.
 
-    performance_report defaults to 0 so a missing rate cannot invent a T-bill.
-    decompose_factors defaults to 4% annual, the rate the backend copy used
-    when the caller did not pass one. Passing the rate explicitly is the
-    supported way to make them agree.
+    A missing rate is excess of zero, in the performance report and in the
+    factor regression. Passing 4% is how a study uses a bill, and that changes
+    the intercept. Ken French factors are already excess, so the default does
+    not subtract the rate from them a second time.
     """
     statsmodels = pytest.importorskip("statsmodels")
     assert statsmodels is not None
@@ -217,12 +219,16 @@ def test_factor_default_risk_free_rate_is_four_percent_and_performance_is_zero()
     market = rng.normal(0.0003, 0.01, 80)
     portfolio = (0.0002 + market).tolist()
     factors = {"market": market.tolist()}
-    at_zero = decompose_factors(portfolio, factors, risk_free_rate=0.0)
     at_default = decompose_factors(portfolio, factors)
-    assert _DEFAULT_RFR == 0.04
+    at_bill = decompose_factors(portfolio, factors, risk_free_rate=0.04)
+    assert _DEFAULT_RFR == 0.0
     assert performance_report(portfolio)["risk_free_rate"] == 0.0
-    assert at_zero["factor_betas"]["market"] == pytest.approx(1.0, abs=0.05)
-    assert at_default["alpha"] != at_zero["alpha"]
+    assert at_default["risk_free_rate"] == 0.0
+    assert at_default["factors_are_excess"] is True
+    assert at_default["alpha_annualization"] == "arithmetic"
+    assert at_default["factor_betas"]["market"] == pytest.approx(1.0, abs=0.05)
+    assert at_default["alpha"] == decompose_factors(portfolio, factors, risk_free_rate=0.0)["alpha"]
+    assert at_bill["alpha"] != at_default["alpha"]
 
 
 def test_spread_is_log_price_minus_hedge_times_log_price() -> None:

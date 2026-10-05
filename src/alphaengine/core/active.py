@@ -43,18 +43,27 @@ def grinold_alpha(
                 vol_map[str(k)] = abs(float(v if not isinstance(v, (list, tuple)) else v[-1]))
             except (TypeError, ValueError):
                 continue
+    missing_vol = [name for name in names if name not in vol_map]
     for name in names:
+        if name not in vol_map:
+            continue
         score = float(scores[name][-1])
-        vol = vol_map.get(name, 1.0)
-        alpha[name] = round(vol * ic_f * score, _RND)
+        alpha[name] = round(vol_map[name] * ic_f * score, _RND)
     abs_vals = [abs(v) for v in alpha.values()]
+    note = None
+    if not vol_map:
+        note = "no volatility was supplied, so alpha is not reported as a return"
+    elif missing_vol:
+        note = f"{len(missing_vol)} names had no volatility and were left out of alpha"
     return {
         "alpha": alpha,
         "mean_abs_alpha": round(float(np.mean(abs_vals)), _RND) if abs_vals else None,
         "ic_used": round(ic_f, _RND),
         "n_names": len(alpha),
-        "n_skipped": len(skipped) + (len(scores) - len(names)),
+        "n_skipped": len(skipped) + (len(scores) - len(names)) + len(missing_vol),
         "skipped": skipped,
+        "n_missing_vol": len(missing_vol),
+        "note": note,
         "method": "grinold",
     }
 
@@ -65,8 +74,16 @@ def breadth_ir(
     n_names: int,
     holdings: dict | None = None,
     ideal: dict | None = None,
+    independent: bool = False,
+    mean_correlation: float | None = None,
 ) -> dict[str, Any]:
-    """Implied IR = TC * IC * sqrt(breadth). TC is 1 when holdings are absent."""
+    """Implied IR = TC * IC * sqrt(breadth). TC is 1 when holdings are absent.
+
+    Breadth is the name count only when ``independent`` is set, or
+    ``N / (1 + (N - 1) * rho)`` when ``mean_correlation`` is supplied.
+    Omitting both leaves ``implied_ir`` empty rather than treating the names
+    as independent bets.
+    """
     ic_f = float(ic)
     br = max(int(n_names), 0)
     tc = 1.0
@@ -85,11 +102,26 @@ def breadth_ir(
             tc = 0.0
         else:
             tc = 0.0
-    ir = tc * ic_f * math.sqrt(br) if br else 0.0
+    breadth_used: float | None = None
+    assumption = "not_assumed"
+    ir: float | None = None
+    if mean_correlation is not None and br:
+        rho = float(mean_correlation)
+        denom = 1.0 + (br - 1) * rho
+        breadth_used = br / denom if denom > 0 else 0.0
+        assumption = "mean_correlation"
+        ir = tc * ic_f * math.sqrt(breadth_used) if breadth_used > 0 else 0.0
+    elif independent:
+        breadth_used = float(br)
+        assumption = "independent"
+        ir = tc * ic_f * math.sqrt(br) if br else 0.0
     return {
         "ic": round(ic_f, _RND),
         "breadth": br,
+        "effective_breadth": None if breadth_used is None else round(breadth_used, _RND),
+        "breadth_assumption": assumption,
+        "mean_correlation": None if mean_correlation is None else round(float(mean_correlation), _RND),
         "transfer_coefficient": round(tc, _RND),
-        "implied_ir": round(ir, _RND),
+        "implied_ir": None if ir is None else round(ir, _RND),
         "method": "fundamental_law",
     }

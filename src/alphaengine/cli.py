@@ -1670,13 +1670,22 @@ def _drive(run: Any, *, quiet: bool = False) -> None:
 
 
 def _publish_panel(session: Any, result: dict[str, Any], *, thesis_id: str | None = None) -> None:
-    """Hand the matrix or the pair table to the portal. A missing route is not a failure."""
+    """Hand a matrix, a pair table, or portfolio weights to the portal.
+
+    A missing route is not a failure. The result is already on this machine.
+    """
     if session is None or not hasattr(session, "file_panel"):
         return
     from .client.executor import _guard
-    from .core.relations import portal_figures
 
-    figures = portal_figures(result)
+    if result.get("kind") == "portfolio":
+        from .core.portfolio import portfolio_figures
+
+        figures = portfolio_figures(result)
+    else:
+        from .core.relations import portal_figures
+
+        figures = portal_figures(result)
     try:
         _guard(figures)
     except ValueError as exc:
@@ -1720,6 +1729,28 @@ def _print_cross(
     return 0
 
 
+def _print_portfolio(
+    data: Any,
+    *,
+    session: Any = None,
+    thesis_id: str | None = None,
+    method: str = "hrp",
+) -> int:
+    """One-shot portfolio. The session path can also ask for risk parity."""
+    from .core.portfolio import build_portfolio
+
+    try:
+        result = build_portfolio(data, method=method)
+    except ValueError as exc:
+        say(red(str(exc)))
+        return 2
+    say(f"  {result['method']}  {result['n_assets']} names  Ledoit-Wolf covariance")
+    for row in (result.get("rows") or [])[:8]:
+        say(f"  {row['name']}  {row['weight']}")
+    _publish_panel(session, result, thesis_id=thesis_id)
+    return 0
+
+
 def _overlap_payload(data: Any, symbol: str) -> dict[str, Any] | None:
     """Candidate plus the equal-weight of the other loaded names, or None."""
     from .core.relations import overlap_against_the_rest
@@ -1749,6 +1780,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             say(red(str(exc)))
             return 2
         return _print_cross(data, kind, session=session)
+    if str(args.workflow).lower().replace("-", "_") in ("portfolio", "allocate"):
+        try:
+            data, _fn = resolve_data(args, session)
+        except (ProjectError, ValueError) as exc:
+            say(red(str(exc)))
+            return 2
+        return _print_portfolio(data, session=session)
     symbol = getattr(args, "symbol", None)
     resolve_args = args
     if args.workflow == "check_overlap" and symbol:

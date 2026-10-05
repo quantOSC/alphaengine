@@ -515,11 +515,11 @@ class Session:
     ) -> Figures:
         """File a client-computed panel so the portal can draw it.
 
-        Correlation, covariance, and cointegration are not catalogue workflows.
-        Their matrix does not fit a `triangle` figure, so it travels here as
-        `figures.matrix` plus `figures.names`. A 404 means this portal has no
-        panels route yet: the maths already happened on this machine, and the
-        missing route must not fail that.
+        Correlation, covariance, cointegration, and a portfolio are not catalogue
+        workflows. A matrix travels as `figures.matrix` plus `figures.names`;
+        portfolio weights travel as rows. A 404 means this portal has no panels
+        route yet: the maths already happened on this machine, and the missing
+        route must not fail that.
         """
         from .._version import __version__
 

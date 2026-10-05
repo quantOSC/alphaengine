@@ -29,6 +29,20 @@ def _clean(v):
     return v
 
 
+def wealth_from_returns(returns: np.ndarray) -> np.ndarray:
+    """Unit capital, then each compounded return.
+
+    A path built as ``cumprod(1 + r)`` starts at the first return, so a loss
+    on bar one is not a drawdown. The leading 1 is the capital the returns
+    were applied to. A dollar equity curve the caller already marked is not
+    passed through here.
+    """
+    arr = np.asarray(returns, dtype=float)
+    if arr.size == 0:
+        return arr
+    return np.concatenate((np.array([1.0]), np.cumprod(1.0 + arr)))
+
+
 def performance_report(
     returns: list[float],
     *,
@@ -63,12 +77,15 @@ def performance_report(
     dsd = float(np.sqrt(np.mean(downside**2))) if np.count_nonzero(downside) else 0.0
     sortino_ann = (float(excess.mean()) / dsd) * math.sqrt(ppy) if dsd > 0 else 0.0
 
-    eq = np.asarray(equity_curve, dtype=float) if equity_curve else np.cumprod(1.0 + arr)
+    # Drawdown reads a marked account when one was supplied. Otherwise the
+    # path is built from unit capital. Total return always comes from the
+    # return product: a dollar curve's last mark minus one is not a return.
+    eq = np.asarray(equity_curve, dtype=float) if equity_curve else wealth_from_returns(arr)
     peak = np.maximum.accumulate(eq)
-    drawdown = eq / peak - 1.0
+    drawdown = eq / np.maximum(peak, 1e-18) - 1.0
     max_dd = float(drawdown.min()) if drawdown.size else 0.0
 
-    total_return = float(eq[-1] - 1.0) if eq.size else 0.0
+    total_return = float(np.prod(1.0 + arr) - 1.0) if n else 0.0
     ann_return = float((1.0 + total_return) ** (ppy / n) - 1.0) if total_return > -1 else -1.0
     calmar = float(ann_return / abs(max_dd)) if max_dd < 0 else 0.0
 
@@ -90,6 +107,9 @@ def performance_report(
         "cvar_95": _clean(round(cvar95, 4)),
         "volatility_annualized_pct": _clean(round(sd * math.sqrt(ppy) * 100, 2)),
         "risk_free_rate": round(float(risk_free_rate), 4),
+        "periods_per_year": ppy,
+        "return_annualization": "geometric",
+        "alpha_annualization": "arithmetic",
     }
 
     if benchmark_returns:

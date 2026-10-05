@@ -579,6 +579,7 @@ def score_backtest(
     n_trials: int | None = None,
     n_trials_source: str | None = None,
     risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
     benchmark_returns: list | None = None,
     pnl_matrix=None,
     trials_sharpe_std: float | None = None,
@@ -636,10 +637,19 @@ def score_backtest(
         equity_curve=bt.get("equity_curve"),
         benchmark_returns=benchmark_returns,
         risk_free_rate=risk_free_rate,
+        periods_per_year=periods_per_year,
     )
-    dsr = deflated_sharpe(returns, n_trials=n_trials_eff, trials_sharpe_std=trials_sharpe_std)
+    dsr = deflated_sharpe(
+        returns,
+        n_trials=n_trials_eff,
+        trials_sharpe_std=trials_sharpe_std,
+        risk_free_rate=risk_free_rate,
+        periods_per_year=periods_per_year,
+    )
     pbo = pbo_cscv(pnl_matrix) if pnl_matrix is not None else None
-    mintrl = min_track_record_length(returns)
+    mintrl = min_track_record_length(
+        returns, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year
+    )
 
     dsr_ok = isinstance(dsr, dict) and "error" not in dsr
     pbo_ok = isinstance(pbo, dict) and "error" not in pbo
@@ -711,6 +721,8 @@ def score_backtest(
             purge=cpcv_purge,
             embargo=cpcv_embargo,
             n_trials=n_trials_eff,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=periods_per_year,
         )
         if isinstance(cp, dict) and "error" not in cp:
             validation["cpcv"] = cp

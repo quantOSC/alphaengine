@@ -533,6 +533,23 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         examples=("cointegration",),
     ),
     Command(
+        verb="portfolio",
+        group="data",
+        args="",
+        scope="repl",
+        purpose="weights for the names already loaded",
+        body=(
+            "Hierarchical risk parity on a Ledoit-Wolf covariance of the loaded "
+            "returns. Say `portfolio risk parity` for equal risk contribution.\n\n"
+            "If this session already ran a correlation, covariance, or "
+            "cointegration, the book is the names that calculation kept, and "
+            "those readings stay attached so a later question can quote them. "
+            "The weights themselves come from the covariance, not from mixing "
+            "those readings into a second optimiser."
+        ),
+        examples=("portfolio", "portfolio risk parity"),
+    ),
+    Command(
         verb="universe",
         group="data",
         args="<name>",

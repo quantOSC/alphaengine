@@ -28,11 +28,17 @@ _EULER = 0.5772156649015329
 # ── Sharpe statistics ───────────────────────────────────────────────────
 
 
-def _per_period_sharpe(returns: np.ndarray) -> float:
+def _per_period_sharpe(returns: np.ndarray, *, risk_free_per_period: float = 0.0) -> float:
+    """Mean excess over a constant per-period cash rate, divided by sample vol.
+
+    A rate of 0 is excess of zero, not a Treasury bill. Vol is the sample
+    standard deviation of the returns (ddof=1); subtracting a constant does
+    not change it, or the skew, or the kurtosis.
+    """
     sd = returns.std(ddof=1)
     if sd == 0 or not math.isfinite(sd):
         return 0.0
-    return float(returns.mean() / sd)
+    return float((returns.mean() - float(risk_free_per_period)) / sd)
 
 
 def probabilistic_sharpe_ratio(
@@ -73,6 +79,8 @@ def deflated_sharpe(
     *,
     n_trials: int,
     trials_sharpe_std: float | None = None,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
 ) -> dict:
     """Deflated Sharpe Ratio for a return stream.
 
@@ -87,7 +95,9 @@ def deflated_sharpe(
     if n < 8:
         return {"error": "need >= 8 observations", "n_obs": int(n)}
 
-    sr = _per_period_sharpe(arr)
+    ppy = max(int(periods_per_year), 1)
+    rf_per = float(risk_free_rate) / ppy
+    sr = _per_period_sharpe(arr, risk_free_per_period=rf_per)
     skew = float(stats.skew(arr, bias=False)) if n > 2 else 0.0
     kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
     psr0 = probabilistic_sharpe_ratio(sr, n, skew, kurt, 0.0)
@@ -103,7 +113,9 @@ def deflated_sharpe(
         "n_obs": int(n),
         "n_trials": int(n_trials),
         "sharpe_per_period": round(sr, 4),
-        "sharpe_annualized": round(sr * math.sqrt(252), 4),
+        "sharpe_annualized": round(sr * math.sqrt(ppy), 4),
+        "risk_free_rate": round(float(risk_free_rate), 4),
+        "periods_per_year": ppy,
         "skew": round(skew, 4),
         "kurtosis": round(kurt, 4),
         "psr_vs_zero": round(psr0, 4),
@@ -142,6 +154,8 @@ def min_track_record_length(
     *,
     sr_benchmark: float = 0.0,
     confidence: float = 0.95,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
 ) -> dict:
     """Minimum Track Record Length (Bailey & López de Prado, 2012): the number of
     observations needed for the observed Sharpe to be statistically greater than
@@ -155,7 +169,8 @@ def min_track_record_length(
     n = arr.size
     if n < 8:
         return {"error": "need >= 8 observations", "n_obs": int(n)}
-    sr = _per_period_sharpe(arr)
+    ppy = max(int(periods_per_year), 1)
+    sr = _per_period_sharpe(arr, risk_free_per_period=float(risk_free_rate) / ppy)
     if sr <= sr_benchmark:
         return {
             "n_obs": int(n),
@@ -174,7 +189,9 @@ def min_track_record_length(
         "sharpe_per_period": round(sr, 4),
         "confidence": confidence,
         "min_track_record_length": round(mintrl, 1),
-        "min_track_record_years": round(mintrl / 252.0, 2),
+        "min_track_record_years": round(mintrl / ppy, 2),
+        "risk_free_rate": round(float(risk_free_rate), 4),
+        "periods_per_year": ppy,
         "sufficient": bool(n >= mintrl),
         "shortfall_obs": max(0, int(math.ceil(mintrl - n))),
     }
@@ -278,6 +295,8 @@ def cpcv_score(
     embargo: int = 1,
     n_trials: int = 1,
     max_paths: int = 2000,
+    risk_free_rate: float = 0.0,
+    periods_per_year: int = 252,
 ) -> dict:
     """Combinatorial Purged Cross-Validation (López de Prado, 2018) on ONE return
     stream, the robustness read a single backtest Sharpe hides.
@@ -337,10 +356,18 @@ def cpcv_score(
         path = arr[np.sort(np.concatenate(parts))]
         if path.size < 2:
             continue
-        sharpes.append(_per_period_sharpe(path) * math.sqrt(252))
+        ppy = max(int(periods_per_year), 1)
+        sharpes.append(
+            _per_period_sharpe(path, risk_free_per_period=float(risk_free_rate) / ppy) * math.sqrt(ppy)
+        )
         if path.size >= 8:
             try:
-                d = deflated_sharpe(path.tolist(), n_trials=max(1, int(n_trials)))
+                d = deflated_sharpe(
+                    path.tolist(),
+                    n_trials=max(1, int(n_trials)),
+                    risk_free_rate=risk_free_rate,
+                    periods_per_year=ppy,
+                )
             except (ValueError, FloatingPointError):
                 d = {"error": "dsr undefined for this path"}  # e.g. degenerate/near-riskless path
             if "error" not in d:
@@ -363,6 +390,8 @@ def cpcv_score(
         "purge": purge,
         "embargo": embargo,
         "n_trials": int(n_trials),
+        "risk_free_rate": round(float(risk_free_rate), 4),
+        "periods_per_year": max(int(periods_per_year), 1),
         "n_paths": int(sh.size),
         # LdP's reconstructed-path count, reported for reference.
         "n_backtest_paths_theoretical": int(math.comb(n_groups, n_test_groups) * n_test_groups // n_groups),
