@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -57,7 +57,7 @@ def write_report(trace: Any, path: Path) -> None:
         "ytick.color": "#333333",
     }
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    with plt.rc_context(rc), PdfPages(path) as pdf:
+    with cast(Any, plt).rc_context(rc), PdfPages(path) as pdf:
         info = pdf.infodict()
         info["Title"] = str(getattr(trace, "question", "") or "report")[:120]
         info["Creator"] = f"alphaengine {__version__}"
