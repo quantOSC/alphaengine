@@ -91,6 +91,8 @@ def submit(desk: Desk, line: str) -> bool:
             path = desk.pending_report.save()
             desk.pending_report = None
             say(f"  report  {path}")
+            if str(path).endswith(".txt"):
+                say(dim("  the charted pdf needs matplotlib. pip install matplotlib"))
             return False
         if answer in {"no", "n"}:
             desk.pending_report = None
@@ -712,10 +714,14 @@ def _sentence(desk: Desk, line: str) -> None:
         desk.trace_stack.append(call.line())
         say(f"  {len(desk.trace_stack):02d}  {call.line()}")
 
+    def invoke(name: str, args: dict[str, Any]) -> Any:
+        say(f"\x1f{name}")
+        return _invoke_tool(desk, name, args)
+
     trace = run_tools(
         line,
-        think,
-        lambda name, args: _invoke_tool(desk, name, args),
+        _thinking(think),
+        invoke,
         context=_session_prior(desk) or "",
         on_call=on_call,
     )
@@ -755,10 +761,67 @@ def _as_float(value: Any, default: float) -> float:
 
 
 def _offer(desk: Desk, trace: Any) -> None:
+    _attach_local_charts(desk, trace)
+    say("\x1f")
     desk.pending_report = trace
     if getattr(trace, "answer", ""):
         say(trace.answer)
-    say(dim("  Type yes to save this trace as a report on this machine."))
+    say(dim("  Type yes to save this trace as a charted report on this machine."))
+
+
+def _thinking(think: Callable[[str], str]) -> Callable[[str], str]:
+    def wrapped(prompt: str) -> str:
+        say("\x1fmodel")
+        return think(prompt)
+
+    return wrapped
+
+
+def _attach_local_charts(desk: Desk, trace: Any) -> None:
+    """Series for the PDF. They stay on the trace and off the model prompt."""
+    panel = _chart_panel(desk.data)
+    if panel:
+        trace.panel = panel
+    matrix = _chart_matrix(desk.matrix)
+    if matrix is not None:
+        trace.matrix = matrix
+
+
+def _chart_panel(data: Any) -> dict[str, list[float]]:
+    if isinstance(data, dict):
+        items = list(data.items())
+    elif isinstance(data, list):
+        items = [("series", data)]
+    else:
+        return {}
+    panel: dict[str, list[float]] = {}
+    for key, values in items:
+        nums = _chart_nums(values)
+        if len(nums) >= 8:
+            panel[str(key)] = nums[-2500:]
+        if len(panel) == 8:
+            break
+    return panel
+
+
+def _chart_nums(values: Any) -> list[float]:
+    if isinstance(values, dict):
+        seq = list(values.values())
+    elif isinstance(values, (list, tuple)):
+        seq = list(values)
+    else:
+        return []
+    return [float(v) for v in seq if isinstance(v, (int, float)) and not isinstance(v, bool)]
+
+
+def _chart_matrix(matrix: Any) -> dict[str, Any] | None:
+    if not isinstance(matrix, dict):
+        return None
+    names = [str(name) for name in (matrix.get("names") or [])][:24]
+    values = matrix.get("values")
+    if len(names) < 2 or not isinstance(values, list):
+        return None
+    return {"kind": str(matrix.get("kind") or "matrix"), "names": names, "values": values[:24]}
 
 
 def _begin_bakeoff(desk: Desk, think: Callable[[str], str], *, seconds: float | None = None) -> Any:
@@ -777,7 +840,7 @@ def _begin_bakeoff(desk: Desk, think: Callable[[str], str], *, seconds: float | 
 
     return run_bakeoff(
         desk.question,
-        think,
+        _thinking(think),
         desk.data,
         seconds=DEFAULT_SECONDS if seconds is None else seconds,
         on_call=on_call,

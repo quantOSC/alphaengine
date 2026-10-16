@@ -84,11 +84,21 @@ async def _wait(pilot: object, app: QuantOSApp) -> None:
     raise AssertionError("the line never finished")
 
 
+async def _ready(pilot: object, app: QuantOSApp) -> None:
+    """Boot fetches the account off the UI thread. Wait until that bar is gone."""
+    pause = pilot.pause  # type: ignore[attr-defined]
+    for _ in range(200):
+        await pause(0.02)
+        if not app.loading:
+            return
+    raise AssertionError("boot never finished")
+
+
 def test_boot_is_a_blank_column_with_the_account_on_the_status_line() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             assert "signed in" in app.status_text
             assert "sp500" in app.status_text
             assert "1 name" in app.status_text
@@ -119,11 +129,23 @@ def test_the_seal_turns_and_keeps_the_wordmark() -> None:
     assert "diagnose" not in card and "correlation" not in card
 
 
+def test_the_trace_type_marks_a_tool_and_spins() -> None:
+    from alphaengine.tui.typeface import spin_line, tool_line
+
+    tool = tool_line("01", "performance", "sharpe_annualized 1.15")
+    assert "PERFORMANCE" in tool.plain
+    assert "sharpe_annualized 1.15" in tool.plain
+    assert "01" in tool.plain
+    spin = spin_line("⠋", "performance")
+    assert "performance" in spin.plain
+    assert "⠋" in spin.plain
+
+
 def test_details_opens_over_the_mark_and_view_lists_the_book() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "/details"
@@ -150,7 +172,7 @@ def test_a_scripted_run_opens_the_sharpe_line_at_full_length() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "run measure"
@@ -179,7 +201,7 @@ def test_a_thesis_is_selected_and_sent_with_the_run() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_Theses(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             assert app.desk.thesis is None
             assert not any("momentum" in line for line in app.transcript)
             field = app.query_one(Input)
@@ -221,7 +243,7 @@ def test_one_thesis_is_pinned_at_sign_in() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_One(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             assert app.desk.thesis is not None
             assert app.desk.thesis["id"] == "th1"
             assert "momentum" not in app.status_text
@@ -265,7 +287,7 @@ def test_a_signed_in_account_loads_its_one_stored_universe() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_StoredBook(["sp500"]), url="fake://", keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             assert app.desk.loaded == "universe:sp500"
             assert "AAPL" in app.desk.data
             assert "universe:sp500" in app.status_text
@@ -280,7 +302,7 @@ def test_several_stored_universes_are_named_and_not_guessed() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_StoredBook(["sp500", "ndx"]), url="fake://", keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             assert app.desk.data is None
             assert "sp500" in app.status_text and "ndx" in app.status_text
             assert app.transcript == []
@@ -292,7 +314,7 @@ def test_login_pastes_a_quantos_key_and_login_gemini_pastes_that_provider() -> N
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", keyed=False, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "login"
@@ -328,7 +350,7 @@ def test_a_sentence_uses_the_fake_model_to_choose_a_workflow() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "which of my names are overbought"
@@ -355,7 +377,7 @@ def test_correlation_opens_the_full_matrix_and_keeps_the_universe() -> None:
         book = _book()
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=book, keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "correlation"
@@ -393,7 +415,7 @@ def test_check_overlap_builds_the_book_from_the_other_names() -> None:
         book = _book()
         app = QuantOSApp(session=_Overlap(), url="fake://", data=book, keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "run check_overlap --symbol AAA"
@@ -422,7 +444,7 @@ def test_a_later_question_is_answered_from_the_session() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_book(), keyed=True, think=think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "correlation"
@@ -443,7 +465,7 @@ def test_portfolio_uses_the_loaded_names_and_the_session() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_book(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
-            await pilot.pause()
+            await _ready(pilot, app)
             field = app.query_one(Input)
             field.focus()
             field.value = "correlation"

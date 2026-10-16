@@ -1351,7 +1351,7 @@ def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, An
     return data, backtest_fn
 
 
-def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
+def _narrow_to_universe(session: Any, wanted: str, data: Any, rows: Any = None) -> Any:
     """Filter loaded prices to a universe the portal holds.
 
     THE SPLIT THAT MAKES THIS SAFE: the portal returns SYMBOLS, this machine
@@ -1364,7 +1364,8 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any) -> Any:
     if session is None:
         raise DataShapeError("--universe needs a workflow server; none is configured.")
 
-    rows = session.universes()
+    if rows is None:
+        rows = session.universes()
     match = next(
         (u for u in rows if wanted in (str(u.get("id")), str(u.get("name")))),
         None,

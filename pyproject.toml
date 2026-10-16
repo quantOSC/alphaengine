@@ -77,8 +77,11 @@ connectors = [
 ]
 # The interactive session. Not a core dependency: a researcher who only wants
 # a deflated Sharpe should not install a TUI framework to get one.
+# matplotlib is the charted report only. It is imported when a trace is saved,
+# never by `import alphaengine`.
 tui = [
     "textual>=1.0",
+    "matplotlib>=3.8",
 ]
 dev = [
     "pytest>=8.0",
@@ -94,6 +97,7 @@ dev = [
     # it resolves fine on a machine that happens to have it.
     "statsmodels>=0.14",
     "textual>=1.0",
+    "matplotlib>=3.8",
 ]
 
 [project.urls]
@@ -185,5 +189,5 @@ ignore_missing_imports = true
 # import is an error, so this is the difference between a build that passes on a
 # machine that happens to have them and one that passes anywhere.
 [[tool.mypy.overrides]]
-module = ["scipy.*", "statsmodels.*", "pyarrow.*", "httpx", "textual.*"]
+module = ["scipy.*", "statsmodels.*", "pyarrow.*", "httpx", "textual.*", "matplotlib.*"]
 ignore_missing_imports = true

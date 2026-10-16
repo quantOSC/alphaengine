@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from alphaengine._version import __version__
-from alphaengine.agent.sim import run_tools
+from alphaengine.agent.sim import Call, Trace, run_tools
 from alphaengine.core.market import align_market, describe_market
 from alphaengine.core.options import black_scholes, implied_vol
 from alphaengine.core.regime import hamilton_regime
@@ -78,10 +78,30 @@ def test_a_sentence_runs_two_tools_and_refuses_an_invented_number(tmp_path) -> N
     assert trace.refused
     assert trace.answer.startswith("Refused")
     path = trace.save(tmp_path)
-    text = path.read_text(encoding="utf-8")
+    text_path = path if path.suffix == ".txt" else path.with_suffix(".txt")
+    text = text_path.read_text(encoding="utf-8")
     assert text.startswith("alphaengine 1.0")
     assert "profile" in text and "var" in text
     assert "Refused" in text
+
+
+def test_a_saved_trace_is_a_charted_pdf(tmp_path) -> None:
+    pytest.importorskip("matplotlib")
+    trace = Trace(
+        question="stress the book",
+        answer="The book stays inside the bands the tools reported.",
+        calls=[Call(tool="var", args={}, figures={"var_95": 0.021, "cvar_95": 0.034}, note="var_95 0.021")],
+    )
+    trace.panel = {"AAPL": [10.0, 10.4, 10.1, 10.8, 11.0, 10.6, 11.2, 11.5, 11.1, 11.8]}
+    path = trace.save(tmp_path)
+    assert path.suffix == ".pdf"
+    raw = path.read_bytes()
+    assert raw.startswith(b"%PDF")
+    assert len(raw) > 2000
+    text = path.with_suffix(".txt").read_text(encoding="utf-8")
+    assert text.startswith("alphaengine 1.0")
+    assert "stress the book" in text
+    assert "AAPL" not in text
 
 
 def test_the_stage_draws_the_stack() -> None:

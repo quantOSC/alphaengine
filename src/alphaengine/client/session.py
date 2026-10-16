@@ -32,11 +32,14 @@ NO GRAPH LIVES HERE
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import json
 import logging
 import urllib.error
 import urllib.request
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,6 +50,19 @@ logger = logging.getLogger(__name__)
 __all__ = ["connect", "Session", "Run", "Offline", "ServerError", "connect_or_offline"]
 
 _TIMEOUT = 120
+_REQUEST_TIMEOUT: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "alphaengine_request_timeout", default=None
+)
+
+
+@contextmanager
+def request_timeout(seconds: float) -> Iterator[None]:
+    """Cap transport waits on this thread. A workflow on another thread stays at 120s."""
+    token = _REQUEST_TIMEOUT.set(float(seconds))
+    try:
+        yield
+    finally:
+        _REQUEST_TIMEOUT.reset(token)
 
 
 class Offline(RuntimeError):
@@ -562,7 +578,11 @@ class Session:
             req.add_header("Authorization", f"Bearer {self.api_key}")
 
         try:
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            override = _REQUEST_TIMEOUT.get()
+            timeout = float(_TIMEOUT)
+            if isinstance(override, (int, float)) and not isinstance(override, bool):
+                timeout = float(override)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 out: Figures = json.loads(resp.read().decode() or "{}")
                 return out
         except urllib.error.HTTPError as exc:

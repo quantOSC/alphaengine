@@ -86,6 +86,9 @@ class Trace:
     calls: list[Call] = field(default_factory=list)
     answer: str = ""
     refused: bool = False
+    # Local chart inputs. They stay off the model prompt and off the wire.
+    panel: dict[str, list[float]] | None = None
+    matrix: dict[str, Any] | None = None
 
     def render(self) -> str:
         lines = ["alphaengine 1.0", f"question  {self.question}", ""]
@@ -101,12 +104,26 @@ class Trace:
         return "\n".join(lines)
 
     def save(self, directory: Path | None = None) -> Path:
+        """Write the text trace and, when matplotlib is installed, the charted PDF.
+
+        The PDF is the report. The text file stays beside it so a machine
+        without matplotlib still has the stack.
+        """
         folder = directory or (data_dir() / "reports")
         folder.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        path = folder / f"trace-{stamp}.txt"
-        path.write_text(self.render() + "\n", encoding="utf-8")
-        return path
+        text_path = folder / f"trace-{stamp}.txt"
+        text_path.write_text(self.render() + "\n", encoding="utf-8")
+        pdf_path = folder / f"trace-{stamp}.pdf"
+        try:
+            from .chart import write_report
+
+            write_report(self, pdf_path)
+        except ImportError:
+            return text_path
+        if pdf_path.is_file() and pdf_path.stat().st_size > 0:
+            return pdf_path
+        return text_path
 
 
 def run_tools(

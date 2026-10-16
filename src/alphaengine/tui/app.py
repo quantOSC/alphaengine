@@ -19,8 +19,10 @@ from .._version import __version__
 from ..cli import narration_to, resolve_data, thesis_id_of
 from .dispatch import Desk, submit
 from .mark import details_text, seal
+from .typeface import SPIN, body_line, meta_line, spin_line, tool_line, user_line
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_TOOL_LINE = re.compile(r"^(\d{2})\s+(\S+)(?:\s+(.*))?$")
 
 _URL_AFTER = {
     "AZURE_OPENAI_API_KEY": "AZURE_OPENAI_ENDPOINT",
@@ -68,6 +70,13 @@ Screen { background: #0b0d10; }
 #formula { height: auto; max-height: 4; color: #9ecbff; }
 #inputs { height: auto; max-height: 3; color: #8b949e; }
 #series { height: 8; }
+#spinner {
+    height: 1;
+    background: #0b0d10;
+    color: #9ecbff;
+    padding: 0 0 0 0;
+    display: none;
+}
 #prompt-row {
     dock: bottom;
     height: 7;
@@ -109,6 +118,60 @@ def _series_shape(data: Any) -> tuple[int, int] | None:
     if isinstance(data, list) and data and isinstance(data[0], (int, float)):
         return 1, len(data)
     return None
+
+
+def _books_from(rows: Any) -> list[dict[str, Any]]:
+    books: list[dict[str, Any]] = []
+    if not isinstance(rows, list):
+        return books
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("id") or "")
+        if not name:
+            continue
+        raw_definition = row.get("definition")
+        definition = raw_definition if isinstance(raw_definition, dict) else {}
+        symbols = definition.get("symbols") or []
+        raw_obs = definition.get("n_obs")
+        obs = int(raw_obs) if isinstance(raw_obs, (int, float)) and not isinstance(raw_obs, bool) else 0
+        books.append(
+            {
+                "name": name,
+                "names": len(symbols) if isinstance(symbols, list) else 0,
+                "obs": obs,
+            }
+        )
+    return books
+
+
+def _only_stored(rows: Any) -> str | None:
+    """The account's single stored book. Several books is a choice, not a guess."""
+    if not isinstance(rows, list):
+        return None
+    ready: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "")
+        raw_definition = row.get("definition")
+        definition = raw_definition if isinstance(raw_definition, dict) else {}
+        if name and definition.get("cache_id"):
+            ready.append(name)
+    return ready[0] if len(ready) == 1 else None
+
+
+def _styled(plain: str) -> Text:
+    stripped = plain.strip()
+    if stripped.startswith(">"):
+        return user_line(stripped.lstrip("> ").strip())
+    match = _TOOL_LINE.match(stripped)
+    if match:
+        return tool_line(match.group(1), match.group(2), match.group(3) or "")
+    lower = stripped.lower()
+    if lower.startswith("type yes") or stripped.startswith("report ") or stripped.startswith("workflow "):
+        return meta_line(stripped)
+    return body_line(stripped)
 
 
 def _fit(text: str, width: int = 22) -> str:
@@ -178,12 +241,18 @@ class QuantOSApp(App[None]):
         self.formula_text = ""
         self.transcript: list[str] = []
         self.turns = 0
+        self.loading = False
+        self.load_frac = 0.0
+        self.load_label = ""
+        self.spin_label = ""
+        self._spin_i = 0
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
         with Vertical(id="column"):
             yield Static("", id="empty")
             yield RichLog(id="transcript", highlight=False, markup=False, wrap=True)
+            yield Static("", id="spinner")
             with Vertical(id="inspector"):
                 yield ListView(id="lines")
                 yield Static("", id="formula")
@@ -195,6 +264,8 @@ class QuantOSApp(App[None]):
     def on_mount(self) -> None:
         self.query_one("#series", DataTable).cursor_type = "row"
         self.query_one(Input).focus()
+        self._paint_empty()
+        self._paint_status()
         self._stage_timer = self.set_interval(0.16, self._tick)
         self._sync_account()
 
@@ -225,7 +296,12 @@ class QuantOSApp(App[None]):
             parts.append((detail, "#e6edf3"))
         if models:
             parts.append((models[0][0], "#8b949e"))
-        if working or self.busy:
+        if self.loading and not self.busy:
+            filled = max(0, min(12, int(round(self.load_frac * 12))))
+            bar_s = "█" * filled + "░" * (12 - filled)
+            label = _fit(self.load_label or "account", 18)
+            parts.append((f"{bar_s}  {label}", "#7ec8c4"))
+        elif working or self.busy:
             elapsed = time.monotonic() - self._started
             label = _fit(self.activity or "working", 42)
             parts.append((f"{label}  {elapsed:.1f}s", "#9ecbff"))
@@ -314,7 +390,9 @@ class QuantOSApp(App[None]):
         prompt.disabled = True
         self._reveal_trace()
         self._paint_status(working=True)
-        self.query_one("#transcript", RichLog).write(f"> {text}")
+        self.spin_label = "working"
+        self._paint_spinner()
+        self.query_one("#transcript", RichLog).write(user_line(text))
 
         def go() -> None:
             self._run_line(text)
@@ -451,74 +529,141 @@ class QuantOSApp(App[None]):
             transcript.display = True
 
     def _sync_account(self) -> None:
-        """Refresh portal universes. One stored book loads itself."""
-        from ..cli import _narrow_to_universe, _stored_universes, narration_to
-
-        notes: list[str] = []
-
-        def sink(_chunk: str) -> None:
+        """Paint first, then fetch the account off the UI thread."""
+        if not self.desk.keyed:
+            self.loading = False
+            self._refresh_rail()
             return
+        if self.loading:
+            return
+        self.loading = True
+        self.load_frac = 0.08
+        self.load_label = "account"
+        self._paint_status()
+        self._paint_spinner()
+        self.run_worker(self._load_account, thread=True, group="boot", exclusive=False)
 
-        try:
-            rows = self.desk.session.universes()
-        except Exception:  # noqa: BLE001 — offline or unsigned still boots
-            rows = []
+    def _load_account(self) -> None:
+        from ..cli import _narrow_to_universe
+        from ..client.session import request_timeout
+
         books: list[dict[str, Any]] = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            name = str(row.get("name") or row.get("id") or "")
-            if not name:
-                continue
-            raw_definition = row.get("definition")
-            definition = raw_definition if isinstance(raw_definition, dict) else {}
-            symbols = definition.get("symbols") or []
-            raw_obs = definition.get("n_obs")
-            obs = int(raw_obs) if isinstance(raw_obs, (int, float)) and not isinstance(raw_obs, bool) else 0
-            books.append(
-                {
-                    "name": name,
-                    "names": len(symbols) if isinstance(symbols, list) else 0,
-                    "obs": obs,
-                }
-            )
-        self._books = books
+        data: Any = None
+        loaded: str | None = None
+        thesis: dict[str, Any] | None = None
+        notes: list[str] = []
+        session = self.desk.session
+        try:
+            with request_timeout(10):
+                try:
+                    rows = session.universes()
+                except Exception:  # noqa: BLE001 — offline or unsigned still boots
+                    rows = []
+                books = _books_from(rows)
+                self.call_from_thread(self._set_load, 0.45, "account")
+                if self.desk.data is None and self.desk.keyed:
+                    wanted = _only_stored(rows)
+                    if wanted:
+                        self.call_from_thread(self._set_load, 0.72, wanted)
 
-        if self.desk.data is None and self.desk.keyed:
-            with narration_to(sink):
-                wanted, _ = _stored_universes(self.desk.session)
-                if wanted:
+                        def sink(_chunk: str) -> None:
+                            return
+
+                        with narration_to(sink):
+                            try:
+                                data = _narrow_to_universe(session, wanted, None, rows=rows)
+                                loaded = f"universe:{wanted}"
+                            except Exception as exc:  # noqa: BLE001
+                                notes.append(str(exc))
+                if self.desk.keyed and self.desk.thesis is None and not self.desk.thesis_declined:
+                    self.call_from_thread(self._set_load, 0.9, "account")
                     try:
-                        self.desk.data = _narrow_to_universe(self.desk.session, wanted, None)
-                        self.desk.loaded = f"universe:{wanted}"
-                    except Exception as exc:  # noqa: BLE001
-                        notes.append(str(exc))
-        if self.desk.keyed and self.desk.thesis is None and not self.desk.thesis_declined:
-            try:
-                theses = [r for r in self.desk.session.theses() if isinstance(r, dict) and thesis_id_of(r)]
-            except Exception:  # noqa: BLE001 — offline or unsigned still boots
-                theses = []
-            if len(theses) == 1:
-                self.desk.thesis = theses[0]
+                        theses = [r for r in session.theses() if isinstance(r, dict) and thesis_id_of(r)]
+                    except Exception:  # noqa: BLE001 — offline or unsigned still boots
+                        theses = []
+                    if len(theses) == 1:
+                        thesis = theses[0]
+        except Exception as exc:  # noqa: BLE001 — the session still opens
+            notes.append(str(exc))
+        finally:
+            self.call_from_thread(self._apply_account, books, data, loaded, thesis, notes)
+
+    def _set_load(self, frac: float, label: str) -> None:
+        self.load_frac = frac
+        self.load_label = label
+        self._paint_status()
+
+    def _apply_account(
+        self,
+        books: list[dict[str, Any]],
+        data: Any,
+        loaded: str | None,
+        thesis: dict[str, Any] | None,
+        notes: list[str],
+    ) -> None:
+        self._books = books
+        if data is not None and self.desk.data is None:
+            self.desk.data = data
+            if loaded:
+                self.desk.loaded = loaded
+        if thesis is not None and self.desk.thesis is None and not self.desk.thesis_declined:
+            self.desk.thesis = thesis
+        self.loading = False
+        self.load_label = ""
         kept = [_plain(note).strip() for note in notes if _plain(note).strip()]
         if kept:
             self._reveal_trace()
-            log = self.query_one("#transcript", RichLog)
+            log = self.query("#transcript")
+            node = log.first() if log else None
             for plain in kept:
                 self.transcript.append(plain)
-                log.write(plain)
+                if isinstance(node, RichLog):
+                    node.write(_styled(plain))
         self._refresh_rail()
+        self._paint_spinner()
 
     def _tick(self) -> None:
-        if self.busy:
-            self._paint_status(working=True)
+        if self.loading:
+            if self.load_frac < 0.82:
+                self.load_frac = min(0.82, self.load_frac + 0.015)
+            self._paint_status()
+            self._paint_spinner()
+            if self.turns == 0 and not self.transcript:
+                self._paint_empty()
             return
+        if self.busy or self.spin_label:
+            self._paint_spinner()
+            if self.busy:
+                self._paint_status(working=True)
+            return
+        self._paint_spinner()
         if self.turns == 0 and not self.transcript:
             self._paint_empty()
 
     def _paint_working(self) -> None:
         if self.busy:
             self._paint_status(working=True)
+
+    def _paint_spinner(self) -> None:
+        nodes = self.query("#spinner")
+        node = nodes.first() if nodes else None
+        if not isinstance(node, Static):
+            return
+        show = bool(self.loading or self.busy or self.spin_label)
+        node.display = show
+        if not show:
+            node.update("")
+            return
+        self._spin_i = (self._spin_i + 1) % len(SPIN)
+        if self.busy and self.spin_label:
+            label = self.spin_label
+        elif self.loading and not self.busy:
+            label = self.load_label or "account"
+        elif self.spin_label:
+            label = self.spin_label
+        else:
+            label = "working"
+        node.update(spin_line(SPIN[self._spin_i], label))
 
     def _live(self, chunk: str) -> None:
         # A working label updates the status line and does not join the trace.
@@ -527,8 +672,14 @@ class QuantOSApp(App[None]):
             label = _plain(chunk[1:]).strip()
             if label:
                 self.activity = label
+                self.spin_label = label
             if self.busy:
                 self._paint_working()
+            self._paint_spinner()
+            return
+        if chunk.startswith("\x1f"):
+            self.spin_label = _plain(chunk[1:]).strip()
+            self._paint_spinner()
             return
         plain = _plain(chunk).strip()
         if not plain:
@@ -536,7 +687,10 @@ class QuantOSApp(App[None]):
         self.activity = plain
         self.transcript.append(plain)
         self._reveal_trace()
-        self.query_one("#transcript", RichLog).write(plain)
+        log = self.query("#transcript")
+        node = log.first() if log else None
+        if isinstance(node, RichLog):
+            node.write(_styled(plain))
         if self.busy:
             self._paint_working()
 
@@ -556,6 +710,8 @@ class QuantOSApp(App[None]):
     def _finish(self, quitting: bool) -> None:
         self.busy = False
         self.activity = ""
+        self.spin_label = ""
+        self._paint_spinner()
         prompt = self.query_one(Input)
         prompt.disabled = False
         if self.desk.pending_secret:
