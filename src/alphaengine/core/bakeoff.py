@@ -194,7 +194,9 @@ def _weights(fit: np.ndarray, rule: str) -> np.ndarray | None:
         return raw / raw.sum()
     cov, _shrink, _mu = ledoit_wolf_cov(fit)
     labels = [str(i) for i in range(n)]
-    built = risk_parity_weights(cov, names=labels) if rule == "risk_parity" else hrp_weights(cov, names=labels)
+    built = (
+        risk_parity_weights(cov, names=labels) if rule == "risk_parity" else hrp_weights(cov, names=labels)
+    )
     raw = np.array([float(built["weights"][label]) for label in labels], dtype=float)
     if raw.sum() <= 0:
         return None

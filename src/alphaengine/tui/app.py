@@ -184,9 +184,14 @@ class QuantOSApp(App[None]):
         self.query_one("#series", DataTable).cursor_type = "row"
         self._refresh_rail()
         self.query_one(Input).focus()
-        self.set_interval(0.12, self._tick_working)
+        self._stage_timer = self.set_interval(0.12, self._tick_working)
         self._paint_stage()
         self._sync_account()
+
+    def on_unmount(self) -> None:
+        timer = getattr(self, "_stage_timer", None)
+        if timer is not None:
+            timer.stop()
 
     def _refresh_rail(self) -> None:
         from ..model import available_models, keys_without_sdk
@@ -546,13 +551,20 @@ class QuantOSApp(App[None]):
         elapsed = time.monotonic() - self._started if self.busy else time.monotonic()
         activity = self.activity if self.busy else ""
         frame = stage_lines(elapsed, activity=activity, stack=list(self.desk.trace_stack))
-        self.query_one("#stage", Static).update(Text.from_ansi("\n".join(frame)))
+        stage = self.query("#stage")
+        # The interval can tick while the test app is being torn down.
+        node = stage.first() if stage else None
+        if isinstance(node, Static):
+            node.update(Text.from_ansi("\n".join(frame)))
 
     def _paint_working(self) -> None:
         elapsed = time.monotonic() - self._started
         frame = _SPIN[int(elapsed * 12) % len(_SPIN)]
         label = _fit(self.activity or "working", 42)
-        self.query_one("#status", Static).update(f"{frame}   working   ·   {label}   ·   {elapsed:.1f}s")
+        status = self.query("#status")
+        node = status.first() if status else None
+        if isinstance(node, Static):
+            node.update(f"{frame}   working   ·   {label}   ·   {elapsed:.1f}s")
 
     def _live(self, chunk: str) -> None:
         # A working label updates the status line and does not join the trace.
