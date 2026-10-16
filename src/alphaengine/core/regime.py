@@ -53,18 +53,17 @@ def hamilton_regime(values: list[float] | np.ndarray) -> dict:
         return -ll
 
     start = np.array([mu_c, mu_w, math.log(sd_c), math.log(sd_w), 2.0, 2.0])
-    fit = minimize(nll, start, method="L-BFGS-B")
-    mu0, mu1, log_s0, log_s1, z00, z11 = (float(v) for v in fit.x)
-    s0, s1 = math.exp(log_s0), math.exp(log_s1)
-    stay0 = 1.0 / (1.0 + math.exp(-z00))
-    stay1 = 1.0 / (1.0 + math.exp(-z11))
-    trans = np.array([[stay0, 1.0 - stay0], [1.0 - stay1, stay1]])
-    if s1 < s0:
-        mu0, mu1 = mu1, mu0
-        s0, s1 = s1, s0
-        stay0, stay1 = stay1, stay0
-        trans = np.array([[stay0, 1.0 - stay0], [1.0 - stay1, stay1]])
-    _ll, filt, path = _filter(y, (mu0, mu1), (s0, s1), trans)
+    try:
+        fit = minimize(nll, start, method="L-BFGS-B")
+        fitted = fit.x
+        converged = bool(fit.success)
+    except (ValueError, FloatingPointError):
+        fitted = start
+        converged = False
+    chosen = _best_state(y, (start, fitted))
+    if chosen is None:
+        return {"error": "the filter did not fit", "n_obs": n}
+    mu0, mu1, s0, s1, stay0, stay1, filt, path = chosen
     high = path[:, 1] >= 0.5
     return {
         "n_obs": n,
@@ -78,9 +77,52 @@ def hamilton_regime(values: list[float] | np.ndarray) -> dict:
         "prob_high_now": round(float(filt[1]), 4),
         "n_high": int(high.sum()),
         "n_low": int((~high).sum()),
-        "converged": bool(fit.success),
+        "converged": converged,
         "_path": path,
     }
+
+
+def _best_state(
+    y: np.ndarray, thetas: tuple[np.ndarray, ...]
+) -> tuple[float, float, float, float, float, float, np.ndarray, np.ndarray] | None:
+    """Keep the parameter set with the higher likelihood. A bad optimum loses to the split-sample start."""
+    best_ll = float("-inf")
+    best: tuple[float, float, float, float, float, float, np.ndarray, np.ndarray] | None = None
+    for theta in thetas:
+        unpacked = _unpack(y, theta)
+        if unpacked is None:
+            continue
+        ll, mu0, mu1, s0, s1, stay0, stay1, filt, path = unpacked
+        if ll > best_ll:
+            best_ll = ll
+            best = (mu0, mu1, s0, s1, stay0, stay1, filt, path)
+    return best
+
+
+def _unpack(
+    y: np.ndarray, theta: np.ndarray
+) -> tuple[float, float, float, float, float, float, float, float, np.ndarray, np.ndarray] | None:
+    try:
+        mu0, mu1, log_s0, log_s1, z00, z11 = (float(v) for v in theta)
+    except (TypeError, ValueError):
+        return None
+    if not all(math.isfinite(v) for v in (mu0, mu1, log_s0, log_s1, z00, z11)):
+        return None
+    s0, s1 = math.exp(log_s0), math.exp(log_s1)
+    if s0 < 1e-8 or s1 < 1e-8:
+        return None
+    stay0 = 1.0 / (1.0 + math.exp(-z00))
+    stay1 = 1.0 / (1.0 + math.exp(-z11))
+    trans = np.array([[stay0, 1.0 - stay0], [1.0 - stay1, stay1]])
+    if s1 < s0:
+        mu0, mu1 = mu1, mu0
+        s0, s1 = s1, s0
+        stay0, stay1 = stay1, stay0
+        trans = np.array([[stay0, 1.0 - stay0], [1.0 - stay1, stay1]])
+    ll, filt, path = _filter(y, (mu0, mu1), (s0, s1), trans)
+    if not math.isfinite(ll):
+        return None
+    return ll, mu0, mu1, s0, s1, stay0, stay1, filt, path
 
 
 def _filter(

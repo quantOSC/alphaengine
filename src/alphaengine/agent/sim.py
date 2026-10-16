@@ -16,7 +16,7 @@ from typing import Any
 
 from ..events import data_dir
 
-Invoke = Callable[[str, dict[str, Any]], dict[str, Any]]
+Invoke = Callable[[str, dict[str, Any]], Any]
 Think = Callable[[str], str]
 
 MAX_CALLS = 8
@@ -36,6 +36,7 @@ TOOLS: tuple[tuple[str, str], ...] = (
     ("var", "value at risk on the loaded book"),
     ("process", "fit ou, gbm, jump, or garch and stress it; args.dgp"),
     ("workflow", "a portal workflow by name, when the account offers it"),
+    ("bakeoff", "generators propose, an adversary attacks, the referee names the survivor"),
     ("done", "stop. args.answer may cite only numbers the tools returned"),
 )
 
@@ -128,7 +129,8 @@ def run_tools(
             trace.refused = True
             return trace
         name = str(parsed.get("tool") or "")
-        args = parsed.get("args") if isinstance(parsed.get("args"), dict) else {}
+        raw_args = parsed.get("args")
+        args: dict[str, Any] = raw_args if isinstance(raw_args, dict) else {}
         if name == "done":
             answer = str(args.get("answer") or parsed.get("answer") or "").strip()
             trace.answer = _guard_answer(answer, known, question)
@@ -141,11 +143,10 @@ def run_tools(
                 on_call(call)
             continue
         try:
-            figures = invoke(name, args)
+            got: Any = invoke(name, args)
         except Exception as exc:  # noqa: BLE001 — the stack records the failure
-            figures = {"error": str(exc)}
-        if not isinstance(figures, dict):
-            figures = {"result": figures}
+            got = {"error": str(exc)}
+        figures: dict[str, Any] = got if isinstance(got, dict) else {"result": got}
         error = str(figures["error"]) if figures.get("error") else None
         note = str(figures.get("note") or _note(figures))
         call = Call(tool=name, args=args, figures=_public(figures), note=note, error=error)

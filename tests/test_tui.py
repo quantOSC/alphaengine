@@ -77,7 +77,7 @@ def _think(prompt: str) -> str:
 
 async def _wait(pilot: object, app: QuantOSApp) -> None:
     pause = pilot.pause  # type: ignore[attr-defined]
-    for _ in range(80):
+    for _ in range(160):
         await pause(0.05)
         if not app.busy:
             return

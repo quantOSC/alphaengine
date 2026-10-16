@@ -74,6 +74,8 @@ class Desk:
     portfolio: dict[str, Any] | None = None
     pending_report: Any = None
     trace_stack: list[str] = field(default_factory=list)
+    question: str = ""
+    bakeoff_done: bool = False
 
 
 def submit(desk: Desk, line: str) -> bool:
@@ -93,6 +95,8 @@ def submit(desk: Desk, line: str) -> bool:
             say(dim("  report left unwritten"))
             return False
         desk.pending_report = None
+
+    desk.bakeoff_done = False
 
     line, inline_flags = _extract_flags(line)
     # `--symbol` on check_overlap must not collapse the universe before the
@@ -646,15 +650,18 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
 
 
 def _sentence(desk: Desk, line: str) -> None:
-    """A sentence is a stack of tool calls. The model picks them. The trace is the run."""
-    from ..agent.sim import run_tools
-
+    """A sentence is a stack of tool calls. A bakeoff is that stack's closed room."""
     think = _thinker(desk)
     if think is None:
         say("A scenario is a stack of tool calls. Enter a model key and the harness will choose them.")
         return
-
+    desk.question = line
     desk.trace_stack = []
+    if _wants_bakeoff(line):
+        _offer(desk, _begin_bakeoff(desk, think).trace)
+        return
+
+    from ..agent.sim import run_tools
 
     def on_call(call: Any) -> None:
         desk.trace_stack.append(call.line())
@@ -667,14 +674,83 @@ def _sentence(desk: Desk, line: str) -> None:
         context=_session_prior(desk) or "",
         on_call=on_call,
     )
+    _offer(desk, trace)
+
+
+def _wants_bakeoff(line: str) -> bool:
+    low = line.lower().replace("-", " ")
+    return "bakeoff" in low or "bake off" in low
+
+
+def _bakeoff_seconds(value: Any) -> float:
+    """A model may ask for a budget. It stays inside half a minute to a minute."""
+    from ..agent.bakeoff import DEFAULT_SECONDS, HARD_CEILING
+
+    number = _as_float(value, DEFAULT_SECONDS)
+    return min(HARD_CEILING, max(30.0, number))
+
+
+def _optional_rate(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _as_float(value: Any, default: float) -> float:
+    if isinstance(value, bool) or value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _offer(desk: Desk, trace: Any) -> None:
     desk.pending_report = trace
-    if trace.answer:
+    if getattr(trace, "answer", ""):
         say(trace.answer)
     say(dim("  Type yes to save this trace as a report on this machine."))
 
 
+def _begin_bakeoff(desk: Desk, think: Callable[[str], str], *, seconds: float | None = None) -> Any:
+    """One bakeoff for this sentence. A second request in the same sentence is refused."""
+    from ..agent.bakeoff import DEFAULT_SECONDS, Bakeoff, run_bakeoff
+    from ..agent.sim import Call, Trace
+
+    if desk.bakeoff_done:
+        trace = Trace(question=desk.question, answer="Referee. This sentence already ran a bakeoff.")
+        return Bakeoff(trace=trace, figures={"mode": "bakeoff", "stopped": "already_ran", "n_trials": 0})
+    desk.bakeoff_done = True
+
+    def on_call(call: Call) -> None:
+        desk.trace_stack.append(call.line())
+        say(f"  {len(desk.trace_stack):02d}  {call.line()}")
+
+    return run_bakeoff(
+        desk.question,
+        think,
+        desk.data,
+        seconds=DEFAULT_SECONDS if seconds is None else seconds,
+        on_call=on_call,
+    )
+
+
 def _invoke_tool(desk: Desk, name: str, args: dict[str, Any]) -> dict[str, Any]:
     """One deterministic tool. The model chose the name. This only runs it."""
+    if name == "bakeoff":
+        think = _thinker(desk)
+        if think is None:
+            return {"error": "a bakeoff needs a model key"}
+        held = _begin_bakeoff(desk, think, seconds=_bakeoff_seconds(args.get("seconds")))
+        raw = held.figures
+        cleaned: dict[str, Any] = {}
+        if isinstance(raw, dict):
+            cleaned.update({str(key): value for key, value in raw.items()})
+        return cleaned
     if name == "profile":
         from ..core.profile import profile_data
 
@@ -704,28 +780,28 @@ def _invoke_tool(desk: Desk, name: str, args: dict[str, Any]) -> dict[str, Any]:
         from ..core.options import black_scholes
         from ..core.rates import cash_rate
 
-        rate, _, _ = cash_rate(args.get("rate"))
+        rate, _, _ = cash_rate(_optional_rate(args.get("rate")))
         return black_scholes(
-            spot=float(args.get("spot") or 0),
-            strike=float(args.get("strike") or 0),
-            expiry_years=float(args.get("expiry") or args.get("expiry_years") or 0),
-            vol=float(args.get("vol") or 0),
-            rate=float(args.get("rate") if args.get("rate") is not None else rate),
+            spot=_as_float(args.get("spot"), 0.0),
+            strike=_as_float(args.get("strike"), 0.0),
+            expiry_years=_as_float(args.get("expiry") or args.get("expiry_years"), 0.0),
+            vol=_as_float(args.get("vol"), 0.0),
+            rate=_as_float(args.get("rate"), rate),
             call=str(args.get("right") or "call").lower() != "put",
         )
     if name == "reprice":
         from ..core.options import reprice
         from ..core.rates import cash_rate
 
-        rate, _, _ = cash_rate(args.get("rate"))
+        rate, _, _ = cash_rate(_optional_rate(args.get("rate")))
         return reprice(
-            spot=float(args.get("spot") or 0),
-            strike=float(args.get("strike") or 0),
-            expiry_years=float(args.get("expiry") or args.get("expiry_years") or 0),
-            vol=float(args.get("vol") or 0),
-            rate=float(args.get("rate") if args.get("rate") is not None else rate),
-            spot_shock=float(args.get("spot_shock") or 0),
-            vol_shock=float(args.get("vol_shock") or 0),
+            spot=_as_float(args.get("spot"), 0.0),
+            strike=_as_float(args.get("strike"), 0.0),
+            expiry_years=_as_float(args.get("expiry") or args.get("expiry_years"), 0.0),
+            vol=_as_float(args.get("vol"), 0.0),
+            rate=_as_float(args.get("rate"), rate),
+            spot_shock=_as_float(args.get("spot_shock"), 0.0),
+            vol_shock=_as_float(args.get("vol_shock"), 0.0),
             call=str(args.get("right") or "call").lower() != "put",
         )
     if name in {"correlation", "covariance", "cointegration"}:
