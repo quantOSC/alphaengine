@@ -626,8 +626,6 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
             return
         grid = project_grid()
         pinned = thesis_id_of(desk.thesis) if desk.thesis else ""
-        if desk.thesis:
-            say(dim(f"  thesis  {thesis_label(desk.thesis)}"))
         desk.last = desk.session.open(
             name,
             data=desk.data,

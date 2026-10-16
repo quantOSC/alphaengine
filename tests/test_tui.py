@@ -84,15 +84,17 @@ async def _wait(pilot: object, app: QuantOSApp) -> None:
     raise AssertionError("the line never finished")
 
 
-def test_boot_shows_the_ladder_and_a_stored_universe() -> None:
+def test_boot_is_a_blank_column_with_the_account_on_the_status_line() -> None:
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause()
-            assert "enter model key" in app.rail_text
-            assert "load <name>" in app.rail_text
-            assert "the maths" in app.rail_text
-            assert "sp500" in app.rail_text
+            assert "signed in" in app.status_text
+            assert "sp500" in app.status_text
+            assert "thesis" not in app.status_text.lower()
+            assert not app.query("#rail")
+            assert not app.query("#stage")
+            assert "alphaengine" in app.empty_text
             prompt = app.query_one(Input)
             assert str(prompt.placeholder).startswith("Ask")
 
@@ -133,8 +135,8 @@ def test_a_thesis_is_selected_and_sent_with_the_run() -> None:
         app = QuantOSApp(session=_Theses(), url="fake://", data=_returns(), keyed=True, think=_think)
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause()
-            assert "momentum" in app.transcript[-1] or any("momentum" in line for line in app.transcript)
-            assert "none" in app.rail_text
+            assert app.desk.thesis is None
+            assert not any("momentum" in line for line in app.transcript)
             field = app.query_one(Input)
             field.focus()
             field.value = "thesis momentum"
@@ -142,7 +144,6 @@ def test_a_thesis_is_selected_and_sent_with_the_run() -> None:
             await _wait(pilot, app)
             assert app.desk.thesis is not None
             assert app.desk.thesis["id"] == "th1"
-            assert "momentum" in app.rail_text
 
             field.value = "run measure"
             await pilot.press("enter")
@@ -155,7 +156,7 @@ def test_a_thesis_is_selected_and_sent_with_the_run() -> None:
             await _wait(pilot, app)
             opens = [body for path, body in app.desk.session.posts if path.endswith("/runs")]
             assert opens[-1].get("thesis_id") == "th1"
-            assert any("thesis" in line and "momentum" in line for line in app.transcript)
+            assert not any("thesis  momentum" in line for line in app.transcript)
 
             field.value = "thesis clear"
             await pilot.press("enter")
@@ -178,7 +179,8 @@ def test_one_thesis_is_pinned_at_sign_in() -> None:
             await pilot.pause()
             assert app.desk.thesis is not None
             assert app.desk.thesis["id"] == "th1"
-            assert "momentum" in app.rail_text
+            assert "momentum" not in app.status_text
+            assert "thesis" not in app.status_text.lower()
 
     asyncio.run(body())
 
@@ -221,8 +223,8 @@ def test_a_signed_in_account_loads_its_one_stored_universe() -> None:
             await pilot.pause()
             assert app.desk.loaded == "universe:sp500"
             assert "AAPL" in app.desk.data
-            assert "stored" in app.rail_text
-            assert any("portal" in line for line in app.transcript)
+            assert "universe:sp500" in app.status_text
+            assert app.transcript == []
 
     asyncio.run(body())
 
@@ -233,8 +235,8 @@ def test_several_stored_universes_are_named_and_not_guessed() -> None:
         async with app.run_test(size=(140, 42)) as pilot:
             await pilot.pause()
             assert app.desk.data is None
-            text = "\n".join(app.transcript)
-            assert "sp500" in text and "ndx" in text
+            assert "sp500" in app.status_text and "ndx" in app.status_text
+            assert app.transcript == []
 
     asyncio.run(body())
 
