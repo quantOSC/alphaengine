@@ -84,6 +84,49 @@ def test_events_never_include_the_prompt_or_the_key(monkeypatch):
     assert seen[0]["prompt_chars"] == len("a prompt that must not be logged")
 
 
+def test_a_replaced_key_is_the_one_sent(monkeypatch):
+    """The closure must not keep the key it saw at build time."""
+    import sys
+    import types
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-old")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("alphaengine.model._sdk_present", lambda label: label == "openai")
+    sent: dict[str, str] = {}
+
+    class _Msg:
+        content = "ok"
+
+    class _Choice:
+        message = _Msg()
+
+    class _Out:
+        choices = [_Choice()]
+
+    class _Completions:
+        @staticmethod
+        def create(**_kwargs):
+            return _Out()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        def __init__(self, **kwargs):
+            sent["api_key"] = kwargs["api_key"]
+
+        chat = _Chat()
+
+    fake = types.ModuleType("openai")
+    fake.OpenAI = _Client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "openai", fake)
+
+    think, _label = build_think()
+    monkeypatch.setenv("OPENAI_API_KEY", '  "Bearer sk-new-key"  ')
+    assert think("hello") == "ok"
+    assert sent["api_key"] == "sk-new-key"
+
+
 def test_provider_labels_cover_the_gateways():
     labels = provider_labels()
     for name in ("anthropic", "openai", "azure", "gemini", "groq", "openrouter", "gateway"):

@@ -76,6 +76,8 @@ class Desk:
     trace_stack: list[str] = field(default_factory=list)
     question: str = ""
     bakeoff_done: bool = False
+    # True when `think` was built from the keys on this process, so a new paste replaces it.
+    think_from_key: bool = False
 
 
 def submit(desk: Desk, line: str) -> bool:
@@ -317,6 +319,9 @@ def _logout(desk: Desk) -> None:
     desk.pending_provider = False
     desk.held_key = None
     desk.pinned_model = None
+    if desk.think_from_key:
+        desk.think = None
+        desk.think_from_key = False
     desk.thesis = None
     desk.thesis_declined = False
     if str(desk.loaded or "").startswith("universe:"):
@@ -1004,14 +1009,22 @@ def _session_prior(desk: Desk) -> str | None:
 
 
 def _thinker(desk: Desk) -> Callable[[str], str] | None:
-    """The session's model, built once. No key means the catalogue path explains it."""
-    if desk.think is not None:
+    """The session's model. A key pasted into this process replaces the previous one.
+
+    A `think` handed in from outside (a test, a caller) is kept. One this session
+    built is dropped when the key changes, and the call itself reads the key
+    again so a stale closure cannot keep sending the refused secret.
+    """
+    if desk.think is not None and not desk.think_from_key:
         return desk.think
     from ..model import NoModelConfigured, build_think
 
     try:
         think, _label = build_think()
     except NoModelConfigured:
+        desk.think = None
+        desk.think_from_key = False
         return None
     desk.think = think
+    desk.think_from_key = True
     return think

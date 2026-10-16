@@ -39,30 +39,27 @@ Screen { background: #0b0d10; }
 #column {
     height: 1fr;
     width: 100%;
-    align: center top;
     background: #0b0d10;
+    padding: 0 2;
 }
 #empty {
-    width: 76;
-    max-width: 100%;
+    width: 100%;
     height: 1fr;
     content-align: center middle;
     text-align: center;
     color: #6b7380;
 }
 #transcript {
-    width: 76;
-    max-width: 100%;
+    width: 100%;
     height: 1fr;
     background: #0b0d10;
     padding: 1 0 0 0;
     display: none;
 }
 #inspector {
-    width: 76;
-    max-width: 100%;
+    width: 100%;
     height: auto;
-    max-height: 14;
+    max-height: 16;
     background: #0b0d10;
     padding: 0 0 1 0;
     display: none;
@@ -74,13 +71,11 @@ Screen { background: #0b0d10; }
 #prompt-row {
     dock: bottom;
     height: 7;
-    align: center middle;
     background: #0b0d10;
-    padding: 1 0;
+    padding: 1 2;
 }
 #prompt {
-    width: 72;
-    max-width: 100%;
+    width: 100%;
     height: 5;
     padding: 1 2;
     border: tall #3d7ea6;
@@ -374,7 +369,16 @@ class QuantOSApp(App[None]):
         self._store_credential(_KEY_PROMPTS[which][0], value, log, prompt)
 
     def _store_credential(self, env: str, value: str, log: RichLog, prompt: Input) -> None:
+        from ..model import _clean_key
+
+        value = _clean_key(value)
+        if not value:
+            log.write("nothing entered.")
+            return
         os.environ[env] = value
+        if self.desk.think_from_key:
+            self.desk.think = None
+            self.desk.think_from_key = False
         if env == "QUANTOS_API_KEY":
             from ..cli import _session
 

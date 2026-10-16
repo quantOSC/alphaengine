@@ -143,12 +143,35 @@ def _spec_by_label(label: str) -> _Spec | None:
     return None
 
 
+def _clean_key(value: str) -> str:
+    """The secret itself. Quotes, a Bearer prefix, and surrounding space stay out of the header."""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', "'"}:
+        text = text[1:-1].strip()
+    if text.lower().startswith("bearer "):
+        text = text[7:].strip()
+    return text
+
+
 def _key_for(spec: _Spec) -> str | None:
     for name in spec.env_keys:
-        value = os.environ.get(name)
+        raw = os.environ.get(name)
+        if not raw:
+            continue
+        value = _clean_key(raw)
         if value:
             return value
     return None
+
+
+def _require_key(spec: _Spec) -> str:
+    """The key on this process at call time. A key closed over at build time is already stale."""
+    found = _key_for(spec)
+    if found:
+        return found
+    raise NoModelConfigured(
+        f"No {spec.label} key on this process. Type `enter model key` and paste the new one."
+    )
 
 
 def _base_for(spec: _Spec) -> str | None:
@@ -370,16 +393,22 @@ def _build_for(
     model: str,
     on_token: Callable[[str], None] | None,
 ) -> Callable[[str], str]:
+    if not key:
+        raise NoModelConfigured(f"No {spec.label} key on this process.")
     if spec.kind == "anthropic":
-        return _anthropic(key, model, on_token)
+        return _anthropic(spec, model, on_token)
     if spec.kind == "azure":
         endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT") or ""
         version = os.environ.get("AZURE_OPENAI_API_VERSION") or "2024-06-01"
-        return _azure(key, model, endpoint, version, on_token)
-    return _openai_compat(key, model, _base_for(spec), on_token)
+        return _azure(spec, model, endpoint, version, on_token)
+    return _openai_compat(spec, model, _base_for(spec), on_token)
 
 
-def _anthropic(key: str, model: str, on_token: Callable[[str], None] | None = None) -> Callable[[str], str]:
+def _anthropic(
+    spec: _Spec,
+    model: str,
+    on_token: Callable[[str], None] | None = None,
+) -> Callable[[str], str]:
     def think(prompt: str) -> str:
         try:
             # No inline ignore. The SDK is deliberately NOT a dependency, so on
@@ -393,7 +422,7 @@ def _anthropic(key: str, model: str, on_token: Callable[[str], None] | None = No
             raise NoModelConfigured(
                 "ANTHROPIC_API_KEY is set but the SDK is not installed: pip install anthropic"
             ) from exc
-        client = anthropic.Anthropic(api_key=key)
+        client = anthropic.Anthropic(api_key=_require_key(spec))
         # `Any` because the two calls return different concrete types that the
         # SDK does not unify — `Message` and `ParsedMessage[None]` — and the
         # only thing read off either is the text blocks, which both carry.
@@ -429,7 +458,7 @@ def _anthropic(key: str, model: str, on_token: Callable[[str], None] | None = No
 
 
 def _openai_compat(
-    key: str,
+    spec: _Spec,
     model: str,
     base_url: str | None,
     on_token: Callable[[str], None] | None = None,
@@ -441,7 +470,8 @@ def _openai_compat(
             raise NoModelConfigured(
                 "An OpenAI-compatible key is set but the SDK is not installed: pip install openai"
             ) from exc
-        kwargs: dict[str, Any] = {"api_key": key}
+        # Read the env again. The key pasted after a 401 has to be the one on the wire.
+        kwargs: dict[str, Any] = {"api_key": _require_key(spec)}
         if base_url:
             kwargs["base_url"] = base_url
         client = openai.OpenAI(**kwargs)
@@ -451,7 +481,7 @@ def _openai_compat(
 
 
 def _azure(
-    key: str,
+    spec: _Spec,
     model: str,
     endpoint: str,
     api_version: str,
@@ -469,7 +499,9 @@ def _azure(
                 "AZURE_OPENAI_API_KEY is set and AZURE_OPENAI_ENDPOINT is not. "
                 "Export the Azure resource endpoint, then retry."
             )
-        client = openai.AzureOpenAI(api_key=key, azure_endpoint=endpoint, api_version=api_version)
+        client = openai.AzureOpenAI(
+            api_key=_require_key(spec), azure_endpoint=endpoint, api_version=api_version
+        )
         return _chat(client, model, prompt, on_token)
 
     return think
