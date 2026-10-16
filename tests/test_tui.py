@@ -91,12 +91,57 @@ def test_boot_is_a_blank_column_with_the_account_on_the_status_line() -> None:
             await pilot.pause()
             assert "signed in" in app.status_text
             assert "sp500" in app.status_text
+            assert "1 name" in app.status_text
+            assert "40 obs" in app.status_text
             assert "thesis" not in app.status_text.lower()
             assert not app.query("#rail")
             assert not app.query("#stage")
-            assert "alphaengine" in app.empty_text
+            assert "ALPHAENGINE" in app.empty_text.replace(" ", "")
+            assert "1.0.0" in app.empty_text
+            assert "use /details for a look at important commands" in app.empty_text
             prompt = app.query_one(Input)
             assert str(prompt.placeholder).startswith("Ask")
+
+    asyncio.run(body())
+
+
+def test_the_seal_turns_and_keeps_the_wordmark() -> None:
+    from alphaengine.tui.mark import details_text, seal
+
+    still = seal(0.0).plain
+    turned = seal(2.0).plain
+    assert still != turned
+    assert "1.0.0" in still
+    assert "use /details for a look at important commands" in still
+    assert "the research loop, on your machine" in still
+    card = details_text().plain
+    assert "login" in card and "view" in card
+    assert "diagnose" not in card and "correlation" not in card
+
+
+def test_details_opens_over_the_mark_and_view_lists_the_book() -> None:
+    async def body() -> None:
+        app = QuantOSApp(session=_DeskSession(), url="fake://", data=_returns(), keyed=True, think=_think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await pilot.pause()
+            field = app.query_one(Input)
+            field.focus()
+            field.value = "/details"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.turns == 0
+            assert app.screen.query("#card")
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app.transcript == []
+
+            field = app.query_one(Input)
+            field.focus()
+            field.value = "view"
+            await pilot.press("enter")
+            await _wait(pilot, app)
+            assert any("sp500" in line for line in app.transcript)
+            assert not any("sqrt" in line for line in app.transcript)
 
     asyncio.run(body())
 
@@ -224,6 +269,8 @@ def test_a_signed_in_account_loads_its_one_stored_universe() -> None:
             assert app.desk.loaded == "universe:sp500"
             assert "AAPL" in app.desk.data
             assert "universe:sp500" in app.status_text
+            assert "1 name" in app.status_text
+            assert "4 obs" in app.status_text
             assert app.transcript == []
 
     asyncio.run(body())

@@ -220,9 +220,10 @@ def submit(desk: Desk, line: str) -> bool:
     if verb in ("key", "keys", "login"):
         _key(desk, rest)
         return False
+    if verb == "view":
+        _view(desk)
+        return False
     if verb == "status":
-        if desk.thesis:
-            say(dim(f"thesis {thesis_label(desk.thesis)}"))
         if desk.last is None:
             say(dim("no run yet"))
         else:
@@ -323,6 +324,47 @@ def _logout(desk: Desk) -> None:
         desk.backtest_fn = None
         desk.loaded = None
     desk.account_dirty = True
+
+
+def _view(desk: Desk) -> None:
+    """The books on the account. Names and shape. No series."""
+    if not desk.keyed:
+        say("not signed in")
+        say(dim("login signs this machine into the account"))
+        return
+    try:
+        rows = desk.session.universes()
+    except (Offline, ServerError) as exc:
+        say(str(exc))
+        return
+    except Exception as exc:  # noqa: BLE001 — a refusal still has to be readable
+        say(str(exc))
+        return
+    shown = False
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or row.get("id") or "")
+        if not name:
+            continue
+        raw_definition = row.get("definition")
+        definition: dict[str, Any] = raw_definition if isinstance(raw_definition, dict) else {}
+        symbols = definition.get("symbols") or []
+        n = len(symbols) if isinstance(symbols, list) else 0
+        raw_obs = definition.get("n_obs")
+        obs = int(raw_obs) if isinstance(raw_obs, (int, float)) and not isinstance(raw_obs, bool) else 0
+        bits = [name]
+        if n:
+            bits.append("1 name" if n == 1 else f"{n} names")
+        if obs:
+            bits.append(f"{obs} obs")
+        bits.append("stored" if definition.get("cache_id") else "on the account")
+        say("  ".join(bits))
+        shown = True
+    if not shown:
+        say("no books on this account")
+    if desk.loaded:
+        say(dim(f"loaded  {desk.loaded}"))
 
 
 def _key(desk: Desk, rest: str) -> None:

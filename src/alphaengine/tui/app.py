@@ -9,12 +9,16 @@ import time
 from typing import Any
 
 from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, ListItem, ListView, RichLog, Static
 
+from .._version import __version__
 from ..cli import narration_to, resolve_data, thesis_id_of
 from .dispatch import Desk, submit
+from .mark import details_text, seal
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -69,12 +73,31 @@ Screen { background: #0b0d10; }
 #series { height: 8; }
 #prompt-row {
     dock: bottom;
-    height: 3;
+    height: 7;
     align: center middle;
     background: #0b0d10;
-    padding: 0 0 1 0;
+    padding: 1 0;
 }
-#prompt { width: 76; max-width: 100%; }
+#prompt {
+    width: 72;
+    max-width: 100%;
+    height: 5;
+    padding: 1 2;
+    border: tall #3d7ea6;
+    background: #12151a;
+    color: #e6edf3;
+}
+Details { align: center middle; background: #0b0d1080; }
+#card {
+    width: 64;
+    height: auto;
+    background: #10141a;
+    border: tall #3d7ea6;
+    padding: 1 2;
+}
+#card-title { color: #9ecbff; text-align: center; height: 1; }
+#card-body { height: auto; color: #c5cdd6; }
+#card-foot { color: #6b7380; text-align: center; height: 1; }
 """
 
 
@@ -82,11 +105,42 @@ def _plain(text: str) -> str:
     return _ANSI.sub("", text)
 
 
+def _series_shape(data: Any) -> tuple[int, int] | None:
+    """Names and observations on the machine. None when nothing countable is loaded."""
+    if isinstance(data, dict):
+        series = [values for values in data.values() if isinstance(values, list)]
+        if series:
+            return len(series), max(len(values) for values in series)
+    if isinstance(data, list) and data and isinstance(data[0], (int, float)):
+        return 1, len(data)
+    return None
+
+
 def _fit(text: str, width: int = 22) -> str:
     text = " ".join(str(text).split())
     if len(text) <= width:
         return text
     return text[: width - 1] + "…"
+
+
+class Details(ModalScreen[None]):
+    """Housekeeping. Esc, enter, or q closes it."""
+
+    BINDINGS = [("escape", "close", "Close")]
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="card"):
+            yield Static("details", id="card-title")
+            yield Static(details_text(), id="card-body")
+            yield Static("esc closes", id="card-foot")
+
+    def action_close(self) -> None:
+        self.dismiss()
+
+    def on_key(self, event: events.Key) -> None:
+        if event.key in {"enter", "escape", "q"}:
+            self.dismiss()
+            event.stop()
 
 
 class QuantOSApp(App[None]):
@@ -118,7 +172,7 @@ class QuantOSApp(App[None]):
             think=think,
             keyed=keyed,
         )
-        self._universes: list[str] = []
+        self._books: list[dict[str, Any]] = []
         self._lines: list[dict[str, Any]] = []
         self.busy = False
         self.activity = ""
@@ -146,6 +200,7 @@ class QuantOSApp(App[None]):
     def on_mount(self) -> None:
         self.query_one("#series", DataTable).cursor_type = "row"
         self.query_one(Input).focus()
+        self._stage_timer = self.set_interval(0.16, self._tick)
         self._sync_account()
 
     def on_unmount(self) -> None:
@@ -167,15 +222,12 @@ class QuantOSApp(App[None]):
         models = available_models() if keyed else []
         parts: list[tuple[str, str]] = [
             ("quantOS", "bold #9ecbff"),
-            ("1.0", "#6b7380"),
+            (__version__, "#6b7380"),
             ("signed in" if keyed else "not signed in", "#c5cdd6" if keyed else "#e6b450"),
         ]
-        if self.desk.loaded:
-            parts.append((self.desk.loaded, "#e6edf3"))
-        elif self.desk.data is not None:
-            parts.append(("data loaded", "#e6edf3"))
-        if self._universes and not str(self.desk.loaded or "").startswith("universe:"):
-            parts.append(("  ".join(self._universes[:4]), "#8b949e"))
+        detail = self._account_detail()
+        if detail:
+            parts.append((detail, "#e6edf3"))
         if models:
             parts.append((models[0][0], "#8b949e"))
         if working or self.busy:
@@ -206,11 +258,41 @@ class QuantOSApp(App[None]):
             transcript.display = not show
         if not show:
             return
-        mark = Text(justify="center")
-        mark.append("alphaengine\n", style="bold #9ecbff")
-        mark.append("1.0", style="#6b7380")
+        mark = seal(time.monotonic())
         self.empty_text = mark.plain
         node.update(mark)
+
+    def _account_detail(self) -> str:
+        """The book the portal handed over, and the shape now on this machine."""
+        loaded = str(self.desk.loaded or "")
+        name = loaded.split(":", 1)[1] if loaded.startswith("universe:") else ""
+        book = next((row for row in self._books if row["name"] == name), None)
+        shape = _series_shape(self.desk.data)
+        n = shape[0] if shape else (int(book["names"]) if book else 0)
+        obs = shape[1] if shape else (int(book["obs"]) if book else 0)
+        if loaded.startswith("universe:"):
+            bits = [loaded]
+            if n:
+                bits.append("1 name" if n == 1 else f"{n} names")
+            if obs:
+                bits.append(f"{obs} obs")
+            return " · ".join(bits)
+        bits = []
+        if shape:
+            bits.append("1 name" if n == 1 else f"{n} names")
+            bits.append(f"{obs} obs")
+        elif self.desk.data is not None:
+            bits.append("data loaded")
+        if self._books:
+            shown = []
+            for row in self._books[:4]:
+                piece = str(row["name"])
+                count = int(row["names"])
+                if count:
+                    piece += " · 1 name" if count == 1 else f" · {count} names"
+                shown.append(piece)
+            bits.append("  ".join(shown))
+        return " · ".join(bits)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
@@ -226,6 +308,9 @@ class QuantOSApp(App[None]):
         if self.desk.pending_url:
             self._accept_url(text)
             return
+        if text.lower() in {"/details", "details"}:
+            self.push_screen(Details())
+            return
         self.turns += 1
         self.busy = True
         self.activity = text
@@ -234,7 +319,6 @@ class QuantOSApp(App[None]):
         prompt.disabled = True
         self._reveal_trace()
         self._paint_status(working=True)
-        self._start_motion()
         self.query_one("#transcript", RichLog).write(f"> {text}")
 
         def go() -> None:
@@ -375,14 +459,26 @@ class QuantOSApp(App[None]):
             rows = self.desk.session.universes()
         except Exception:  # noqa: BLE001 — offline or unsigned still boots
             rows = []
-        names: list[str] = []
+        books: list[dict[str, Any]] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
             name = str(row.get("name") or row.get("id") or "")
-            if name:
-                names.append(name)
-        self._universes = names
+            if not name:
+                continue
+            raw_definition = row.get("definition")
+            definition = raw_definition if isinstance(raw_definition, dict) else {}
+            symbols = definition.get("symbols") or []
+            raw_obs = definition.get("n_obs")
+            obs = int(raw_obs) if isinstance(raw_obs, (int, float)) and not isinstance(raw_obs, bool) else 0
+            books.append(
+                {
+                    "name": name,
+                    "names": len(symbols) if isinstance(symbols, list) else 0,
+                    "obs": obs,
+                }
+            )
+        self._books = books
 
         if self.desk.data is None and self.desk.keyed:
             with narration_to(sink):
@@ -409,16 +505,12 @@ class QuantOSApp(App[None]):
                 log.write(plain)
         self._refresh_rail()
 
-    def _start_motion(self) -> None:
-        if self._stage_timer is not None:
+    def _tick(self) -> None:
+        if self.busy:
+            self._paint_status(working=True)
             return
-        self._stage_timer = self.set_interval(0.25, self._paint_working)
-
-    def _stop_motion(self) -> None:
-        timer = self._stage_timer
-        if timer is not None:
-            timer.stop()
-            self._stage_timer = None
+        if self.turns == 0 and not self.transcript:
+            self._paint_empty()
 
     def _paint_working(self) -> None:
         if self.busy:
@@ -458,7 +550,6 @@ class QuantOSApp(App[None]):
         self.call_from_thread(self._finish, quitting)
 
     def _finish(self, quitting: bool) -> None:
-        self._stop_motion()
         self.busy = False
         self.activity = ""
         prompt = self.query_one(Input)
