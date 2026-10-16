@@ -153,15 +153,23 @@ def _known_downloads() -> Path | None:
 
 
 def _windows_downloads() -> Path | None:
+    """The Windows Downloads folder. Looked up by attribute so Linux type checks."""
     try:
         import winreg
-
-        with winreg.OpenKey(
-            winreg.HKEY_CURRENT_USER,
+    except ImportError:
+        return None
+    open_key = getattr(winreg, "OpenKey", None)
+    query = getattr(winreg, "QueryValueEx", None)
+    hive = getattr(winreg, "HKEY_CURRENT_USER", None)
+    if open_key is None or query is None or hive is None:
+        return None
+    try:
+        with open_key(
+            hive,
             r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
         ) as key:
-            raw, _ = winreg.QueryValueEx(key, _DOWNLOADS_GUID)
-    except (ImportError, OSError):
+            raw, _ = query(key, _DOWNLOADS_GUID)
+    except OSError:
         return None
     if not isinstance(raw, str) or not raw.strip():
         return None
