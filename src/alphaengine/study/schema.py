@@ -107,7 +107,7 @@ class Study:
         label: str = "",
         data_description: str = "",
         notes: str = "",
-        risk_free_rate: float = 0.0,
+        risk_free_rate: float | None = None,
     ) -> Study:
         """Build a study from a SweepResult.
 

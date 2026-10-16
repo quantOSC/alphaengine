@@ -47,6 +47,7 @@ from .process import (
     ou_simulate,
 )
 from .profile import profile_data
+from .rates import TREASURY_BILL_AS_OF, TREASURY_BILL_RATE, TREASURY_BILL_SERIES
 from .risk import compute_var_cvar
 from .screen import screen_universe
 from .series_shapes import series_values
@@ -72,6 +73,9 @@ __all__ = [
     "cpcv_score",
     # performance and risk
     "performance_report",
+    "TREASURY_BILL_RATE",
+    "TREASURY_BILL_AS_OF",
+    "TREASURY_BILL_SERIES",
     "compute_var_cvar",
     # simulation and scoring
     "run_backtest",

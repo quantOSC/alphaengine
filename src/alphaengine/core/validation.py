@@ -20,6 +20,7 @@ import math
 import numpy as np
 from scipy import stats
 
+from .rates import cash_rate, rate_fields
 from .trace import record
 
 _EULER = 0.5772156649015329
@@ -31,7 +32,8 @@ _EULER = 0.5772156649015329
 def _per_period_sharpe(returns: np.ndarray, *, risk_free_per_period: float = 0.0) -> float:
     """Mean excess over a constant per-period cash rate, divided by sample vol.
 
-    A rate of 0 is excess of zero, not a Treasury bill. Vol is the sample
+    An explicit 0 is excess of zero. The bill, when one is used, is subtracted
+    by the caller before this function sees the series. Vol is the sample
     standard deviation of the returns (ddof=1); subtracting a constant does
     not change it, or the skew, or the kurtosis.
     """
@@ -79,7 +81,7 @@ def deflated_sharpe(
     *,
     n_trials: int,
     trials_sharpe_std: float | None = None,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: float | None = None,
     periods_per_year: int = 252,
 ) -> dict:
     """Deflated Sharpe Ratio for a return stream.
@@ -96,7 +98,8 @@ def deflated_sharpe(
         return {"error": "need >= 8 observations", "n_obs": int(n)}
 
     ppy = max(int(periods_per_year), 1)
-    rf_per = float(risk_free_rate) / ppy
+    annual, _, _ = cash_rate(risk_free_rate)
+    rf_per = annual / ppy
     sr = _per_period_sharpe(arr, risk_free_per_period=rf_per)
     skew = float(stats.skew(arr, bias=False)) if n > 2 else 0.0
     kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
@@ -114,7 +117,7 @@ def deflated_sharpe(
         "n_trials": int(n_trials),
         "sharpe_per_period": round(sr, 4),
         "sharpe_annualized": round(sr * math.sqrt(ppy), 4),
-        "risk_free_rate": round(float(risk_free_rate), 4),
+        **rate_fields(risk_free_rate),
         "periods_per_year": ppy,
         "skew": round(skew, 4),
         "kurtosis": round(kurt, 4),
@@ -154,7 +157,7 @@ def min_track_record_length(
     *,
     sr_benchmark: float = 0.0,
     confidence: float = 0.95,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: float | None = None,
     periods_per_year: int = 252,
 ) -> dict:
     """Minimum Track Record Length (Bailey & López de Prado, 2012): the number of
@@ -170,11 +173,14 @@ def min_track_record_length(
     if n < 8:
         return {"error": "need >= 8 observations", "n_obs": int(n)}
     ppy = max(int(periods_per_year), 1)
-    sr = _per_period_sharpe(arr, risk_free_per_period=float(risk_free_rate) / ppy)
+    annual, _, _ = cash_rate(risk_free_rate)
+    sr = _per_period_sharpe(arr, risk_free_per_period=annual / ppy)
     if sr <= sr_benchmark:
         return {
             "n_obs": int(n),
             "sharpe_per_period": round(sr, 4),
+            **rate_fields(risk_free_rate),
+            "periods_per_year": ppy,
             "min_track_record_length": None,
             "sufficient": False,
             "note": "observed Sharpe <= benchmark; not distinguishable at any length",
@@ -190,7 +196,7 @@ def min_track_record_length(
         "confidence": confidence,
         "min_track_record_length": round(mintrl, 1),
         "min_track_record_years": round(mintrl / ppy, 2),
-        "risk_free_rate": round(float(risk_free_rate), 4),
+        **rate_fields(risk_free_rate),
         "periods_per_year": ppy,
         "sufficient": bool(n >= mintrl),
         "shortfall_obs": max(0, int(math.ceil(mintrl - n))),
@@ -295,7 +301,7 @@ def cpcv_score(
     embargo: int = 1,
     n_trials: int = 1,
     max_paths: int = 2000,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: float | None = None,
     periods_per_year: int = 252,
 ) -> dict:
     """Combinatorial Purged Cross-Validation (López de Prado, 2018) on ONE return
@@ -357,9 +363,8 @@ def cpcv_score(
         if path.size < 2:
             continue
         ppy = max(int(periods_per_year), 1)
-        sharpes.append(
-            _per_period_sharpe(path, risk_free_per_period=float(risk_free_rate) / ppy) * math.sqrt(ppy)
-        )
+        annual, _, _ = cash_rate(risk_free_rate)
+        sharpes.append(_per_period_sharpe(path, risk_free_per_period=annual / ppy) * math.sqrt(ppy))
         if path.size >= 8:
             try:
                 d = deflated_sharpe(
@@ -390,7 +395,7 @@ def cpcv_score(
         "purge": purge,
         "embargo": embargo,
         "n_trials": int(n_trials),
-        "risk_free_rate": round(float(risk_free_rate), 4),
+        **rate_fields(risk_free_rate),
         "periods_per_year": max(int(periods_per_year), 1),
         "n_paths": int(sh.size),
         # LdP's reconstructed-path count, reported for reference.

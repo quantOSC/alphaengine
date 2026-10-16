@@ -52,8 +52,24 @@ def _values(series: Any) -> list[float] | None:
 
 
 def _looks_like_prices(values: list[float]) -> bool:
-    """Closes sit well above 1. A return series does not."""
-    return any(abs(v) > 1.5 for v in values)
+    """A close is positive and usually moves by much less than its own level.
+
+    A return can be negative, so any non-positive print is a return. A level
+    whose median is above 1.5 is a price even when one bar gaps by half,
+    which keeps a split from being read as a return of 100. A name trading
+    under $1.50 is still a price when the path is calm: at least four fifths
+    of the consecutive ratios sit in (0.5, 1.5) and the median is above five
+    cents. A flat one-percent return series stays a return series.
+    """
+    if any(v <= 0 for v in values):
+        return False
+    if float(np.median(values)) > 1.5:
+        return True
+    if len(values) < 2 or float(np.median(values)) <= 0.05:
+        return False
+    ratios = [values[i] / values[i - 1] for i in range(1, len(values))]
+    calm = sum(1 for ratio in ratios if 0.5 < ratio < 1.5) / len(ratios)
+    return calm >= 0.8
 
 
 def _to_returns(values: list[float]) -> list[float] | None:

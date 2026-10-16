@@ -120,7 +120,7 @@ class SweepResult:
     def best(self) -> Trial:
         return max((t for t in self.trials if t.failed is None), key=lambda t: t.sharpe)
 
-    def verdict(self, *, risk_free_rate: float = 0.0) -> dict[str, Any]:
+    def verdict(self, *, risk_free_rate: float | None = None) -> dict[str, Any]:
         """Deflate the best result for the search that actually produced it.
 
         PBO is reported alongside but is NOT the gate. It answers a different

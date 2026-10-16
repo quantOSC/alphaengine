@@ -1,10 +1,10 @@
 """
 Performance, risk-adjusted metrics over a supplied return stream.
 
-Pure math, no data layer, no FRED. The risk-free rate is an explicit parameter
-(default 0.0) so results are reproducible and the no-fetch invariant holds, the
-upstream backend performance.py fetched the 3-month T-bill from FRED, which is
-exactly the landmine this copy removes.
+Pure math, no data layer, no download. An omitted cash rate is the pinned
+H.15 3-month Treasury constant maturity in ``core.rates``, not a fetch and
+not zero. Pass ``risk_free_rate`` to use another print. Pass ``0`` only when
+the study is genuinely excess of zero.
 
 Sharpe, Sortino, Calmar, max drawdown, total/annualized return, VaR/CVaR(95),
 and alpha/beta/information-ratio when a benchmark return series is supplied.
@@ -18,6 +18,7 @@ import math
 
 import numpy as np
 
+from .rates import cash_rate, rate_fields
 from .trace import record
 
 _PPY = 252  # trading periods per year
@@ -48,13 +49,14 @@ def performance_report(
     *,
     equity_curve: list[float] | None = None,
     benchmark_returns: list[float] | None = None,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: float | None = None,
     periods_per_year: int = _PPY,
 ) -> dict:
     """Risk-adjusted performance metrics for a daily return series (decimals).
 
-    `risk_free_rate` is ANNUAL (e.g. 0.04); supply it explicitly, the engine
-    never fetches it. Loss metrics are positive magnitudes.
+    `risk_free_rate` is ANNUAL. Omitted, it is the pinned H.15 3-month
+    Treasury (see ``core.rates``). The engine does not fetch a rate. Loss
+    metrics are positive magnitudes.
     """
     arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
     n = arr.size
@@ -62,7 +64,8 @@ def performance_report(
         return {"error": "need >= 30 observations", "n_obs": int(n)}
 
     ppy = int(periods_per_year)
-    rf_per = float(risk_free_rate) / ppy
+    annual, _, _ = cash_rate(risk_free_rate)
+    rf_per = annual / ppy
     excess = arr - rf_per
     sd = float(arr.std(ddof=1))
 
@@ -106,7 +109,7 @@ def performance_report(
         "var_95": _clean(round(var95, 4)),  # positive daily loss fraction
         "cvar_95": _clean(round(cvar95, 4)),
         "volatility_annualized_pct": _clean(round(sd * math.sqrt(ppy) * 100, 2)),
-        "risk_free_rate": round(float(risk_free_rate), 4),
+        **rate_fields(risk_free_rate),
         "periods_per_year": ppy,
         "return_annualization": "geometric",
         "alpha_annualization": "arithmetic",
@@ -127,7 +130,7 @@ def performance_report(
             out["alpha_annualized_pct"] = _clean(round(alpha_per * ppy * 100, 2))
             out["information_ratio"] = _clean(round(ir, 4))
 
-    shared = {"n_obs": int(n), "risk_free_rate": float(risk_free_rate), "periods_per_year": ppy}
+    shared = {"n_obs": int(n), "risk_free_rate": annual, "periods_per_year": ppy}
     record(
         "sharpe_annualized",
         "mean(r - rf/ppy) / std(r, ddof=1) * sqrt(ppy)",

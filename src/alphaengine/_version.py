@@ -113,9 +113,28 @@ is what a changed figure costs. The API may still move underneath it.
 # at unit capital, so a loss on the first bar counts. Grinold alpha is empty
 # when no volatility is supplied, instead of treating every name as vol 1.
 # Breadth does not imply an IR until the names are declared independent or a
-# mean correlation is supplied.
+# mean correlation is supplied. The same release answers a later question
+# from the session record, and builds a portfolio (hierarchical risk parity,
+# or risk parity when asked) from the loaded returns. Those two add no
+# figure to the goldens.
 #
-# The same release answers a later question from the session record, and
-# builds a portfolio (hierarchical risk parity, or risk parity when asked)
-# from the loaded returns. Those two add no figure to the goldens.
-__version__ = "0.10.0"
+# 0.11.0 MOVES THE CASH RATE, ON PURPOSE. An omitted rate is the H.15
+# 3-month Treasury constant maturity, investment basis, 4.21% as of
+# 2026-10-06 (DGS3MO). It is a pinned print, not a download. Pass 0 for
+# excess of zero. Sharpe, Sortino, the deflated Sharpe, and PSR versus a
+# Sharpe of zero all move because the excess is no longer the raw return.
+# The five-trial golden crosses from marginal to likely_noise (0.5090 to
+# 0.427). sr0 moves slightly because its sampling-error floor depends on
+# the Sharpe. Drawdown, total return, geometric CAGR, volatility, and PBO
+# do not use the rate and stay. HAC lags are the Newey-West automatic rule,
+# so a factor t-stat on a short sample uses fewer than five lags and reports
+# the lag it chose. A close below $1.50 is still a price when the path is
+# calm. The cointegration screen reports Benjamini-Hochberg survivors;
+# the single-test flag remains on the pair as cointegrated_raw.
+#
+# 1.0.0 IS THE FIRST RELEASE. Everything through 0.11 was the beta: the
+# maths, the session, the airlock. 1.0 is the simulator. A sentence is a
+# stack of tool calls. The trace is the product, drawn while the tools
+# run. A report file is written on this machine only when the user
+# accepts it. The golden figures stay the 0.11 contract.
+__version__ = "1.0.0"

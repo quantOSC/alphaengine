@@ -1,7 +1,8 @@
 """One line of the session.
 
-`run <workflow>` is scripted. Anything else is a sentence, and the model may
-only choose among workflows and steps the server already permitted.
+A sentence is a stack of tool calls. The model chooses the tools. The math
+runs locally. `run <workflow>` still opens a portal workflow by name, and
+the workflow tool does the same thing from inside a sentence.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ from ..cli import (
     QUESTION_VERBS,
     ProjectError,
     _apply_flags,
-    _ask,
     _describe_source,
     _drive,
     _explain_offline,
@@ -72,6 +72,8 @@ class Desk:
     matrix: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
     portfolio: dict[str, Any] | None = None
+    pending_report: Any = None
+    trace_stack: list[str] = field(default_factory=list)
 
 
 def submit(desk: Desk, line: str) -> bool:
@@ -79,6 +81,18 @@ def submit(desk: Desk, line: str) -> bool:
     line = line.strip()
     if not line:
         return False
+    if desk.pending_report is not None:
+        answer = line.lower()
+        if answer in {"yes", "y", "save", "download"}:
+            path = desk.pending_report.save()
+            desk.pending_report = None
+            say(f"  report  {path}")
+            return False
+        if answer in {"no", "n"}:
+            desk.pending_report = None
+            say(dim("  report left unwritten"))
+            return False
+        desk.pending_report = None
 
     line, inline_flags = _extract_flags(line)
     # `--symbol` on check_overlap must not collapse the universe before the
@@ -632,55 +646,184 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
 
 
 def _sentence(desk: Desk, line: str) -> None:
-    from ..cli import _apply_flags as apply_flags
-    from ..cli import _stored_universes, _universe_named_in
-    from ..context import consider
+    """A sentence is a stack of tool calls. The model picks them. The trace is the run."""
+    from ..agent.sim import run_tools
 
-    if _local_request(desk, line):
+    think = _thinker(desk)
+    if think is None:
+        say("A scenario is a stack of tool calls. Enter a model key and the harness will choose them.")
         return
 
-    if desk.data is None:
-        named = _universe_named_in(line, desk.session)
-        if not named:
-            named, _ready = _stored_universes(desk.session)
-        if named:
-            try:
-                desk.data, desk.backtest_fn = apply_flags(
-                    ["--universe", named], desk.session, desk.data, desk.backtest_fn
-                )
-                desk.loaded = f"universe:{named}"
-                _remember(desk, _loaded_note(desk))
-            except Exception as exc:  # noqa: BLE001
-                say(dim(f"  ({named} is registered and could not be loaded: {exc})"))
-        if _local_request(desk, line):
-            return
+    desk.trace_stack = []
 
-    # A generic question reads the session first. A reply of "workflow" means
-    # the notes do not answer it, and the catalogue path below still runs.
-    kind, text = consider(line, desk.notes, _thinker(desk))
-    if kind == "answer":
-        say(text)
-        return
-    if kind == "refuse":
-        say(yellow(text))
-        return
+    def on_call(call: Any) -> None:
+        desk.trace_stack.append(call.line())
+        say(f"  {len(desk.trace_stack):02d}  {call.line()}")
 
-    pinned = desk.thesis
-    run = _ask(
-        desk.session,
-        desk.url,
+    trace = run_tools(
         line,
-        data=desk.data,
-        backtest_fn=desk.backtest_fn,
-        think=desk.think,
-        thesis_id=thesis_id_of(pinned) or None if pinned else None,
-        thesis_name=thesis_label(pinned) if pinned else None,
-        thesis_statement=thesis_text(pinned) if pinned else None,
-        prior=_session_prior(desk),
+        think,
+        lambda name, args: _invoke_tool(desk, name, args),
+        context=_session_prior(desk) or "",
+        on_call=on_call,
     )
-    if run is not None:
-        desk.last = run
-        _remember(desk, _prior_line(run))
+    desk.pending_report = trace
+    if trace.answer:
+        say(trace.answer)
+    say(dim("  Type yes to save this trace as a report on this machine."))
+
+
+def _invoke_tool(desk: Desk, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """One deterministic tool. The model chose the name. This only runs it."""
+    if name == "profile":
+        from ..core.profile import profile_data
+
+        if desk.data is None:
+            return {"error": "nothing is loaded"}
+        out = profile_data(desk.data)
+        return {
+            "n_names": out.get("n_names"),
+            "n_obs_min": out.get("n_obs_min"),
+            "n_obs_max": out.get("n_obs_max"),
+            "n_ragged": out.get("n_ragged"),
+            "n_spikes": out.get("n_spikes"),
+            "dates_supplied": out.get("dates_supplied"),
+        }
+    if name == "align":
+        from ..core.market import align_market
+
+        return align_market(desk.data)
+    if name == "regime":
+        from ..core.regime import hamilton_regime
+
+        series = _one_series(desk, args.get("name"))
+        if series is None:
+            return {"error": "name a series that is loaded"}
+        return hamilton_regime(series)
+    if name == "price":
+        from ..core.options import black_scholes
+        from ..core.rates import cash_rate
+
+        rate, _, _ = cash_rate(args.get("rate"))
+        return black_scholes(
+            spot=float(args.get("spot") or 0),
+            strike=float(args.get("strike") or 0),
+            expiry_years=float(args.get("expiry") or args.get("expiry_years") or 0),
+            vol=float(args.get("vol") or 0),
+            rate=float(args.get("rate") if args.get("rate") is not None else rate),
+            call=str(args.get("right") or "call").lower() != "put",
+        )
+    if name == "reprice":
+        from ..core.options import reprice
+        from ..core.rates import cash_rate
+
+        rate, _, _ = cash_rate(args.get("rate"))
+        return reprice(
+            spot=float(args.get("spot") or 0),
+            strike=float(args.get("strike") or 0),
+            expiry_years=float(args.get("expiry") or args.get("expiry_years") or 0),
+            vol=float(args.get("vol") or 0),
+            rate=float(args.get("rate") if args.get("rate") is not None else rate),
+            spot_shock=float(args.get("spot_shock") or 0),
+            vol_shock=float(args.get("vol_shock") or 0),
+            call=str(args.get("right") or "call").lower() != "put",
+        )
+    if name in {"correlation", "covariance", "cointegration"}:
+        return _tool_cross(desk, name)
+    if name == "portfolio":
+        method = str(args.get("method") or "").replace("_", " ")
+        _portfolio(desk, method)
+        book = desk.portfolio or {}
+        if not book:
+            return {"error": "portfolio was not built"}
+        return {
+            "method": book.get("method"),
+            "n_assets": book.get("n_assets"),
+            "weight_sum": book.get("weight_sum"),
+        }
+    if name == "overlap":
+        symbol = str(args.get("symbol") or "")
+        _overlap(desk, symbol)
+        return {"symbol": symbol or None, "note": "overlap against the rest of the book"}
+    if name == "performance":
+        from ..core.performance import performance_report
+
+        series = _book_returns(desk)
+        if series is None:
+            return {"error": "need a return series or a book of prices"}
+        return performance_report(series)
+    if name == "var":
+        from ..core.risk import compute_var_cvar
+
+        series = _book_returns(desk)
+        if series is None:
+            return {"error": "need a return series or a book of prices"}
+        return compute_var_cvar(series)
+    if name == "process":
+        from ..core.process import dgp_stress
+
+        series = _one_series(desk, args.get("name"))
+        if series is None:
+            return {"error": "need a series to fit"}
+        return dgp_stress(series, dgp=str(args.get("dgp") or "gbm"))
+    if name == "workflow":
+        workflow = str(args.get("name") or "").strip()
+        if not workflow:
+            return {"error": "name the workflow"}
+        why = str(args.get("why") or "").strip()
+        if why:
+            say(dim(f"  {why}"))
+        say(dim(f"  workflow  {workflow}"))
+        _scripted(desk, workflow, [])
+        status = getattr(desk.last, "status", None)
+        return {"workflow": workflow, "status": status or "unopened"}
+    return {"error": f"{name} is not wired"}
+
+
+def _one_series(desk: Desk, name: Any) -> list[float] | None:
+    from ..core.relations import _values
+
+    data = desk.data
+    if isinstance(data, (list, tuple)):
+        return [float(v) for v in data]
+    if not isinstance(data, dict) or not data:
+        return None
+    if name and str(name) in data:
+        values = _values(data[str(name)])
+        return values
+    for series in data.values():
+        values = _values(series)
+        if values:
+            return values
+    return None
+
+
+def _book_returns(desk: Desk) -> list[float] | None:
+    from ..core.relations import as_returns
+
+    data = desk.data
+    if isinstance(data, (list, tuple)) and len(data) >= 30:
+        return [float(v) for v in data]
+    if not isinstance(data, dict):
+        return None
+    panel = as_returns(data)
+    if not panel:
+        return None
+    columns = list(panel.values())
+    width = min(len(col) for col in columns)
+    if width < 2:
+        return None
+    tail = [col[-width:] for col in columns]
+    return [sum(row) / len(row) for row in zip(*tail, strict=True)]
+
+
+def _tool_cross(desk: Desk, kind: str) -> dict[str, Any]:
+    _cross(desk, kind)
+    matrix = desk.matrix or {}
+    if matrix.get("kind") != kind:
+        return {"error": f"{kind} did not run"}
+    names = list(matrix.get("names") or [])
+    return {"kind": kind, "n_names": len(names), "names": names[:12]}
 
 
 def _local_request(desk: Desk, line: str) -> bool:

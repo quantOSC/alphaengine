@@ -2,8 +2,8 @@
 Risk, factor decomposition over supplied portfolio + factor return streams.
 
 Lifted (math-identical) from backend/quant/factors.compute_multi_factor_loadings,
-with the FRED rfr fetch and quant.limits import removed: the caller supplies the
-risk-free rate (default 0, excess of zero, not a Treasury bill) and the VIF
+with the FRED rfr fetch and quant.limits import removed: an omitted cash
+rate is the pinned H.15 print in ``core.rates``, not a download, and the VIF
 threshold is inlined. OLS
 with HAC standard errors (statsmodels) gives factor betas, alpha, t-stats, R²,
 and a multicollinearity diagnostic (VIF).
@@ -28,10 +28,10 @@ import math
 import numpy as np
 import statsmodels.api as sm
 
+from .rates import cash_rate, rate_fields
 from .trace import record
 
 VIF_MAX_THRESHOLD = 10.0
-_DEFAULT_RFR = 0.0
 
 
 def _clean(val):
@@ -68,6 +68,15 @@ def _compute_vif(X: np.ndarray, factor_names: list[str]) -> dict[str, float]:
     return vifs
 
 
+def _hac_lags(n: int) -> int:
+    """Newey-West (1994) automatic lag: floor(4 * (T/100)^(2/9)), at least 1.
+
+    A fixed 5 lags is a daily-sample habit. The same regression on a monthly
+    panel does not want five months of overlap.
+    """
+    return max(1, int(4.0 * (n / 100.0) ** (2.0 / 9.0)))
+
+
 def _model_label(factor_names: list[str]) -> str:
     core_set = set(factor_names)
     if {"market", "size", "value", "profitability", "low_vol", "momentum"}.issubset(core_set):
@@ -91,13 +100,14 @@ def decompose_factors(
     (annualized %), factor betas + t-stats, R²/adj-R², residual vol, and a VIF
     multicollinearity diagnostic.
 
-    The default rate is 0, the same as ``performance_report``: excess of zero,
-    not a bill. Pass the annual rate explicitly when the study uses one.
-    ``factors_are_excess`` is true for Ken French-style factors, which are
-    already above cash, so the rate is subtracted from the portfolio only.
-    Set it false when the factors are total returns. Alpha is the intercept
-    times ``periods_per_year``, an arithmetic annualization, not a CAGR.
-    HAC lags stay at 5, which is a daily-sample assumption paired with 252.
+    An omitted rate is the pinned H.15 3-month Treasury, the same bill as
+    ``performance_report``. Pass ``0`` for excess of zero, or another annual
+    rate for a different print. ``factors_are_excess`` is true for Ken
+    French-style factors, which are already above cash, so the rate is
+    subtracted from the portfolio only. Set it false when the factors are
+    total returns. Alpha is the intercept times ``periods_per_year``, an
+    arithmetic annualization, not a CAGR. HAC lags follow the Newey-West
+    automatic rule and the chosen lag is reported.
     """
     factor_names = list(factor_returns.keys())
     if not factor_names:
@@ -107,8 +117,9 @@ def decompose_factors(
     if min_len < 30:
         return {"error": "Need 30+ observations"}
 
-    rfr = float(risk_free_rate) if risk_free_rate is not None else _DEFAULT_RFR
+    rfr, _, _ = cash_rate(risk_free_rate)
     ppy = max(int(periods_per_year), 1)
+    hac_lags = _hac_lags(min_len)
     y = np.array(portfolio_returns[-min_len:], dtype=float)
     rf_per = rfr / ppy
     y_excess = y - rf_per
@@ -124,7 +135,7 @@ def decompose_factors(
         high_vif = [f for f, v in vifs.items() if math.isfinite(v) and v > VIF_MAX_THRESHOLD]
 
     X_const = sm.add_constant(X)
-    model = sm.OLS(y_excess, X_const).fit(cov_type="HAC", cov_kwds={"maxlags": 5})
+    model = sm.OLS(y_excess, X_const).fit(cov_type="HAC", cov_kwds={"maxlags": hac_lags})
 
     betas = {}
     tstats = {}
@@ -158,11 +169,12 @@ def decompose_factors(
         "residual_vol": _clean(round(float(np.std(model.resid, ddof=1) * np.sqrt(ppy) * 100), 2)),
         "residual_vol_ddof": 1,
         "n_observations": int(min_len),
-        "risk_free_rate": round(rfr, 4),
+        **rate_fields(risk_free_rate),
         "periods_per_year": ppy,
         "factors_are_excess": bool(factors_are_excess),
         "alpha_annualization": "arithmetic",
-        "hac_maxlags": 5,
+        "hac_maxlags": hac_lags,
+        "hac_rule": "newey_west_1994",
         "model": _model_label(factor_names),
         "vifs": {k: _clean(round(v, 2)) if math.isfinite(v) else None for k, v in vifs.items()},
         "high_vif_factors": high_vif,

@@ -488,7 +488,13 @@ def _regime_attribution(trades: list, regime_series: dict) -> dict:
 
 
 def _attribution(
-    bt: dict, returns: list, prices, factor_returns, regime_series, risk_free_rate: float, not_computed: dict
+    bt: dict,
+    returns: list,
+    prices,
+    factor_returns,
+    regime_series,
+    risk_free_rate: float | None,
+    not_computed: dict,
 ) -> dict:
     """MAE/MFE + factor + regime attribution. Each leg is OPTIONAL and pure: it
     runs only when its caller-supplied input is present, else names itself in
@@ -521,7 +527,7 @@ def _attribution(
     return attribution
 
 
-def _cost_report(bt: dict, perf, risk_free_rate: float) -> dict | None:
+def _cost_report(bt: dict, perf, risk_free_rate: float | None) -> dict | None:
     """Turnover + net-of-cost vs gross Sharpe from the sim's cost bookkeeping.
 
     The equity curve is ALREADY net of slippage + commission + impact (they are
@@ -578,7 +584,7 @@ def score_backtest(
     *,
     n_trials: int | None = None,
     n_trials_source: str | None = None,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: float | None = None,
     periods_per_year: int = 252,
     benchmark_returns: list | None = None,
     pnl_matrix=None,

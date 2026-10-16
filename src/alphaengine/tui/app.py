@@ -78,6 +78,13 @@ Screen { background: #0b0d10; }
 #inputs { height: auto; max-height: 5; color: #c5cdd6; }
 #spark { height: 3; margin: 1 0 0 0; }
 #series { height: 1fr; }
+#stage {
+    height: 10;
+    background: #07090c;
+    color: #8b949e;
+    padding: 0 1;
+    border-bottom: solid #16343a;
+}
 #hint {
     dock: bottom;
     height: 1;
@@ -159,6 +166,7 @@ class QuantOSApp(App[None]):
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
+        yield Static("", id="stage")
         with Horizontal(id="body"):
             yield Static("", id="rail")
             yield RichLog(id="transcript", highlight=False, markup=False, wrap=True)
@@ -176,7 +184,8 @@ class QuantOSApp(App[None]):
         self.query_one("#series", DataTable).cursor_type = "row"
         self._refresh_rail()
         self.query_one(Input).focus()
-        self.set_interval(0.2, self._tick_working)
+        self.set_interval(0.12, self._tick_working)
+        self._paint_stage()
         self._sync_account()
 
     def _refresh_rail(self) -> None:
@@ -204,7 +213,7 @@ class QuantOSApp(App[None]):
             loaded = "nothing"
 
         lines = [
-            "desk",
+            "alphaengine  1.0",
             f"{on}  the maths",
             "    offline",
             f"{on if keyed else off}  workflows",
@@ -236,6 +245,7 @@ class QuantOSApp(App[None]):
 
         bar = Text()
         bar.append("quantOS", style="bold #9ecbff")
+        bar.append("  1.0", style="#6b7380")
         bar.append("   ", style="")
         bar.append("signed in" if keyed else "not signed in", style="#c5cdd6" if keyed else "#e6b450")
         if self.desk.loaded:
@@ -524,8 +534,19 @@ class QuantOSApp(App[None]):
         self._refresh_rail()
 
     def _tick_working(self) -> None:
+        self._paint_stage()
         if self.busy:
             self._paint_working()
+
+    def _paint_stage(self) -> None:
+        from rich.text import Text
+
+        from .stage import stage_lines
+
+        elapsed = time.monotonic() - self._started if self.busy else time.monotonic()
+        activity = self.activity if self.busy else ""
+        frame = stage_lines(elapsed, activity=activity, stack=list(self.desk.trace_stack))
+        self.query_one("#stage", Static).update(Text.from_ansi("\n".join(frame)))
 
     def _paint_working(self) -> None:
         elapsed = time.monotonic() - self._started

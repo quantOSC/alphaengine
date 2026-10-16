@@ -41,13 +41,14 @@ def rets(seed: int, n: int) -> list[float]:
 
 # ── deflated Sharpe ────────────────────────────────────────────────────────
 # The statistic the verdict gates on. Note how hard the trial count bites:
-# the same series is "marginal" at one trial and "likely_noise" at forty. That
-# is the whole argument for deriving the count rather than asking for it.
+# the same series is "marginal" at one trial and "likely_noise" at five.
+# 0.11.0 subtracted the pinned 4.21% bill, so these are not the 0.10 excess
+# of zero. sr0 moves with the Sharpe because the sampling-error floor does.
 DSR_GOLDEN = {
-    1: {"deflated_sharpe": 0.7566, "sr0_expected_max": 0.0371, "verdict": "marginal"},
-    5: {"deflated_sharpe": 0.5090, "sr0_expected_max": 0.0851, "verdict": "marginal"},
-    40: {"deflated_sharpe": 0.1650, "sr0_expected_max": 0.1561, "verdict": "likely_noise"},
-    250: {"deflated_sharpe": 0.0524, "sr0_expected_max": 0.2024, "verdict": "likely_noise"},
+    1: {"deflated_sharpe": 0.6875, "sr0_expected_max": 0.037, "verdict": "marginal"},
+    5: {"deflated_sharpe": 0.427, "sr0_expected_max": 0.0849, "verdict": "likely_noise"},
+    40: {"deflated_sharpe": 0.1188, "sr0_expected_max": 0.1559, "verdict": "likely_noise"},
+    250: {"deflated_sharpe": 0.0337, "sr0_expected_max": 0.2021, "verdict": "likely_noise"},
 }
 
 
@@ -74,7 +75,7 @@ def test_psr_is_independent_of_trials() -> None:
     """PSR asks a different question and must not move with the trial count."""
     r = rets(9, 200)
     vals = {deflated_sharpe(r, n_trials=n)["psr_vs_zero"] for n in (1, 5, 40, 250)}
-    assert vals == {0.8879}
+    assert vals == {0.8434}
 
 
 # ── probability of backtest overfitting ────────────────────────────────────
@@ -94,9 +95,12 @@ def test_performance_report_golden() -> None:
     got = performance_report(rets(11, 500))
     want = {
         "n_obs": 500,
-        "sharpe_ratio": 0.0884,
-        "sharpe_annualized": 1.4033,
-        "sortino_ratio": 2.1031,
+        # 0.11.0: excess over the pinned 4.21% bill. 0.10 was excess of zero
+        # (Sharpe 0.0884 / 1.4033, Sortino 2.1031). Return and drawdown are
+        # unchanged because they do not use the cash rate.
+        "sharpe_ratio": 0.0727,
+        "sharpe_annualized": 1.1548,
+        "sortino_ratio": 1.7094,
         "calmar_ratio": 2.7428,
         "max_drawdown_pct": 9.12,
         "total_return_pct": 55.75,

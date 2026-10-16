@@ -562,7 +562,9 @@ class StepExecutor:
             "verdict": out.get("verdict"),
             "n_trials": n_trials,
             "n_trials_source": source,
-            "risk_free_rate": out.get("risk_free_rate", 0.0),
+            "risk_free_rate": out.get("risk_free_rate"),
+            "risk_free_rate_source": out.get("risk_free_rate_source"),
+            "risk_free_rate_as_of": out.get("risk_free_rate_as_of"),
         }
         # Kept so `emit.study` can carry the verdict this run actually produced
         # rather than deriving it a second time. Two derivations of one figure

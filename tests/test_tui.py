@@ -68,7 +68,11 @@ class _DeskSession(Session):
 def _think(prompt: str) -> str:
     if '"choice"' in prompt:
         return '{"choice": 0, "why": "the question is a screen"}'
-    return "The run did not measure that."
+    if "Calls already made" in prompt and "none yet" not in prompt:
+        return '{"tool":"done","args":{"answer":"The tools finished."}}'
+    if "overbought" in prompt or "screen_universe" in prompt:
+        return '{"tool":"workflow","args":{"name":"screen_universe","why":"the question is a screen"}}'
+    return '{"tool":"done","args":{"answer":"The tools finished."}}'
 
 
 async def _wait(pilot: object, app: QuantOSApp) -> None:
@@ -359,11 +363,12 @@ def test_check_overlap_builds_the_book_from_the_other_names() -> None:
 
 def test_a_later_question_is_answered_from_the_session() -> None:
     def think(prompt: str) -> str:
-        if "already recorded" in prompt:
-            return '{"answer": "The session already measured the names against each other."}'
-        if '"choice"' in prompt:
-            return '{"choice": 0, "why": "the question is a screen"}'
-        return "The run did not measure that."
+        answer = (
+            '{"tool":"done","args":{"answer":"The session already measured the names against each other."}}'
+        )
+        if "stands out" in prompt:
+            return answer
+        return answer
 
     async def body() -> None:
         app = QuantOSApp(session=_DeskSession(), url="fake://", data=_book(), keyed=True, think=think)

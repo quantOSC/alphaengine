@@ -456,6 +456,24 @@ def compute_spread_signal(
     }
 
 
+def _benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:
+    """Step-up FDR. True where the p-value survives at `alpha`.
+
+    The largest rank k with p_(k) <= alpha * k / m keeps every hypothesis
+    up to that rank. One pair is the same test as the raw threshold.
+    """
+    m = len(p_values)
+    if m == 0:
+        return []
+    order = sorted(range(m), key=lambda i: p_values[i])
+    keep_through = 0
+    for rank, idx in enumerate(order, start=1):
+        if p_values[idx] <= alpha * rank / m:
+            keep_through = rank
+    passed = set(order[:keep_through])
+    return [i in passed for i in range(m)]
+
+
 def find_cointegrated_pairs(
     prices: dict,
     *,
@@ -492,6 +510,16 @@ def find_cointegrated_pairs(
         )
         results.append(res)
 
+    p_values = []
+    for row in results:
+        p = (row.get("cointegration") or {}).get("p_value")
+        p_values.append(p if p is not None else 1.0)
+    for row, survives in zip(results, _benjamini_hochberg(p_values, significance), strict=True):
+        row["cointegrated_raw"] = bool(row.get("cointegrated"))
+        row["fdr_pass"] = survives
+        if row["cointegrated_raw"] and not survives:
+            row["cointegrated"] = False
+
     def _p(r: dict):
         p = (r.get("cointegration") or {}).get("p_value")
         return p if p is not None else 1.0
@@ -514,10 +542,12 @@ def find_cointegrated_pairs(
         "expected_false_positives": exp_fp,
         "n_trials_recommended": n_eval,
         "multiple_testing_note": (
-            f"Screened {n_eval} pairs at p<{significance}; ~{exp_fp} cointegrated hits are expected "
-            f"by chance alone. {n_low} of {len(coint)} cointegrated pairs have near-zero rolling "
-            f"correlation (low_comovement=true, likely spurious). Validate survivors with "
-            f"deflated_sharpe at n_trials={n_eval} and pbo_cscv before trading; do not deflate at n_trials=1."
+            f"Screened {n_eval} pairs. `cointegrated` is the Benjamini-Hochberg survivor at "
+            f"FDR {significance}; `cointegrated_raw` is the single-test flag at the same level. "
+            f"~{exp_fp} raw hits are expected by chance alone. {n_low} of {len(coint)} reported "
+            f"pairs have near-zero rolling correlation (low_comovement=true, likely spurious). "
+            f"Validate survivors with deflated_sharpe at n_trials={n_eval} and pbo_cscv before "
+            f"trading; do not deflate at n_trials=1."
         ),
         "pairs": selected,
     }

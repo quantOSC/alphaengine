@@ -27,6 +27,7 @@ from typing import Any
 
 import numpy as np
 
+from .rates import cash_rate, rate_fields
 from .series_shapes import series_values
 from .trace import record
 
@@ -56,7 +57,7 @@ def _returns(values: Any) -> np.ndarray | None:
 
 
 def _sharpe(
-    rets: np.ndarray, *, risk_free_rate: float = 0.0, periods_per_year: int = _TRADING_DAYS
+    rets: np.ndarray, *, risk_free_rate: float | None = None, periods_per_year: int = _TRADING_DAYS
 ) -> float | None:
     if rets.size < 2:
         return None
@@ -64,7 +65,8 @@ def _sharpe(
     if sd == 0:
         return None
     ppy = max(int(periods_per_year), 1)
-    excess = float(rets.mean()) - float(risk_free_rate) / ppy
+    annual, _, _ = cash_rate(risk_free_rate)
+    excess = float(rets.mean()) - annual / ppy
     return float(excess / sd * np.sqrt(ppy))
 
 
@@ -102,6 +104,7 @@ def subperiod_stability(returns: Any, *, segments: int = DEFAULT_SEGMENTS) -> di
         "share_of_pnl_in_best_segment": share,
         "n_segments": segments,
         "n_obs": int(arr.size),
+        **rate_fields(None),
     }
     record(
         "share_of_pnl_in_best_segment",
@@ -151,6 +154,7 @@ def cost_ladder(
         "dies_at_bps": dies_at,
         "turnover": round(float(turnover), _RND),
         "n_obs": int(arr.size),
+        **rate_fields(None),
     }
     record(
         "sharpe_at_bps",

@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 from scipy.optimize import minimize
 
+from .rates import cash_rate, rate_fields
 from .series_shapes import series_values
 
 __all__ = [
@@ -110,7 +111,9 @@ def histogram(values: np.ndarray | list[float], *, bins: int = HIST_BINS) -> dic
     }
 
 
-def _sharpe(returns: np.ndarray, *, risk_free_rate: float = 0.0, periods_per_year: int = 252) -> float | None:
+def _sharpe(
+    returns: np.ndarray, *, risk_free_rate: float | None = None, periods_per_year: int = 252
+) -> float | None:
     r = returns[np.isfinite(returns)]
     if r.size < 2:
         return None
@@ -118,7 +121,8 @@ def _sharpe(returns: np.ndarray, *, risk_free_rate: float = 0.0, periods_per_yea
     if sd == 0 or not math.isfinite(sd):
         return None
     ppy = max(int(periods_per_year), 1)
-    excess = float(r.mean()) - float(risk_free_rate) / ppy
+    annual, _, _ = cash_rate(risk_free_rate)
+    excess = float(r.mean()) - annual / ppy
     return float(excess / sd * math.sqrt(ppy))
 
 
@@ -392,7 +396,7 @@ def dgp_stress(
     n_paths: int = 200,
     seed: int = 7,
     backtest_fn: Any = None,
-    risk_free_rate: float = 0.0,
+    risk_free_rate: float | None = None,
     periods_per_year: int = 252,
 ) -> dict[str, Any]:
     """Replay a series (or backtest) under Monte Carlo draws from a named DGP.
@@ -443,7 +447,7 @@ def dgp_stress(
     figures.update(
         {
             "dgp": name,
-            "risk_free_rate": round(float(risk_free_rate), 4),
+            **rate_fields(risk_free_rate),
             "periods_per_year": max(int(periods_per_year), 1),
             "n_paths": p,
             "n_trials": p,

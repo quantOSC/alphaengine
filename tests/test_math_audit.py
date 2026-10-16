@@ -34,13 +34,16 @@ def test_cpcv_purge_and_embargo_drop_the_edges_of_each_held_out_group() -> None:
     which is the definition in cpcv_score. Computed here from the same slices
     so a shift of the window fails even when the headline still looks plausible.
     """
+    from alphaengine.core.rates import TREASURY_BILL_RATE
+
     arr = np.linspace(-0.01, 0.02, 32)
     groups = list(np.array_split(np.arange(arr.size), 4))
+    rf = TREASURY_BILL_RATE / 252
     paths = []
     for group in groups:
         block = group[1:-1]
         path = arr[block]
-        paths.append(_per_period_sharpe(path) * math.sqrt(252))
+        paths.append(_per_period_sharpe(path, risk_free_per_period=rf) * math.sqrt(252))
 
     got = cpcv_score(arr.tolist(), n_groups=4, n_test_groups=1, purge=1, embargo=1)
     assert got["n_paths"] == 4
@@ -195,40 +198,53 @@ def test_parametric_var_includes_the_mean_over_the_horizon() -> None:
 
 
 def test_performance_sortino_uses_target_semideviation_over_all_periods() -> None:
-    report = performance_report([0.002] * 20 + [-0.001] * 20)
-    excess = np.asarray([0.002] * 20 + [-0.001] * 20)  # rf default 0
+    from alphaengine.core.rates import TREASURY_BILL_RATE
+
+    series = [0.002] * 20 + [-0.001] * 20
+    report = performance_report(series)
+    excess = np.asarray(series) - TREASURY_BILL_RATE / 252
     downside = np.minimum(excess, 0.0)
     dsd = float(np.sqrt(np.mean(downside**2)))
     sortino = (float(excess.mean()) / dsd) * math.sqrt(252)
     assert report["sortino_ratio"] == round(sortino, 4)
 
 
-def test_the_default_cash_rate_is_zero_until_a_bill_is_supplied() -> None:
-    """Neither formula invents a Treasury bill.
+def test_an_omitted_cash_rate_is_the_pinned_three_month_bill() -> None:
+    """Zero is a claim the caller has to make. Omitting the rate is the bill.
 
-    A missing rate is excess of zero, in the performance report and in the
-    factor regression. Passing 4% is how a study uses a bill, and that changes
-    the intercept. Ken French factors are already excess, so the default does
-    not subtract the rate from them a second time.
+    The pin is the H.15 3-month Treasury constant maturity, investment basis,
+    not a download. Passing 0 is excess of zero and does not match the pin.
+    Passing the pin explicitly matches the omitted rate, and the source says
+    the caller supplied it.
     """
     statsmodels = pytest.importorskip("statsmodels")
     assert statsmodels is not None
-    from alphaengine.core.factors import _DEFAULT_RFR, decompose_factors
+    from alphaengine.core.factors import decompose_factors
+    from alphaengine.core.rates import TREASURY_BILL_AS_OF, TREASURY_BILL_RATE, TREASURY_BILL_SOURCE
 
     rng = np.random.default_rng(6)
     market = rng.normal(0.0003, 0.01, 80)
     portfolio = (0.0002 + market).tolist()
     factors = {"market": market.tolist()}
     at_default = decompose_factors(portfolio, factors)
-    at_bill = decompose_factors(portfolio, factors, risk_free_rate=0.04)
-    assert _DEFAULT_RFR == 0.0
-    assert performance_report(portfolio)["risk_free_rate"] == 0.0
-    assert at_default["risk_free_rate"] == 0.0
+    at_zero = decompose_factors(portfolio, factors, risk_free_rate=0.0)
+    at_pin = decompose_factors(portfolio, factors, risk_free_rate=TREASURY_BILL_RATE)
+    report = performance_report(portfolio)
+    assert report["risk_free_rate"] == TREASURY_BILL_RATE
+    assert report["risk_free_rate_as_of"] == TREASURY_BILL_AS_OF
+    assert report["risk_free_rate_source"] == TREASURY_BILL_SOURCE
+    assert at_default["risk_free_rate"] == TREASURY_BILL_RATE
+    assert at_default["risk_free_rate_as_of"] == TREASURY_BILL_AS_OF
     assert at_default["factors_are_excess"] is True
     assert at_default["alpha_annualization"] == "arithmetic"
+    assert at_default["hac_rule"] == "newey_west_1994"
+    assert at_default["hac_maxlags"] == 3  # floor(4 * (80/100)^(2/9))
     assert at_default["factor_betas"]["market"] == pytest.approx(1.0, abs=0.05)
-    assert at_default["alpha"] == decompose_factors(portfolio, factors, risk_free_rate=0.0)["alpha"]
-    assert at_bill["alpha"] != at_default["alpha"]
+    assert at_default["alpha"] == at_pin["alpha"]
+    assert at_pin["risk_free_rate_source"] == "caller"
+    assert at_pin["risk_free_rate_as_of"] is None
+    assert at_zero["alpha"] != at_default["alpha"]
+    assert performance_report(portfolio, risk_free_rate=0.0)["risk_free_rate"] == 0.0
 
 
 def test_spread_is_log_price_minus_hedge_times_log_price() -> None:
@@ -257,3 +273,34 @@ def test_spread_is_log_price_minus_hedge_times_log_price() -> None:
     signal = compute_spread_signal(leg_a.tolist(), leg_b.tolist(), symbol_a="AAA", symbol_b="BBB")
     assert signal["hedge_ratio"] == pytest.approx(1.5, abs=0.15)
     assert signal["n_observations"] == 400
+
+
+def test_a_penny_name_is_a_price_and_a_flat_return_is_not() -> None:
+    from alphaengine.core.relations import _looks_like_prices, _to_returns
+
+    penny = [0.40 + i * 0.002 for i in range(30)]
+    assert _looks_like_prices(penny) is True
+    assert _to_returns(penny)[0] == pytest.approx(penny[1] / penny[0] - 1.0, abs=1e-8)
+
+    flat_return = [0.02] * 30
+    assert _looks_like_prices(flat_return) is False
+    assert _to_returns(flat_return) == [0.02] * 30
+
+    # A two-bar gap from 100 to 50 is still a price. The median clears 1.5,
+    # so one large move does not turn the closes into a return of 100.
+    assert _looks_like_prices([100.0, 50.0]) is True
+    assert _looks_like_prices([0.01, 0.02, -0.01]) is False
+
+
+def test_the_pair_screen_keeps_only_the_fdr_survivors() -> None:
+    pytest.importorskip("statsmodels")
+    from alphaengine.core.pairs import _benjamini_hochberg
+
+    # The smallest clears alpha/m. The rest sit above alpha, so they do not
+    # pull the step-up cutoff forward.
+    flags = _benjamini_hochberg([0.20] * 9 + [0.001], 0.05)
+    assert flags[-1] is True
+    assert flags[:-1] == [False] * 9
+    # One pair is the raw test.
+    assert _benjamini_hochberg([0.04], 0.05) == [True]
+    assert _benjamini_hochberg([0.06], 0.05) == [False]
