@@ -766,7 +766,7 @@ def _offer(desk: Desk, trace: Any) -> None:
     desk.pending_report = trace
     if getattr(trace, "answer", ""):
         say(trace.answer)
-    say(dim("  Type yes to save this trace as a charted report on this machine."))
+    say(dim("  Type yes to save this trace as a charted report in Downloads."))
 
 
 def _thinking(think: Callable[[str], str]) -> Callable[[str], str]:

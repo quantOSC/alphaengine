@@ -88,5 +88,5 @@ def details_text() -> Text:
         out.append(f"{verb:<14}", style="bold #e8eef2")
         out.append(note + "\n", style="#8b949e")
     out.append("\n")
-    out.append("yes writes a charted report on this machine.", style="#6b7380")
+    out.append("yes writes a charted report to Downloads.", style="#6b7380")
     return out

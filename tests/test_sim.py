@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -102,6 +103,32 @@ def test_a_saved_trace_is_a_charted_pdf(tmp_path) -> None:
     assert text.startswith("alphaengine 1.0")
     assert "stress the book" in text
     assert "AAPL" not in text
+
+
+def test_a_report_defaults_to_the_downloads_folder(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr("alphaengine.agent.sim.downloads_dir", lambda: tmp_path)
+    path = Trace(question="stress the book").save()
+    assert path.parent == tmp_path
+    assert path.name.startswith("trace-")
+
+
+def test_downloads_falls_back_to_home_when_the_known_folder_is_missing(monkeypatch, tmp_path) -> None:
+    from alphaengine.agent.sim import downloads_dir
+
+    monkeypatch.setattr("alphaengine.agent.sim._known_downloads", lambda: None)
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path))
+    assert downloads_dir() == tmp_path / "Downloads"
+
+
+def test_xdg_names_the_downloads_folder(monkeypatch, tmp_path) -> None:
+    from alphaengine.agent.sim import _xdg_downloads
+
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "user-dirs.dirs").write_text('XDG_DOWNLOAD_DIR="$HOME/Descargas"\n', encoding="utf-8")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: tmp_path / "home"))
+    assert _xdg_downloads() == tmp_path / "home" / "Descargas"
 
 
 def test_the_stage_draws_the_stack() -> None:

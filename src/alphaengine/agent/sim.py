@@ -8,13 +8,12 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from ..events import data_dir
 
 Invoke = Callable[[str, dict[str, Any]], Any]
 Think = Callable[[str], str]
@@ -106,10 +105,11 @@ class Trace:
     def save(self, directory: Path | None = None) -> Path:
         """Write the text trace and, when matplotlib is installed, the charted PDF.
 
-        The PDF is the report. The text file stays beside it so a machine
-        without matplotlib still has the stack.
+        The PDF is the report. It goes to the machine's Downloads folder.
+        The text file stays beside it so a machine without matplotlib still
+        has the stack.
         """
-        folder = directory or (data_dir() / "reports")
+        folder = directory or downloads_dir()
         folder.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         text_path = folder / f"trace-{stamp}.txt"
@@ -124,6 +124,61 @@ class Trace:
         if pdf_path.is_file() and pdf_path.stat().st_size > 0:
             return pdf_path
         return text_path
+
+
+# The Windows known-folder id for Downloads. A redirected folder (OneDrive,
+# a moved library) lives here, not at a guessed path under the profile.
+_DOWNLOADS_GUID = "{374DE290-123F-4565-9164-39C4925E467B}"
+
+
+def downloads_dir() -> Path:
+    """The machine's Downloads folder. Reports land here, not under AppData."""
+    found = _known_downloads()
+    if found is not None:
+        return found
+    return Path.home() / "Downloads"
+
+
+def _known_downloads() -> Path | None:
+    if os.name == "nt":
+        return _windows_downloads()
+    return _xdg_downloads()
+
+
+def _windows_downloads() -> Path | None:
+    try:
+        import winreg
+
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+        ) as key:
+            raw, _ = winreg.QueryValueEx(key, _DOWNLOADS_GUID)
+    except (ImportError, OSError):
+        return None
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return Path(os.path.expandvars(raw))
+
+
+def _xdg_downloads() -> Path | None:
+    config = os.environ.get("XDG_CONFIG_HOME")
+    path = (Path(config) if config else Path.home() / ".config") / "user-dirs.dirs"
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    home = str(Path.home())
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("XDG_DOWNLOAD_DIR"):
+            continue
+        raw = stripped.partition("=")[2].strip().strip('"').strip("'")
+        raw = raw.replace("${HOME}", home).replace("$HOME", home)
+        expanded = os.path.expandvars(raw).strip()
+        if expanded:
+            return Path(expanded)
+    return None
 
 
 def run_tools(
