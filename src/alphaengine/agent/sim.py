@@ -6,6 +6,7 @@ gets shown, and what a report file is made of when the user accepts one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -88,6 +89,10 @@ class Trace:
     # Local chart inputs. They stay off the model prompt and off the wire.
     panel: dict[str, list[float]] | None = None
     matrix: dict[str, Any] | None = None
+    boards: list[dict[str, Any]] = field(default_factory=list)
+    bakeoff: dict[str, Any] | None = None
+    findings: str = ""
+    reading: str = ""
 
     def render(self) -> str:
         lines = ["alphaengine 1.0", f"question  {self.question}", ""]
@@ -112,9 +117,11 @@ class Trace:
         folder = directory or downloads_dir()
         folder.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        text_path = folder / f"trace-{stamp}.txt"
+        digest = hashlib.sha256(f"{stamp}|{self.question}".encode()).hexdigest()[:6]
+        stem = f"report-{digest}"
+        text_path = folder / f"{stem}.txt"
         text_path.write_text(self.render() + "\n", encoding="utf-8")
-        pdf_path = folder / f"trace-{stamp}.pdf"
+        pdf_path = folder / f"{stem}.pdf"
         try:
             from .chart import write_report
 
@@ -300,6 +307,54 @@ def _numbers(figures: dict[str, Any]) -> dict[str, float]:
 
     walk(figures, "")
     return found
+
+
+_NARRATE = """You are writing the portfolio note for a report that was just computed.
+Cite only numbers written below. Quote a decimal exactly as it appears.
+Do not invent a weight, a Sharpe, a date, or a name count.
+Five to eight sentences. Say what was measured, how the weights construct the book,
+and what the risk figures imply for holding it.
+
+Question:
+@@QUESTION@@
+
+Tools and figures:
+@@CALLS@@
+
+Reply with the note and nothing else.
+"""
+
+
+def narrate(trace: Trace, think: Think) -> str:
+    """One closing note. A number that is not in the stack is refused, and then dropped."""
+    lines: list[str] = []
+    known: dict[str, float] = {}
+    for call in trace.calls:
+        lines.append(call.line())
+        for key, value in call.figures.items():
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            if isinstance(value, float) and not math.isfinite(value):
+                continue
+            lines.append(f"    {call.tool}.{key} {value}")
+            known[f"{call.tool}.{key}"] = float(value)
+            known[str(key)] = float(value)
+    if not lines:
+        return ""
+    prompt = _NARRATE.replace("@@QUESTION@@", trace.question).replace("@@CALLS@@", "\n".join(lines))
+    try:
+        raw = think(prompt)
+    except Exception:  # noqa: BLE001 — a missing note does not discard the stack
+        return ""
+    text = str(raw or "").strip()
+    if text.startswith("{"):
+        parsed = parse_call(text)
+        if isinstance(parsed, dict):
+            text = str(parsed.get("answer") or parsed.get("args", {}).get("answer") or "").strip()
+    guarded = _guard_answer(text, known, trace.question)
+    if not guarded or guarded.startswith("Refused") or guarded.startswith("The model did not"):
+        return ""
+    return guarded
 
 
 def _guard_answer(answer: str, known: dict[str, float], question: str) -> str:

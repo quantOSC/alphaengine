@@ -108,6 +108,24 @@ def referee(
     return out
 
 
+def trial_paths(data: Any, submissions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Growth of 1 for each proposal. Local to the report. Not a referee figure."""
+    panel = _panel(data)
+    out: list[dict[str, Any]] = []
+    for index, submission in enumerate(submissions):
+        label, failed, earned, per = _materialize(panel, submission, index)
+        growth = None if earned is None else np.cumprod(1.0 + earned).tolist()
+        out.append(
+            {
+                "label": label,
+                "failed": failed,
+                "sharpe": None if per is None else round(float(per), 4),
+                "growth": growth,
+            }
+        )
+    return out
+
+
 def _apply_attacks(
     rows: list[dict[str, Any]],
     series: list[np.ndarray | None],

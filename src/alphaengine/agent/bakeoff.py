@@ -20,7 +20,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.bakeoff import ATTACKS, RULES, referee
+from ..core.bakeoff import ATTACKS, RULES, referee, trial_paths
 from .sim import Call, Think, Trace
 
 DEFAULT_SECONDS = 45.0
@@ -124,6 +124,18 @@ def run_bakeoff(
     figures["stopped"] = stopped
     figures["budget_seconds"] = budget
     trace.answer = _verdict(figures)
+    trace.bakeoff = {
+        "survivor": figures.get("survivor"),
+        "survivor_sharpe": figures.get("survivor_sharpe"),
+        "attacked_sharpe": figures.get("attacked_sharpe"),
+        "deflated_sharpe": figures.get("deflated_sharpe"),
+        "verdict": figures.get("verdict"),
+        "n_trials": figures.get("n_trials"),
+        "n_failed": figures.get("n_failed"),
+        "attacks": list(figures.get("attacks") or []),
+        "trials": list(figures.get("trials") or []),
+        "curves": trial_paths(data, submissions),
+    }
     return Bakeoff(trace=trace, figures=figures)
 
 

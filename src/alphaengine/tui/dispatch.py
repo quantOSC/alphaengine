@@ -72,6 +72,7 @@ class Desk:
     matrix: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
     portfolio: dict[str, Any] | None = None
+    boards: list[dict[str, Any]] = field(default_factory=list)
     pending_report: Any = None
     trace_stack: list[str] = field(default_factory=list)
     question: str = ""
@@ -281,6 +282,13 @@ def submit(desk: Desk, line: str) -> bool:
 
     if verb == "run" and not rest:
         say(red("run what? try `workflows`, or just describe what you want."))
+        return False
+
+    if verb == "bakeoff" or (verb == "run" and rest.lower().split()[:1] == ["bakeoff"]):
+        question = rest if verb == "bakeoff" else rest.split(" ", 1)[-1]
+        if question.lower() == "bakeoff":
+            question = ""
+        _sentence(desk, f"bakeoff {question}".strip())
         return False
 
     if " " not in line:
@@ -567,6 +575,7 @@ def _cross(desk: Desk, kind: str) -> None:
         say(red(str(exc)))
         return
     desk.matrix = result
+    _stash(desk, result)
     for line in summary_lines(result):
         say(line)
     from ..context import result_note
@@ -597,6 +606,7 @@ def _portfolio(desk: Desk, line: str) -> None:
         return
     desk.portfolio = result
     desk.matrix = result
+    _stash(desk, result)
     say(f"  {result['method']}  {result['n_assets']} names  Ledoit-Wolf covariance")
     if result.get("n_skipped"):
         say(dim(f"  {result['n_skipped']} names skipped (too short to share the history)"))
@@ -762,11 +772,12 @@ def _as_float(value: Any, default: float) -> float:
 
 def _offer(desk: Desk, trace: Any) -> None:
     _attach_local_charts(desk, trace)
+    _read(desk, trace)
     say("\x1f")
     desk.pending_report = trace
     if getattr(trace, "answer", ""):
         say(trace.answer)
-    say(dim("  Type yes to save this trace as a charted report in Downloads."))
+    say(dim("  Type yes to save this report in Downloads."))
 
 
 def _thinking(think: Callable[[str], str]) -> Callable[[str], str]:
@@ -777,11 +788,56 @@ def _thinking(think: Callable[[str], str]) -> Callable[[str], str]:
     return wrapped
 
 
+def _read(desk: Desk, trace: Any) -> None:
+    """A closing note from the model, and a findings paragraph from the figures."""
+    from ..agent.brief import findings_for
+    from ..agent.sim import narrate
+
+    findings = findings_for(trace)
+    trace.findings = findings
+    think = _thinker(desk)
+    reading = narrate(trace, think) if think is not None else ""
+    trace.reading = reading
+    answer = str(getattr(trace, "answer", "") or "")
+    thin = (
+        not answer
+        or answer.startswith("Stopped after")
+        or answer.startswith("The stack above")
+        or answer.startswith("The model did not")
+    )
+    if reading:
+        trace.answer = reading if thin else f"{answer}\n\n{reading}"
+    elif thin and findings:
+        trace.answer = findings
+
+
+def _stash(desk: Desk, result: dict[str, Any]) -> None:
+    """Keep a tool's matrix or weights after a later tool replaces the live one."""
+    slim: dict[str, Any] = {}
+    for key, value in result.items():
+        if key in {"values", "rows", "pairs", "names", "weights"} or isinstance(value, (int, float, str)):
+            slim[key] = value
+    if isinstance(slim.get("names"), list):
+        slim["names"] = [str(name) for name in slim["names"][:24]]
+    if isinstance(slim.get("values"), list):
+        slim["values"] = slim["values"][:24]
+    if isinstance(slim.get("rows"), list):
+        slim["rows"] = slim["rows"][:24]
+    if isinstance(slim.get("pairs"), list):
+        slim["pairs"] = slim["pairs"][:16]
+    if not slim:
+        return
+    desk.boards.append(slim)
+    if len(desk.boards) > 12:
+        desk.boards = desk.boards[-12:]
+
+
 def _attach_local_charts(desk: Desk, trace: Any) -> None:
     """Series for the PDF. They stay on the trace and off the model prompt."""
     panel = _chart_panel(desk.data)
     if panel:
         trace.panel = panel
+    trace.boards = list(desk.boards)
     matrix = _chart_matrix(desk.matrix)
     if matrix is not None:
         trace.matrix = matrix
@@ -799,7 +855,7 @@ def _chart_panel(data: Any) -> dict[str, list[float]]:
         nums = _chart_nums(values)
         if len(nums) >= 8:
             panel[str(key)] = nums[-2500:]
-        if len(panel) == 8:
+        if len(panel) == 12:
             break
     return panel
 

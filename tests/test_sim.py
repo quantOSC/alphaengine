@@ -105,11 +105,37 @@ def test_a_saved_trace_is_a_charted_pdf(tmp_path) -> None:
     assert "AAPL" not in text
 
 
+def test_the_downloaded_report_has_a_short_name(tmp_path) -> None:
+    import re
+
+    path = Trace(question="construct the book").save(tmp_path)
+    assert re.fullmatch(r"report-[0-9a-f]{6}", path.stem)
+    assert path.with_suffix(".txt").is_file()
+
+
+def test_a_constructed_book_has_weights_scenarios_and_a_simulation() -> None:
+    from alphaengine.agent.brief import study_for
+
+    rng = np.random.default_rng(3)
+    panel = {}
+    for name in ("AAPL", "MSFT", "XOM"):
+        panel[name] = (100 * np.cumprod(1 + rng.normal(0.0004, 0.01, 80))).tolist()
+    trace = Trace(question="construct a portfolio", panel=panel)
+    study = study_for(trace, deep=True)
+    methods = {book["method"] for book in study["books"]}
+    assert {"equal_weight", "hrp", "risk_parity"} <= methods
+    assert study["correlation"]["names"]
+    assert any(row["name"] == "volatility x1.5" for row in study["scenarios"])
+    assert study["monte"]["n_paths"] == 64
+    assert "Hierarchical risk parity" in study["findings"]
+    assert "AAPL" not in Trace(question="construct a portfolio", panel=panel).render()
+
+
 def test_a_report_defaults_to_the_downloads_folder(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr("alphaengine.agent.sim.downloads_dir", lambda: tmp_path)
     path = Trace(question="stress the book").save()
     assert path.parent == tmp_path
-    assert path.name.startswith("trace-")
+    assert path.name.startswith("report-")
 
 
 def test_downloads_falls_back_to_home_when_the_known_folder_is_missing(monkeypatch, tmp_path) -> None:
