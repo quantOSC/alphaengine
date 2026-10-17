@@ -107,7 +107,7 @@ def test_boot_is_a_blank_column_with_the_account_on_the_status_line() -> None:
             assert not app.query("#rail")
             assert not app.query("#stage")
             assert "ALPHAENGINE" in app.empty_text.replace(" ", "")
-            assert "1.0.0" in app.empty_text
+            assert "1.0." in app.empty_text
             assert "use /details for a look at important commands" in app.empty_text
             prompt = app.query_one(Input)
             assert str(prompt.placeholder).startswith("Ask")
@@ -121,7 +121,7 @@ def test_the_seal_turns_and_keeps_the_wordmark() -> None:
     still = seal(0.0).plain
     turned = seal(2.0).plain
     assert still != turned
-    assert "1.0.0" in still
+    assert "1.0." in still
     assert "use /details for a look at important commands" in still
     assert "the research loop, on your machine" in still
     card = details_text().plain

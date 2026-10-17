@@ -30,10 +30,15 @@ TOOLS: tuple[tuple[str, str], ...] = (
     ("correlation", "correlation of the loaded names"),
     ("covariance", "covariance of the loaded names"),
     ("cointegration", "cointegrated pairs, FDR survivors"),
-    ("portfolio", "weights; args.method is hrp or risk_parity"),
+    ("portfolio", "weights; args.method is hrp, risk_parity, inverse_vol, or var_sorted"),
     ("overlap", "one name against the equal-weight of the others; args.symbol"),
-    ("performance", "Sharpe, drawdown, and the cash rate on the loaded book"),
-    ("var", "value at risk on the loaded book"),
+    ("performance", "Sharpe, drawdown, and the cash rate on the constructed book"),
+    ("var", "value at risk and expected shortfall on the constructed book"),
+    ("scenarios", "stress the constructed book across regime, inflation, rate, and volatility shocks"),
+    (
+        "monte_carlo",
+        "Monte Carlo wealth and Sharpe simulation on the book; args.dgp, args.n_paths, args.horizon",
+    ),
     ("process", "fit ou, gbm, jump, or garch and stress it; args.dgp"),
     ("workflow", "a portal workflow by name, when the account offers it"),
     ("bakeoff", "generators propose, an adversary attacks, the referee names the survivor"),
@@ -45,6 +50,9 @@ _PROMPT = """You are the simulator inside alphaengine 1.0.
 The user asked a question. You answer it by calling tools, as many as the
 scenario needs, one per reply. The math is already written. You decide the
 order. You do not invent a figure.
+When constructing a portfolio or analyzing a scenario or simulation, build the
+portfolio (`portfolio`), run `scenarios` and `monte_carlo` (and `var` or `bakeoff`
+when relevant), and then finish with `done`.
 
 Question:
 @@QUESTION@@
@@ -91,6 +99,8 @@ class Trace:
     matrix: dict[str, Any] | None = None
     boards: list[dict[str, Any]] = field(default_factory=list)
     bakeoff: dict[str, Any] | None = None
+    monte: dict[str, Any] | None = None
+    study: dict[str, Any] | None = None
     findings: str = ""
     reading: str = ""
 
@@ -317,11 +327,14 @@ def _numbers(figures: dict[str, Any]) -> dict[str, float]:
     return found
 
 
-_NARRATE = """You are writing the portfolio note for a report that was just computed.
+_NARRATE = """You are writing the portfolio construction and risk reading for a quantitative report.
 Cite only numbers written below. Quote a decimal exactly as it appears.
 Do not invent a weight, a Sharpe, a date, or a name count.
-Five to eight sentences. Say what was measured, how the weights construct the book,
-and what the risk figures imply for holding it.
+Write two to three paragraphs (eight to twelve sentences). Cover:
+1) What the universe, regime, and any named tickers in the question show.
+2) How the constructed portfolio weights (hrp, risk_parity, var_sorted, or bakeoff survivor)
+   allocate capital and how their Sharpe, volatility, drawdown, and VaR compare.
+3) What the scenario shocks and Monte Carlo simulation paths imply for holding the book.
 
 Question:
 @@QUESTION@@
@@ -329,11 +342,11 @@ Question:
 Tools and figures:
 @@CALLS@@
 
-Reply with the note and nothing else.
+Reply with the reading and nothing else.
 """
 
 
-def narrate(trace: Trace, think: Think) -> str:
+def narrate(trace: Trace, think: Think, extra: dict[str, float] | None = None) -> str:
     """One closing note. A number that is not in the stack is refused, and then dropped."""
     lines: list[str] = []
     known: dict[str, float] = {}
@@ -347,6 +360,15 @@ def narrate(trace: Trace, think: Think) -> str:
             lines.append(f"    {call.tool}.{key} {value}")
             known[f"{call.tool}.{key}"] = float(value)
             known[str(key)] = float(value)
+    for key, value in (extra or {}).items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if isinstance(value, float) and not math.isfinite(value):
+            continue
+        lines.append(f"    {key} {value}")
+        known[str(key)] = float(value)
+        tail = str(key).rsplit(".", 1)[-1]
+        known.setdefault(tail, float(value))
     if not lines:
         return ""
     prompt = _NARRATE.replace("@@QUESTION@@", trace.question).replace("@@CALLS@@", "\n".join(lines))

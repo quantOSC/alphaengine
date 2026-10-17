@@ -17,7 +17,7 @@ from alphaengine.tui.stage import stage_lines
 
 
 def test_this_is_version_one() -> None:
-    assert __version__ == "1.0.0"
+    assert __version__.startswith("1.0.")
 
 
 def test_an_atm_call_matches_the_normal_cdf() -> None:
@@ -119,16 +119,43 @@ def test_a_constructed_book_has_weights_scenarios_and_a_simulation() -> None:
     rng = np.random.default_rng(3)
     panel = {}
     for name in ("AAPL", "MSFT", "XOM"):
-        panel[name] = (100 * np.cumprod(1 + rng.normal(0.0004, 0.01, 80))).tolist()
-    trace = Trace(question="construct a portfolio", panel=panel)
+        panel[name] = (100 * np.cumprod(1 + rng.normal(0.0004, 0.01 * (len(panel) + 1), 80))).tolist()
+    trace = Trace(question="construct a portfolio looking at XOM", panel=panel)
     study = study_for(trace, deep=True)
     methods = {book["method"] for book in study["books"]}
-    assert {"equal_weight", "hrp", "risk_parity"} <= methods
+    assert {"equal_weight", "hrp", "risk_parity", "var_sorted"} <= methods
+    hrp_book = next(book for book in study["books"] if book["method"] == "hrp")
+    weights = [w for _, w in hrp_book["weights"]]
+    assert max(weights) > min(weights)
+    assert study["focus_names"] == ["XOM"]
     assert study["correlation"]["names"]
     assert any(row["name"] == "volatility x1.5" for row in study["scenarios"])
     assert study["monte"]["n_paths"] == 64
+    assert len(study["monte"]["fan"]["q50"]) >= 20
+    assert study["bakeoff"]["survivor"]
     assert "Hierarchical risk parity" in study["findings"]
     assert "AAPL" not in Trace(question="construct a portfolio", panel=panel).render()
+
+
+def test_monte_carlo_and_scenarios_are_harness_tools() -> None:
+    from alphaengine.agent.sim import TOOLS
+    from alphaengine.tui.dispatch import Desk, _invoke_tool
+
+    rng = np.random.default_rng(7)
+    book = {
+        "AAA": (100 * np.cumprod(1 + rng.normal(0.0005, 0.01, 90))).tolist(),
+        "BBB": (80 * np.cumprod(1 + rng.normal(0.0002, 0.018, 90))).tolist(),
+        "CCC": (60 * np.cumprod(1 + rng.normal(0.0003, 0.012, 90))).tolist(),
+    }
+    tool_names = {name for name, _ in TOOLS}
+    assert "monte_carlo" in tool_names
+    assert "scenarios" in tool_names
+    desk = Desk(session=object(), url="fake://", args=None, data=book)
+    mc = _invoke_tool(desk, "monte_carlo", {"dgp": "gbm", "n_paths": 32, "horizon": 60})
+    sc = _invoke_tool(desk, "scenarios", {})
+    assert mc["n_paths"] == 32
+    assert "terminal_q50_pct" in mc
+    assert sc["n_scenarios"] >= 5
 
 
 def test_a_report_defaults_to_the_downloads_folder(monkeypatch, tmp_path) -> None:

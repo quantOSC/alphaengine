@@ -70,7 +70,7 @@ def ledoit_wolf_cov(returns: np.ndarray) -> tuple[np.ndarray, float, float]:
     delta_m.flat[:: n_features + 1] -= mu
     delta = float((delta_m**2).sum() / n_features)
     x2 = X**2
-    beta_ = float((1.0 / n_features) * np.sum((x2.T @ x2) / n_samples - emp**2))
+    beta_ = float((1.0 / (n_features * n_samples)) * np.sum((x2.T @ x2) / n_samples - emp**2))
     beta = min(beta_, delta)
     shrinkage = 0.0 if delta == 0 else min(1.0, max(0.0, beta / delta))
     shrunk = shrinkage * mu * np.eye(n_features) + (1.0 - shrinkage) * emp

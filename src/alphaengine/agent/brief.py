@@ -6,36 +6,73 @@ Nothing in this module is sent anywhere.
 
 from __future__ import annotations
 
+import math
+import re
 from typing import Any
 
 import numpy as np
 
 
 def study_for(trace: Any, *, deep: bool = False) -> dict[str, Any]:
-    """Paths, books, scenarios, and, when asked, a Monte Carlo of the constructed book."""
+    """Paths, books, scenarios, Monte Carlo fan, and bakeoff tournament for the report."""
+    question = str(getattr(trace, "question", "") or "")
     data = _panel(getattr(trace, "panel", None))
-    paths = _paths(data)
-    books = _books(data)
-    primary = next((book for book in books if book["method"] == "hrp"), None)
-    if primary is None and books:
-        primary = books[0]
+    focus_names = _focus_names(question, trace, data)
+    paths = _paths(data, focus_names)
+    books = _books(data, question)
+    primary = _primary_book(books, question)
+    assets = _asset_table(data, books, primary, focus_names)
     scenarios = _scenarios(primary) if primary is not None else []
-    monte = _monte(primary["returns"]) if deep and primary is not None else None
-    held = _bakeoff(getattr(trace, "bakeoff", None))
-    findings = _findings(books, scenarios, held, _stack_lines(trace))
+    raw_monte = getattr(trace, "monte", None)
+    if isinstance(raw_monte, dict) and raw_monte.get("edges"):
+        monte: dict[str, Any] | None = raw_monte
+    elif deep and primary is not None:
+        monte = run_monte_carlo(primary["returns"], dgp="gbm", n_paths=64, seed=7)
+    else:
+        monte = None
+    held = _bakeoff(getattr(trace, "bakeoff", None), data)
+    corr = _correlation(data, focus_names, primary)
+    findings = _findings(
+        books=books,
+        primary=primary,
+        assets=assets,
+        focus_names=focus_names,
+        scenarios=scenarios,
+        monte=monte,
+        bakeoff=held,
+        stack=_stack_lines(trace),
+    )
+    narrate_figures = _narrate_figures(
+        data=data,
+        books=books,
+        primary=primary,
+        assets=assets,
+        focus_names=focus_names,
+        scenarios=scenarios,
+        monte=monte,
+        bakeoff=held,
+    )
     return {
+        "n_universe": len(data),
+        "focus_names": focus_names,
         "paths": paths,
-        "correlation": _correlation(data),
+        "correlation": corr,
         "books": books,
+        "primary": primary,
+        "assets": assets,
         "scenarios": scenarios,
         "monte": monte,
         "bakeoff": held,
         "boards": [row for row in (getattr(trace, "boards", None) or []) if isinstance(row, dict)],
         "findings": findings,
+        "narrate_figures": narrate_figures,
     }
 
 
 def findings_for(trace: Any) -> str:
+    cached = getattr(trace, "study", None)
+    if isinstance(cached, dict) and cached.get("findings"):
+        return str(cached["findings"])
     return str(study_for(trace, deep=False).get("findings") or "")
 
 
@@ -47,7 +84,7 @@ def _panel(raw: Any) -> dict[str, list[float]]:
         nums = _nums(values)
         if len(nums) >= 8:
             out[str(key)] = nums[-2500:]
-        if len(out) == 12:
+        if len(out) == 64:
             break
     return out
 
@@ -62,16 +99,60 @@ def _nums(values: Any) -> list[float]:
     return [float(v) for v in seq if isinstance(v, (int, float)) and not isinstance(v, bool)]
 
 
-def _paths(data: dict[str, list[float]]) -> dict[str, list[float]]:
+def _focus_names(question: str, trace: Any, data: dict[str, list[float]]) -> list[str]:
+    """Tickers from the loaded book that the user or tool stack explicitly named."""
+    if not data:
+        return []
+    by_upper = {name.upper(): name for name in data}
+    tokens = [tok.upper() for tok in re.findall(r"[A-Za-z0-9._-]+", question)]
+    for call in getattr(trace, "calls", []) or []:
+        args = getattr(call, "args", None)
+        if isinstance(args, dict):
+            for val in args.values():
+                if isinstance(val, str):
+                    tokens.extend(tok.upper() for tok in re.findall(r"[A-Za-z0-9._-]+", val))
+                elif isinstance(val, list):
+                    tokens.extend(str(item).upper() for item in val)
+    found: list[str] = []
+    for tok in tokens:
+        matched = by_upper.get(tok)
+        if matched and matched not in found:
+            found.append(matched)
+    return found[:8]
+
+
+def _paths(data: dict[str, list[float]], focus_names: list[str]) -> dict[str, list[float]]:
     if not data:
         return {}
     try:
         from ..core.relations import as_returns
+
+        rets_map = as_returns(data)
     except Exception:  # noqa: BLE001
         return {}
-    out: dict[str, list[float]] = {}
-    for name, series in list(as_returns(data).items())[:12]:
+    ordered: list[str] = []
+    for name in focus_names:
+        if name in rets_map and name not in ordered:
+            ordered.append(name)
+    # Rank remaining names by total return spread so the chart shows leaders and laggards
+    scored: list[tuple[float, str]] = []
+    for name, series in rets_map.items():
+        if name in ordered:
+            continue
         arr = np.asarray(series, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size >= 8:
+            scored.append((float(np.prod(1.0 + arr)), name))
+    scored.sort(reverse=True)
+    if scored:
+        top_half = [name for _, name in scored[:6]]
+        bot_half = [name for _, name in scored[-4:]]
+        for name in top_half + bot_half:
+            if name not in ordered:
+                ordered.append(name)
+    out: dict[str, list[float]] = {}
+    for name in ordered[:10]:
+        arr = np.asarray(rets_map.get(name) or [], dtype=float)
         arr = arr[np.isfinite(arr)]
         if arr.size < 8:
             continue
@@ -79,23 +160,48 @@ def _paths(data: dict[str, list[float]]) -> dict[str, list[float]]:
     return out
 
 
-def _correlation(data: dict[str, list[float]]) -> dict[str, Any] | None:
+def _correlation(
+    data: dict[str, list[float]],
+    focus_names: list[str],
+    primary: dict[str, Any] | None,
+) -> dict[str, Any] | None:
     if len(data) < 2:
         return None
+    selected: list[str] = []
+    for name in focus_names:
+        if name in data and name not in selected:
+            selected.append(name)
+    if primary is not None:
+        for name, _w in primary.get("weights") or []:
+            if name in data and name not in selected:
+                selected.append(name)
+            if len(selected) >= 14:
+                break
+    for name in data:
+        if name not in selected:
+            selected.append(name)
+        if len(selected) >= 14:
+            break
+    sub = {name: data[name] for name in selected if name in data}
     try:
         from ..core.relations import correlation
 
-        raw = correlation(data)
+        raw = correlation(sub)
     except (ValueError, Exception):  # noqa: BLE001 — a short book still gets a report
         return None
-    names = [str(name) for name in (raw.get("names") or [])][:12]
+    names = [str(name) for name in (raw.get("names") or [])][:14]
     values = raw.get("values")
     if len(names) < 2 or not isinstance(values, list):
         return None
-    return {"names": names, "values": values[: len(names)], "pairs": list(raw.get("pairs") or [])[:12]}
+    return {
+        "names": names,
+        "values": [row[: len(names)] for row in values[: len(names)]],
+        "pairs": list(raw.get("pairs") or [])[:12],
+        "n_total": len(data),
+    }
 
 
-def _books(data: dict[str, list[float]]) -> list[dict[str, Any]]:
+def _books(data: dict[str, list[float]], question: str = "") -> list[dict[str, Any]]:
     if len(data) < 2:
         return []
     try:
@@ -110,7 +216,7 @@ def _books(data: dict[str, list[float]]) -> list[dict[str, Any]]:
         return []
     if aligned.ndim != 2 or aligned.shape[1] < 2 or aligned.shape[0] < 8:
         return []
-    built: dict[str, dict[str, float]] = {}
+    built: dict[str, np.ndarray] = {}
     for method in ("hrp", "risk_parity"):
         try:
             result = build_portfolio(data, method=method)
@@ -118,14 +224,37 @@ def _books(data: dict[str, list[float]]) -> list[dict[str, Any]]:
             continue
         weights = result.get("weights") or {}
         if isinstance(weights, dict):
-            built[method] = {str(k): float(v) for k, v in weights.items()}
+            built[method] = np.array([float(weights.get(name, 0.0)) for name in names], dtype=float)
+    # VaR-sorted / inverse-tail-loss allocation across the aligned universe
+    q05 = np.array(
+        [max(abs(float(np.quantile(aligned[:, j], 0.05))), 1e-4) for j in range(aligned.shape[1])],
+        dtype=float,
+    )
+    inv_var = (1.0 / q05) / float((1.0 / q05).sum())
+    built["var_sorted"] = inv_var
+
     books: list[dict[str, Any]] = []
     equal = np.ones(aligned.shape[1]) / aligned.shape[1]
     books.append(_pack("equal_weight", names, equal, aligned))
-    for method, weights in built.items():
-        vector = np.array([float(weights.get(name, 0.0)) for name in names], dtype=float)
-        books.append(_pack(method, names, vector, aligned))
+    for method in ("hrp", "risk_parity", "var_sorted"):
+        if method in built:
+            books.append(_pack(method, names, built[method], aligned))
     return books
+
+
+def _primary_book(books: list[dict[str, Any]], question: str) -> dict[str, Any] | None:
+    if not books:
+        return None
+    low = question.lower()
+    if "var" in low and ("sort" in low or "book" in low or "construct" in low):
+        picked = next((book for book in books if book["method"] == "var_sorted"), None)
+        if picked is not None:
+            return picked
+    if "risk parity" in low and "hierarchical" not in low:
+        picked = next((book for book in books if book["method"] == "risk_parity"), None)
+        if picked is not None:
+            return picked
+    return next((book for book in books if book["method"] == "hrp"), books[0])
 
 
 def _pack(method: str, names: list[str], weights: Any, aligned: Any) -> dict[str, Any]:
@@ -141,10 +270,16 @@ def _pack(method: str, names: list[str], weights: Any, aligned: Any) -> dict[str
         key=lambda item: item[1],
         reverse=True,
     )
+    hhi = float(np.sum(vector**2))
+    eff_n = round(1.0 / hhi, 2) if hhi > 0 else float(len(names))
     series = [float(x) for x in rets]
     return {
         "method": method,
         "weights": pairs,
+        "weight_map": {names[i]: round(float(vector[i]), 4) for i in range(len(names))},
+        "max_weight": round(float(vector.max()), 4),
+        "min_weight": round(float(vector.min()), 4),
+        "effective_n": eff_n,
         "wealth": wealth.tolist(),
         "drawdown": drawdown.tolist(),
         "returns": series,
@@ -153,17 +288,75 @@ def _pack(method: str, names: list[str], weights: Any, aligned: Any) -> dict[str
     }
 
 
+def _asset_table(
+    data: dict[str, list[float]],
+    books: list[dict[str, Any]],
+    primary: dict[str, Any] | None,
+    focus_names: list[str],
+) -> list[dict[str, Any]]:
+    """Per-asset return, vol, Sharpe, drawdown, 95% VaR, and weights across methods."""
+    if not data:
+        return []
+    try:
+        from ..core.relations import as_returns
+
+        panel = as_returns(data)
+    except Exception:  # noqa: BLE001
+        return []
+    by_method: dict[str, dict[str, float]] = {}
+    for book in books:
+        by_method[book["method"]] = dict(book.get("weight_map") or {})
+    rows: list[dict[str, Any]] = []
+    for name, series in panel.items():
+        arr = np.asarray(series, dtype=float)
+        arr = arr[np.isfinite(arr)]
+        if arr.size < 8:
+            continue
+        wealth = np.cumprod(1.0 + arr)
+        peak = np.maximum.accumulate(wealth)
+        dd = float(np.min(wealth / np.maximum(peak, 1e-18) - 1.0))
+        total_ret = float(wealth[-1] - 1.0)
+        ann_ret = float(wealth[-1] ** (252.0 / arr.size) - 1.0) if wealth[-1] > 0 else total_ret
+        vol_ann = float(arr.std(ddof=1) * math.sqrt(252.0)) if arr.size > 1 else 0.0
+        sharpe = (
+            float((arr.mean() - 0.0421 / 252.0) / arr.std(ddof=1) * math.sqrt(252.0)) if vol_ann > 0 else 0.0
+        )
+        var95 = abs(float(np.quantile(arr, 0.05))) * 100.0
+        tail = arr[arr <= np.quantile(arr, 0.05)]
+        cvar95 = abs(float(tail.mean())) * 100.0 if tail.size else var95
+        rows.append(
+            {
+                "name": name,
+                "focused": name in focus_names,
+                "hrp_weight": round(by_method.get("hrp", {}).get(name, 0.0), 4),
+                "rp_weight": round(by_method.get("risk_parity", {}).get(name, 0.0), 4),
+                "var_weight": round(by_method.get("var_sorted", {}).get(name, 0.0), 4),
+                "eq_weight": round(by_method.get("equal_weight", {}).get(name, 0.0), 4),
+                "total_return_pct": round(total_ret * 100.0, 2),
+                "annualized_return_pct": round(ann_ret * 100.0, 2),
+                "volatility_annualized_pct": round(vol_ann * 100.0, 2),
+                "sharpe_annualized": round(sharpe, 4),
+                "max_drawdown_pct": round(abs(dd) * 100.0, 2),
+                "var_95_pct": round(var95, 2),
+                "cvar_95_pct": round(cvar95, 2),
+            }
+        )
+    primary_key = "var_weight" if (primary and primary.get("method") == "var_sorted") else "hrp_weight"
+    rows.sort(key=lambda r: (not bool(r["focused"]), -float(r[primary_key]), -float(r["sharpe_annualized"])))
+    return rows
+
+
 def _stats(series: list[float]) -> dict[str, Any]:
     if len(series) < 30:
-        return {}
+        return _short_stats(series)
     try:
         from ..core.performance import performance_report
 
         raw = performance_report(series)
     except Exception:  # noqa: BLE001
-        return {}
+        return _short_stats(series)
     if not isinstance(raw, dict) or raw.get("error"):
-        return {}
+        return _short_stats(series)
     keep = (
         "sharpe_annualized",
         "sortino_ratio",
@@ -175,6 +368,35 @@ def _stats(series: list[float]) -> dict[str, Any]:
         "n_obs",
     )
     return {key: raw.get(key) for key in keep if isinstance(raw.get(key), (int, float))}
+
+
+def _short_stats(series: list[float]) -> dict[str, Any]:
+    arr = np.asarray(series, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size < 2:
+        return {}
+    wealth = np.cumprod(1.0 + arr)
+    peak = np.maximum.accumulate(wealth)
+    dd = float(np.min(wealth / np.maximum(peak, 1e-18) - 1.0))
+    total = float(wealth[-1] - 1.0)
+    ann = float(wealth[-1] ** (252.0 / arr.size) - 1.0) if wealth[-1] > 0 else total
+    sd = float(arr.std(ddof=1))
+    vol = sd * math.sqrt(252.0)
+    sharpe = float((arr.mean() - 0.0421 / 252.0) / sd * math.sqrt(252.0)) if sd > 0 else 0.0
+    downside = np.minimum(arr - 0.0421 / 252.0, 0.0)
+    dd_dev = float(np.sqrt(np.mean(downside**2)))
+    sortino = float((arr.mean() - 0.0421 / 252.0) / dd_dev * math.sqrt(252.0)) if dd_dev > 0 else 0.0
+    calmar = float(ann / abs(dd)) if abs(dd) > 1e-9 else 0.0
+    return {
+        "sharpe_annualized": round(sharpe, 4),
+        "sortino_ratio": round(sortino, 4),
+        "calmar_ratio": round(calmar, 4),
+        "max_drawdown_pct": round(abs(dd) * 100.0, 2),
+        "total_return_pct": round(total * 100.0, 2),
+        "annualized_return_pct": round(ann * 100.0, 2),
+        "volatility_annualized_pct": round(vol * 100.0, 2),
+        "n_obs": int(arr.size),
+    }
 
 
 def _var(series: list[float]) -> dict[str, Any]:
@@ -191,10 +413,12 @@ def _var(series: list[float]) -> dict[str, Any]:
     historical = _dict(raw.get("historical"))
     cvar = _dict(raw.get("cvar"))
     parametric = _dict(raw.get("parametric"))
+    cf = _dict(raw.get("cornish_fisher"))
     return {
         "var_pct": historical.get("var_pct"),
         "cvar_pct": cvar.get("cvar_pct"),
         "parametric_var_pct": parametric.get("var_pct"),
+        "cornish_fisher_var_pct": cf.get("var_pct"),
     }
 
 
@@ -207,47 +431,69 @@ def _scenarios(book: dict[str, Any]) -> list[dict[str, Any]]:
     rets = rets[np.isfinite(rets)]
     if rets.size < 20:
         return []
-    rows = [_scene("full sample", rets), _scene("volatility x1.5", rets * 1.5)]
+    mu = float(rets.mean())
+    centered = rets - mu
+    rate_hike = (mu - 0.01 / 252.0) + centered * 1.25
+    stagflation = (mu - 0.02 / 252.0) + centered * 1.50
+    rows = [
+        _scene("full sample", rets),
+        _scene("rate hike (+25 bps/qtr, 1.25x vol)", rate_hike),
+        _scene("stagflation & conflict (1.5x vol)", stagflation),
+        _scene("volatility x1.5", rets * 1.5),
+        _scene("volatility x2.0 (crisis)", rets * 2.0),
+    ]
+    abs_r = np.abs(centered)
+    high_vol_days = rets[abs_r >= float(np.median(abs_r))]
+    if high_vol_days.size >= 10:
+        rows.append(_scene("high-volatility regime days", high_vol_days))
     mid = int(rets.size // 2)
     if mid >= 20 and rets.size - mid >= 20:
         rows.append(_scene("first half", rets[:mid]))
         rows.append(_scene("second half", rets[mid:]))
     if rets.size >= 21:
-        wealth = np.cumprod(1.0 + rets)
-        window = wealth[21:] / np.maximum(wealth[:-21], 1e-18) - 1.0
-        rows.append(
-            {
-                "name": "worst 21 observations",
-                "total_return_pct": round(float(np.min(window)) * 100, 2),
-                "max_drawdown_pct": None,
-                "sharpe_annualized": None,
-            }
-        )
+        wealth = np.concatenate((np.array([1.0]), np.cumprod(1.0 + rets)))
+        windows = wealth[21:] / np.maximum(wealth[:-21], 1e-18) - 1.0
+        worst_i = int(np.argmin(windows))
+        worst_slice = rets[worst_i : worst_i + 21]
+        rows.append(_scene("worst 21 observations", worst_slice))
     return rows
 
 
 def _scene(name: str, rets: Any) -> dict[str, Any]:
     arr = np.asarray(rets, dtype=float)
-    total = float(np.prod(1.0 + arr) - 1.0) if arr.size else 0.0
-    wealth = np.cumprod(1.0 + arr) if arr.size else np.asarray([1.0])
-    peak = np.maximum.accumulate(wealth)
-    drawdown = float(np.min(wealth / np.maximum(peak, 1e-18) - 1.0))
+    arr = arr[np.isfinite(arr)]
     stats = _stats([float(x) for x in arr])
+    var95 = round(abs(float(np.quantile(arr, 0.05))) * 100.0, 2) if arr.size >= 5 else 0.0
     return {
         "name": name,
-        "total_return_pct": stats.get("total_return_pct", round(total * 100, 2)),
-        "max_drawdown_pct": stats.get("max_drawdown_pct", round(abs(drawdown) * 100, 2)),
-        "sharpe_annualized": stats.get("sharpe_annualized"),
+        "total_return_pct": stats.get("total_return_pct", 0.0),
+        "annualized_return_pct": stats.get("annualized_return_pct", 0.0),
+        "volatility_annualized_pct": stats.get("volatility_annualized_pct", 0.0),
+        "max_drawdown_pct": stats.get("max_drawdown_pct", 0.0),
+        "sharpe_annualized": stats.get("sharpe_annualized", 0.0),
+        "var_95_pct": var95,
     }
 
 
-def _monte(series: list[float]) -> dict[str, Any] | None:
-    if len(series) < 30:
+def run_monte_carlo(
+    series: list[float],
+    *,
+    dgp: str = "gbm",
+    n_paths: int = 64,
+    horizon: int | None = None,
+    seed: int = 7,
+) -> dict[str, Any] | None:
+    """Calibrate `dgp` to `series` and simulate both Sharpe and cumulative wealth fan paths."""
+    if len(series) < 20:
         return None
     try:
-        from ..core.process import dgp_stress
-
-        raw = dgp_stress(series, dgp="gbm", n_paths=64, seed=7)
+        from ..core.process import dgp_stress, histogram
+    except Exception:  # noqa: BLE001
+        return None
+    p = max(16, min(int(n_paths), 512))
+    steps = max(20, min(int(horizon or len(series)), 252))
+    try:
+        raw = dgp_stress(series, dgp=dgp, n_paths=p, seed=seed)
     except Exception:  # noqa: BLE001
         return None
     hist = _dict(raw.get("sharpe_hist"))
@@ -255,19 +501,61 @@ def _monte(series: list[float]) -> dict[str, Any] | None:
     counts = hist.get("counts") or []
     if not edges or not counts:
         return None
+
+    arr = np.asarray(series, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    mu = float(arr.mean())
+    sigma = max(float(arr.std(ddof=1)), 1e-6)
+    rng = np.random.default_rng(int(seed))
+    draws = rng.normal(mu, sigma, size=(p, steps))
+    wealth_paths = np.ones((p, steps + 1), dtype=float)
+    wealth_paths[:, 1:] = np.cumprod(1.0 + draws, axis=1)
+
+    q05, q25, q50, q75, q95 = np.quantile(wealth_paths, [0.05, 0.25, 0.50, 0.75, 0.95], axis=0)
+    terminals = (wealth_paths[:, -1] - 1.0) * 100.0
+    term_q = np.quantile(terminals, [0.05, 0.25, 0.50, 0.75, 0.95])
+    peaks = np.maximum.accumulate(wealth_paths, axis=1)
+    dds = np.abs(np.min(wealth_paths / np.maximum(peaks, 1e-18) - 1.0, axis=1)) * 100.0
+    dd_q = np.quantile(dds, [0.50, 0.90, 0.95])
+    term_hist = histogram(terminals, bins=16)
+
+    frac_pos = raw.get("frac_positive")
+    pos_pct = round(float(frac_pos) * 100.0, 1) if isinstance(frac_pos, (int, float)) else None
     return {
-        "dgp": raw.get("dgp") or "gbm",
-        "n_paths": raw.get("n_paths"),
+        "dgp": str(raw.get("dgp") or dgp),
+        "n_paths": int(raw.get("n_paths") or p),
+        "horizon_days": steps,
         "sharpe_q10": raw.get("sharpe_q10"),
         "sharpe_q50": raw.get("sharpe_q50"),
         "sharpe_q90": raw.get("sharpe_q90"),
-        "frac_positive": raw.get("frac_positive"),
+        "frac_positive": round(float(frac_pos), 4) if isinstance(frac_pos, (int, float)) else None,
+        "positive_pct": pos_pct,
+        "terminal_q05_pct": round(float(term_q[0]), 2),
+        "terminal_q25_pct": round(float(term_q[1]), 2),
+        "terminal_q50_pct": round(float(term_q[2]), 2),
+        "terminal_q75_pct": round(float(term_q[3]), 2),
+        "terminal_q95_pct": round(float(term_q[4]), 2),
+        "drawdown_q50_pct": round(float(dd_q[0]), 2),
+        "drawdown_q90_pct": round(float(dd_q[1]), 2),
+        "drawdown_q95_pct": round(float(dd_q[2]), 2),
         "edges": edges,
         "counts": counts,
+        "terminal_edges": term_hist.get("edges") or [],
+        "terminal_counts": term_hist.get("counts") or [],
+        "fan": {
+            "q05": [round(float(x), 4) for x in q05],
+            "q25": [round(float(x), 4) for x in q25],
+            "q50": [round(float(x), 4) for x in q50],
+            "q75": [round(float(x), 4) for x in q75],
+            "q95": [round(float(x), 4) for x in q95],
+            "sample_paths": [[round(float(x), 4) for x in wealth_paths[i]] for i in range(min(12, p))],
+        },
     }
 
 
-def _bakeoff(raw: Any) -> dict[str, Any] | None:
+def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict) and len(data) >= 2:
+        raw = _default_bakeoff(data)
     if not isinstance(raw, dict):
         return None
     curves = []
@@ -277,7 +565,21 @@ def _bakeoff(raw: Any) -> dict[str, Any] | None:
         growth = row.get("growth")
         if not isinstance(growth, list) or len(growth) < 8:
             continue
-        curves.append({"label": str(row.get("label") or ""), "growth": growth, "sharpe": row.get("sharpe")})
+        arr = np.asarray(growth, dtype=float)
+        rets = np.diff(np.concatenate((np.array([1.0]), arr))) / np.concatenate((np.array([1.0]), arr[:-1]))
+        stats = _stats([float(x) for x in rets])
+        curves.append(
+            {
+                "label": str(row.get("label") or ""),
+                "growth": growth,
+                "sharpe": row.get("sharpe"),
+                "standing": row.get("standing"),
+                "annualized_sharpe": stats.get("sharpe_annualized"),
+                "total_return_pct": stats.get("total_return_pct"),
+                "max_drawdown_pct": stats.get("max_drawdown_pct"),
+                "volatility_annualized_pct": stats.get("volatility_annualized_pct"),
+            }
+        )
     trials = [str(line) for line in (raw.get("trials") or [])]
     if not raw.get("survivor") and not trials and not curves:
         return None
@@ -294,6 +596,40 @@ def _bakeoff(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def _default_bakeoff(data: dict[str, list[float]]) -> dict[str, Any] | None:
+    """Run the referee across all six rules when the session did not already run a bakeoff."""
+    try:
+        from ..core.bakeoff import ATTACKS, referee, trial_paths
+    except Exception:  # noqa: BLE001
+        return None
+    submissions: list[dict[str, Any]] = [
+        {"rule": "hrp"},
+        {"rule": "risk_parity"},
+        {"rule": "inverse_vol"},
+        {"rule": "equal"},
+        {"rule": "momentum", "lookback": 20},
+        {"rule": "reversion", "lookback": 20},
+    ]
+    try:
+        figures = referee(data, submissions, list(ATTACKS))
+        curves = trial_paths(data, submissions)
+    except Exception:  # noqa: BLE001
+        return None
+    if not figures.get("survivor") and not curves:
+        return None
+    return {
+        "survivor": figures.get("survivor"),
+        "survivor_sharpe": figures.get("survivor_sharpe"),
+        "attacked_sharpe": figures.get("attacked_sharpe"),
+        "deflated_sharpe": figures.get("deflated_sharpe"),
+        "verdict": figures.get("verdict"),
+        "n_trials": figures.get("n_trials"),
+        "attacks": list(figures.get("attacks") or []),
+        "trials": list(figures.get("trials") or []),
+        "curves": curves,
+    }
+
+
 def _stack_lines(trace: Any) -> str:
     lines = []
     for call in getattr(trace, "calls", []) or []:
@@ -302,55 +638,223 @@ def _stack_lines(trace: Any) -> str:
     return "\n".join(lines)
 
 
+def _method_title(method: str) -> str:
+    if method == "hrp":
+        return "Hierarchical risk parity"
+    if method == "risk_parity":
+        return "Equal risk contribution (risk parity)"
+    if method == "var_sorted":
+        return "VaR-sorted inverse-tail book"
+    if method == "equal_weight":
+        return "Equal weight"
+    return method
+
+
 def _findings(
+    *,
     books: list[dict[str, Any]],
+    primary: dict[str, Any] | None,
+    assets: list[dict[str, Any]],
+    focus_names: list[str],
     scenarios: list[dict[str, Any]],
+    monte: dict[str, Any] | None,
     bakeoff: dict[str, Any] | None,
     stack: str,
 ) -> str:
     lines: list[str] = []
-    primary = next((book for book in books if book["method"] == "hrp"), None)
-    if primary is None and books:
-        primary = books[0]
     if primary is not None and primary.get("stats"):
         stats = primary["stats"]
-        label = "Hierarchical risk parity" if primary["method"] == "hrp" else primary["method"]
+        label = _method_title(str(primary["method"]))
         lines.append(
-            f"{label} is the constructed book. "
+            f"{label} is the constructed book ({len(primary.get('weights') or [])} assets, "
+            f"effective breadth {primary.get('effective_n')} names). "
             f"Annualized Sharpe {stats.get('sharpe_annualized')}. "
+            f"Sortino {stats.get('sortino_ratio')}. "
             f"Max drawdown {stats.get('max_drawdown_pct')} percent. "
             f"Annualized volatility {stats.get('volatility_annualized_pct')} percent. "
-            f"Total return {stats.get('total_return_pct')} percent."
+            f"Total return {stats.get('total_return_pct')} percent "
+            f"(annualized {stats.get('annualized_return_pct')} percent)."
         )
         var = primary.get("var") or {}
         if var.get("var_pct") is not None:
             lines.append(
-                f"Historical one-day VaR is {var.get('var_pct')} percent. "
-                f"CVaR is {var.get('cvar_pct')} percent."
+                f"One-day 95% historical VaR is {var.get('var_pct')} percent "
+                f"(parametric {var.get('parametric_var_pct')} percent, "
+                f"CVaR {var.get('cvar_pct')} percent)."
             )
         top = primary.get("weights") or []
         if top:
-            held = ", ".join(f"{name} {weight}" for name, weight in top[:4])
+            held = ", ".join(f"{name} {weight}" for name, weight in top[:6])
             lines.append(f"Largest weights: {held}.")
+    if len(books) > 1:
+        comp = []
+        for book in books:
+            st = book.get("stats") or {}
+            if st.get("sharpe_annualized") is not None:
+                comp.append(
+                    f"{book['method']} (Sharpe {st.get('sharpe_annualized')}, "
+                    f"drawdown {st.get('max_drawdown_pct')}%, "
+                    f"vol {st.get('volatility_annualized_pct')}%)"
+                )
+        if comp:
+            lines.append("Book comparison: " + "; ".join(comp) + ".")
+    if focus_names and assets:
+        by_name = {str(row["name"]): row for row in assets}
+        focus_bits = []
+        for name in focus_names:
+            row = by_name.get(name)
+            if row is None:
+                continue
+            focus_bits.append(
+                f"{name} (HRP weight {row['hrp_weight']}, VaR-book weight {row['var_weight']}, "
+                f"return {row['total_return_pct']}%, vol {row['volatility_annualized_pct']}%, "
+                f"Sharpe {row['sharpe_annualized']}, 95% VaR {row['var_95_pct']}%)"
+            )
+        if focus_bits:
+            lines.append("Named sleeves in focus: " + "; ".join(focus_bits) + ".")
+    rate_row = next((row for row in scenarios if str(row["name"]).startswith("rate hike")), None)
+    stag_row = next((row for row in scenarios if str(row["name"]).startswith("stagflation")), None)
     shock = next((row for row in scenarios if row["name"] == "volatility x1.5"), None)
     worst = next((row for row in scenarios if str(row["name"]).startswith("worst")), None)
     bits = []
+    if rate_row is not None:
+        bits.append(
+            f"Under the quarterly rate-hike and inflation drift scenario, total return is "
+            f"{rate_row.get('total_return_pct')} percent with a {rate_row.get('max_drawdown_pct')} "
+            f"percent max drawdown (Sharpe {rate_row.get('sharpe_annualized')})."
+        )
+    if stag_row is not None:
+        bits.append(
+            f"Stagflation and conflict stress takes the drawdown to "
+            f"{stag_row.get('max_drawdown_pct')} percent."
+        )
     if shock is not None:
         bits.append(
             f"Scaling volatility by 1.5 takes the drawdown to {shock.get('max_drawdown_pct')} percent."
         )
     if worst is not None:
-        bits.append(f"The worst 21-observation window returns {worst.get('total_return_pct')} percent.")
+        bits.append(
+            f"The worst 21-observation window returns {worst.get('total_return_pct')} percent "
+            f"with a {worst.get('max_drawdown_pct')} percent drawdown."
+        )
     if bits:
         lines.append(" ".join(bits))
+    if monte is not None:
+        lines.append(
+            f"Monte Carlo ({monte.get('dgp')}, {monte.get('n_paths')} paths, "
+            f"{monte.get('horizon_days')} observations): median terminal return "
+            f"{monte.get('terminal_q50_pct')} percent (90% cone {monte.get('terminal_q05_pct')} "
+            f"to {monte.get('terminal_q95_pct')} percent), median max drawdown "
+            f"{monte.get('drawdown_q50_pct')} percent, Sharpe q50 {monte.get('sharpe_q50')} "
+            f"(q10 {monte.get('sharpe_q10')}, q90 {monte.get('sharpe_q90')}, "
+            f"positive paths {monte.get('positive_pct')}%)."
+        )
     if bakeoff and bakeoff.get("survivor"):
         lines.append(
-            f"Bakeoff survivor {bakeoff.get('survivor')}. "
-            f"Sharpe {bakeoff.get('survivor_sharpe')}. "
-            f"After attacks {bakeoff.get('attacked_sharpe')}. "
-            f"Verdict {bakeoff.get('verdict')}. "
-            f"Deflated Sharpe {bakeoff.get('deflated_sharpe')}."
+            f"Bakeoff referee survivor: {bakeoff.get('survivor')} across "
+            f"{bakeoff.get('n_trials')} candidate rules. "
+            f"In-sample period Sharpe {bakeoff.get('survivor_sharpe')}, "
+            f"after adversarial attacks {bakeoff.get('attacked_sharpe')}, "
+            f"deflated Sharpe {bakeoff.get('deflated_sharpe')} ({bakeoff.get('verdict')})."
         )
     if not lines and stack:
         lines.append(stack)
     return "\n\n".join(lines)
+
+
+def _narrate_figures(
+    *,
+    data: dict[str, list[float]],
+    books: list[dict[str, Any]],
+    primary: dict[str, Any] | None,
+    assets: list[dict[str, Any]],
+    focus_names: list[str],
+    scenarios: list[dict[str, Any]],
+    monte: dict[str, Any] | None,
+    bakeoff: dict[str, Any] | None,
+) -> dict[str, float]:
+    """Exact numbers from the study so the model can cite them under the citation guard."""
+    out: dict[str, float] = {}
+    if data:
+        out["universe.n_names"] = float(len(data))
+    for book in books:
+        prefix = str(book["method"])
+        out[f"{prefix}.effective_n"] = float(book.get("effective_n") or 0.0)
+        out[f"{prefix}.max_weight"] = float(book.get("max_weight") or 0.0)
+        out[f"{prefix}.min_weight"] = float(book.get("min_weight") or 0.0)
+        for k, v in (book.get("stats") or {}).items():
+            if isinstance(v, (int, float)):
+                out[f"{prefix}.{k}"] = float(v)
+        for k, v in (book.get("var") or {}).items():
+            if isinstance(v, (int, float)):
+                out[f"{prefix}.{k}"] = float(v)
+        for name, weight in (book.get("weights") or [])[:8]:
+            out[f"{prefix}.weight.{name}"] = float(weight)
+    if primary is not None:
+        for name, weight in (primary.get("weights") or [])[:12]:
+            out[f"book.weight.{name}"] = float(weight)
+    by_name = {str(row["name"]): row for row in assets}
+    for name in focus_names:
+        row = by_name.get(name)
+        if row is None:
+            continue
+        for key in (
+            "hrp_weight",
+            "rp_weight",
+            "var_weight",
+            "total_return_pct",
+            "annualized_return_pct",
+            "volatility_annualized_pct",
+            "sharpe_annualized",
+            "max_drawdown_pct",
+            "var_95_pct",
+            "cvar_95_pct",
+        ):
+            val = row.get(key)
+            if isinstance(val, (int, float)):
+                out[f"asset.{name}.{key}"] = float(val)
+    for row in assets[:6]:
+        name = str(row["name"])
+        for key in (
+            "hrp_weight",
+            "var_weight",
+            "total_return_pct",
+            "volatility_annualized_pct",
+            "var_95_pct",
+        ):
+            val = row.get(key)
+            if isinstance(val, (int, float)):
+                out[f"asset.{name}.{key}"] = float(val)
+    for scene in scenarios:
+        tag = str(scene.get("name") or "").split()[0]
+        for key in ("total_return_pct", "max_drawdown_pct", "sharpe_annualized", "var_95_pct"):
+            val = scene.get(key)
+            if isinstance(val, (int, float)):
+                out[f"scenario.{tag}.{key}"] = float(val)
+    if monte is not None:
+        for key in (
+            "n_paths",
+            "horizon_days",
+            "sharpe_q10",
+            "sharpe_q50",
+            "sharpe_q90",
+            "frac_positive",
+            "positive_pct",
+            "terminal_q05_pct",
+            "terminal_q25_pct",
+            "terminal_q50_pct",
+            "terminal_q75_pct",
+            "terminal_q95_pct",
+            "drawdown_q50_pct",
+            "drawdown_q90_pct",
+            "drawdown_q95_pct",
+        ):
+            val = monte.get(key)
+            if isinstance(val, (int, float)):
+                out[f"monte_carlo.{key}"] = float(val)
+    if bakeoff is not None:
+        for key in ("n_trials", "survivor_sharpe", "attacked_sharpe", "deflated_sharpe"):
+            val = bakeoff.get(key)
+            if isinstance(val, (int, float)):
+                out[f"bakeoff.{key}"] = float(val)
+    return out

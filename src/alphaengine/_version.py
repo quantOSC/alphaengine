@@ -137,4 +137,10 @@ is what a changed figure costs. The API may still move underneath it.
 # stack of tool calls. The trace is the product, drawn while the tools
 # run. A report file is written on this machine only when the user
 # accepts it. The golden figures stay the 0.11 contract.
-__version__ = "1.0.0"
+#
+# 1.0.1 IS THE REPORT AND THE HARNESS TOOLS. No golden in tests/test_goldens.py
+# moves. The session adds `monte_carlo` and `scenarios` to the tool stack, fixes
+# the sample-count divisor in Ledoit-Wolf shrinkage so hierarchical risk parity
+# and risk parity differentiate weights across a 50-name panel, and writes a
+# multi-page portfolio, scenario, Monte Carlo, and bakeoff report to Downloads.
+__version__ = "1.0.1"

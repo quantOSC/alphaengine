@@ -72,6 +72,7 @@ class Desk:
     matrix: dict[str, Any] | None = None
     notes: list[str] = field(default_factory=list)
     portfolio: dict[str, Any] | None = None
+    monte: dict[str, Any] | None = None
     boards: list[dict[str, Any]] = field(default_factory=list)
     pending_report: Any = None
     trace_stack: list[str] = field(default_factory=list)
@@ -289,6 +290,12 @@ def submit(desk: Desk, line: str) -> bool:
         if question.lower() == "bakeoff":
             question = ""
         _sentence(desk, f"bakeoff {question}".strip())
+        return False
+
+    if verb in {"monte_carlo", "montecarlo", "scenarios", "scenario"} or (
+        verb == "monte" and rest.lower().startswith("carlo")
+    ):
+        _sentence(desk, line)
         return False
 
     if " " not in line:
@@ -790,13 +797,18 @@ def _thinking(think: Callable[[str], str]) -> Callable[[str], str]:
 
 def _read(desk: Desk, trace: Any) -> None:
     """A closing note from the model, and a findings paragraph from the figures."""
-    from ..agent.brief import findings_for
+    from ..agent.brief import study_for
     from ..agent.sim import narrate
 
-    findings = findings_for(trace)
+    study = study_for(trace, deep=True)
+    trace.study = study
+    findings = str(study.get("findings") or "")
     trace.findings = findings
     think = _thinker(desk)
-    reading = narrate(trace, think) if think is not None else ""
+    extra = study.get("narrate_figures")
+    reading = (
+        narrate(trace, think, extra=extra if isinstance(extra, dict) else None) if think is not None else ""
+    )
     trace.reading = reading
     answer = str(getattr(trace, "answer", "") or "")
     thin = (
@@ -838,6 +850,8 @@ def _attach_local_charts(desk: Desk, trace: Any) -> None:
     if panel:
         trace.panel = panel
     trace.boards = list(desk.boards)
+    if desk.monte is not None:
+        trace.monte = desk.monte
     matrix = _chart_matrix(desk.matrix)
     if matrix is not None:
         trace.matrix = matrix
@@ -855,7 +869,7 @@ def _chart_panel(data: Any) -> dict[str, list[float]]:
         nums = _chart_nums(values)
         if len(nums) >= 8:
             panel[str(key)] = nums[-2500:]
-        if len(panel) == 12:
+        if len(panel) == 64:
             break
     return panel
 
@@ -980,6 +994,9 @@ def _invoke_tool(desk: Desk, name: str, args: dict[str, Any]) -> dict[str, Any]:
             "method": book.get("method"),
             "n_assets": book.get("n_assets"),
             "weight_sum": book.get("weight_sum"),
+            "max_weight": book.get("max_weight"),
+            "min_weight": book.get("min_weight"),
+            "shrinkage": book.get("shrinkage"),
         }
     if name == "overlap":
         symbol = str(args.get("symbol") or "")
@@ -998,11 +1015,29 @@ def _invoke_tool(desk: Desk, name: str, args: dict[str, Any]) -> dict[str, Any]:
         series = _book_returns(desk)
         if series is None:
             return {"error": "need a return series or a book of prices"}
-        return compute_var_cvar(series)
+        raw_var = compute_var_cvar(series)
+        if isinstance(raw_var, dict) and not raw_var.get("error"):
+            h_raw = raw_var.get("historical")
+            c_raw = raw_var.get("cvar")
+            p_raw = raw_var.get("parametric")
+            f_raw = raw_var.get("cornish_fisher")
+            hist: dict[str, Any] = h_raw if isinstance(h_raw, dict) else {}
+            cvar: dict[str, Any] = c_raw if isinstance(c_raw, dict) else {}
+            para: dict[str, Any] = p_raw if isinstance(p_raw, dict) else {}
+            cf: dict[str, Any] = f_raw if isinstance(f_raw, dict) else {}
+            raw_var["historical_var_pct"] = hist.get("var_pct")
+            raw_var["cvar_pct"] = cvar.get("cvar_pct")
+            raw_var["parametric_var_pct"] = para.get("var_pct")
+            raw_var["cornish_fisher_var_pct"] = cf.get("var_pct")
+        return raw_var
+    if name in {"scenarios", "scenario"}:
+        return _tool_scenarios(desk)
+    if name in {"monte_carlo", "montecarlo"}:
+        return _tool_monte_carlo(desk, args)
     if name == "process":
         from ..core.process import dgp_stress
 
-        series = _one_series(desk, args.get("name"))
+        series = _one_series(desk, args.get("name")) or _book_returns(desk)
         if series is None:
             return {"error": "need a series to fit"}
         return dgp_stress(series, dgp=str(args.get("dgp") or "gbm"))
@@ -1039,6 +1074,8 @@ def _one_series(desk: Desk, name: Any) -> list[float] | None:
 
 
 def _book_returns(desk: Desk) -> list[float] | None:
+    from ..core.panel import align_panel
+    from ..core.portfolio import build_portfolio
     from ..core.relations import as_returns
 
     data = desk.data
@@ -1049,12 +1086,81 @@ def _book_returns(desk: Desk) -> list[float] | None:
     panel = as_returns(data)
     if not panel:
         return None
+    if len(panel) >= 2:
+        try:
+            aligned, names, _skipped = align_panel(panel, need=8)
+            if aligned.ndim == 2 and aligned.shape[1] >= 2 and aligned.shape[0] >= 8:
+                held = desk.portfolio
+                if not isinstance(held, dict) or not isinstance(held.get("weights"), dict):
+                    held = build_portfolio(data, method="hrp")
+                weights_map = held.get("weights") or {}
+                vec = [float(weights_map.get(name, 0.0)) for name in names]
+                total = sum(vec)
+                if total > 0:
+                    norm = [w / total for w in vec]
+                    return [float(x) for x in (aligned @ norm)]
+        except Exception:  # noqa: BLE001
+            pass
     columns = list(panel.values())
     width = min(len(col) for col in columns)
     if width < 2:
         return None
     tail = [col[-width:] for col in columns]
     return [sum(row) / len(row) for row in zip(*tail, strict=True)]
+
+
+def _tool_monte_carlo(desk: Desk, args: dict[str, Any]) -> dict[str, Any]:
+    from ..agent.brief import run_monte_carlo
+
+    series = _one_series(desk, args.get("name")) if args.get("name") else _book_returns(desk)
+    if series is None:
+        return {"error": "need a return series or a book of prices"}
+    dgp = str(args.get("dgp") or "gbm")
+    n_paths = int(_as_float(args.get("n_paths"), 128.0))
+    horizon = int(_as_float(args.get("horizon"), 252.0))
+    monte = run_monte_carlo(series, dgp=dgp, n_paths=n_paths, horizon=horizon)
+    if monte is None:
+        return {"error": "not enough observations for Monte Carlo"}
+    desk.monte = monte
+    say(
+        f"  monte_carlo  {monte['dgp']}  {monte['n_paths']} paths  {monte['horizon_days']}d  "
+        f"median {monte['terminal_q50_pct']}%  90% cone [{monte['terminal_q05_pct']}%, "
+        f"{monte['terminal_q95_pct']}%]  Sharpe q50 {monte['sharpe_q50']}"
+    )
+    return {
+        "dgp": monte["dgp"],
+        "n_paths": monte["n_paths"],
+        "horizon_days": monte["horizon_days"],
+        "sharpe_q10": monte["sharpe_q10"],
+        "sharpe_q50": monte["sharpe_q50"],
+        "sharpe_q90": monte["sharpe_q90"],
+        "frac_positive": monte["frac_positive"],
+        "positive_pct": monte["positive_pct"],
+        "terminal_q05_pct": monte["terminal_q05_pct"],
+        "terminal_q50_pct": monte["terminal_q50_pct"],
+        "terminal_q95_pct": monte["terminal_q95_pct"],
+        "drawdown_q50_pct": monte["drawdown_q50_pct"],
+        "drawdown_q95_pct": monte["drawdown_q95_pct"],
+    }
+
+
+def _tool_scenarios(desk: Desk) -> dict[str, Any]:
+    from ..agent.brief import _scenarios
+
+    series = _book_returns(desk)
+    if series is None:
+        return {"error": "need a return series or a book of prices"}
+    rows = _scenarios({"returns": series})
+    if not rows:
+        return {"error": "not enough observations for scenario stress"}
+    out: dict[str, Any] = {"n_scenarios": len(rows)}
+    for row in rows:
+        label = str(row.get("name") or "")
+        tag = label.split()[0].replace("-", "_")
+        out[f"{tag}_return_pct"] = row.get("total_return_pct")
+        out[f"{tag}_drawdown_pct"] = row.get("max_drawdown_pct")
+        out[f"{tag}_sharpe"] = row.get("sharpe_annualized")
+    return out
 
 
 def _tool_cross(desk: Desk, kind: str) -> dict[str, Any]:
