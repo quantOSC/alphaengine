@@ -51,13 +51,56 @@ def test_a_bakeoff_cannot_start_another_and_cannot_run_past_a_minute() -> None:
         return '{"tool": "bakeoff", "winner": "equal"}'
 
     done = run_bakeoff("bake these off", think, _book(), rounds=9, seats=9, seconds=10_000)
-    assert len(calls) == 6
-    assert done.figures["n_trials"] == 4
-    assert done.figures["n_failed"] == 4
+    assert len(calls) == 12
+    assert done.figures["n_trials"] == 8
+    assert done.figures["n_failed"] == 8
     assert done.figures["survivor"] is None
     assert done.figures["budget_seconds"] == HARD_CEILING
     assert done.figures["stopped"] == "complete"
     assert done.trace.answer.startswith("Referee.")
+
+
+def test_multi_pass_gan_bakeoff_adapts_across_rounds_and_scores_attacks() -> None:
+    seen_boards: list[str] = []
+    gen_Script = iter(
+        [
+            '{"rule": "equal", "why": "baseline equal weight"}',
+            '{"rule": "momentum", "lookback": 15, "why": "trend sleeve"}',
+            '{"rule": "hrp", "lookback": 25, "why": "cluster diversification"}',
+            '{"rule": "risk_parity", "why": "equal risk contribution"}',
+            '{"rule": "var_sorted", "why": "inverse tail loss"}',
+            '{"rule": "low_vol", "why": "defensive low variance"}',
+            '{"rule": "reversion", "lookback": 10, "why": "short horizon mean reversion"}',
+            '{"rule": "inverse_vol", "why": "volatility scaled"}',
+        ]
+    )
+    adv_script = iter(
+        [
+            '{"attack": "last_half", "why": "out-of-sample regime"}',
+            '{"attack": "high_vol", "why": "volatility spike days"}',
+            '{"attack": "tail_stress", "why": "1.5x downside amplification"}',
+            '{"attack": "rate_shock", "why": "funding and dispersion shock"}',
+        ]
+    )
+
+    def think(prompt: str) -> str:
+        seen_boards.append(prompt)
+        if "ADVERSARY" in prompt:
+            return next(adv_script)
+        return next(gen_Script)
+
+    done = run_bakeoff("construct a resilient book", think, _book())
+    assert len(seen_boards) == 12
+    assert "Pass 4 of 4" in seen_boards[-1]
+    assert "standing" in seen_boards[-2]
+    assert done.figures["n_trials"] == 8
+    assert done.figures["n_failed"] == 0
+    assert done.figures["n_passes"] == 4
+    assert done.figures["attacks"] == ["last_half", "high_vol", "tail_stress", "rate_shock"]
+    assert done.trace.bakeoff is not None
+    assert len(done.trace.bakeoff["passes"]) == 4
+    assert len(done.trace.bakeoff["curves"]) == 8
+    assert done.trace.bakeoff["survivor_weights"]
 
 
 def test_the_clock_ends_the_bakeoff() -> None:

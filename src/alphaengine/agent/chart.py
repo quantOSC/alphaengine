@@ -792,7 +792,7 @@ def _bakeoff(
     fig = plt.figure(figsize=(8.5, 11))
     _chrome(
         fig,
-        "Strategy Bakeoff & Adversarial Referee Tournament",
+        f"Multi-Pass GAN Strategy Bakeoff & Referee Tournament ({bakeoff.get('n_passes') or 4} Passes)",
         stamp,
         stem,
         _question(trace),
@@ -800,68 +800,88 @@ def _bakeoff(
     banner = (
         f"Survivor: {bakeoff.get('survivor')}  |  "
         f"In-Sample Sharpe: {bakeoff.get('survivor_sharpe')}  |  "
-        f"Attacked Sharpe: {bakeoff.get('attacked_sharpe')}  |  "
+        f"Post-Attack Standing: {bakeoff.get('attacked_sharpe')}  |  "
         f"Deflated Sharpe: {bakeoff.get('deflated_sharpe')} ({bakeoff.get('verdict')})\n"
-        f"Trials: {bakeoff.get('n_trials')}  |  "
+        f"Passes: {bakeoff.get('n_passes') or 4}  |  "
+        f"Candidates: {bakeoff.get('n_trials')}  |  "
         f"Adversarial Attacks: {', '.join(bakeoff.get('attacks') or []) or 'none'}"
     )
     fig.text(0.075, 0.895, banner, fontsize=8.0, fontweight="bold", color="#0F172A", va="top")
 
     curves = list(bakeoff.get("curves") or [])
     if curves:
-        ax = fig.add_axes((0.11, 0.45, 0.80, 0.37))
-        ax.set_title("Cumulative Wealth (Growth of 1) Across Candidate Rules", loc="left")
+        ax1 = fig.add_axes((0.09, 0.48, 0.44, 0.34))
+        ax1.set_title("Cumulative Wealth Across Passes", loc="left", fontsize=9.5)
         survivor = str(bakeoff.get("survivor") or "")
         for index, curve in enumerate(curves):
             label = str(curve.get("label") or "")
             is_win = label == survivor
-            ax.plot(
+            ax1.plot(
                 curve.get("growth") or [],
                 color="#0F172A" if is_win else _COLORS[index % len(_COLORS)],
-                lw=2.3 if is_win else 1.25,
-                alpha=1.0 if is_win else 0.85,
-                label=f"{label} (survivor)" if is_win else label,
+                lw=2.2 if is_win else 1.2,
+                alpha=1.0 if is_win else 0.84,
+                label=f"{label}*" if is_win else label,
             )
-        ax.axhline(1.0, color="#64748B", lw=0.7, ls="--")
-        ax.set_xlabel("trading observation")
-        ax.set_ylabel("growth of 1")
-        ax.legend(loc="upper left", ncol=3, fontsize=7.6)
+        ax1.axhline(1.0, color="#64748B", lw=0.7, ls="--")
+        ax1.set_xlabel("trading observation")
+        ax1.set_ylabel("growth of 1")
+        ax1.legend(loc="upper left", ncol=2, fontsize=6.8)
+
+        ax2 = fig.add_axes((0.62, 0.48, 0.30, 0.34))
+        labels = [str(c.get("label") or "") for c in curves][::-1]
+        in_sh = [float(c.get("sharpe") or 0.0) for c in curves][::-1]
+        st_sh = [
+            float(c.get("standing") if c.get("standing") is not None else (c.get("sharpe") or 0.0))
+            for c in curves
+        ][::-1]
+        y_pos = np.arange(len(labels))
+        ax2.barh(y_pos + 0.17, in_sh, height=0.32, color="#0072B2", label="In-Sample")
+        ax2.barh(y_pos - 0.17, st_sh, height=0.32, color="#D95F02", label="Post-Attack")
+        ax2.axvline(0.0, color="#475569", lw=0.8)
+        ax2.set_yticks(y_pos, labels, fontsize=7.2)
+        ax2.set_title("In-Sample vs. Attacked Sharpe", loc="left", fontsize=9.5)
+        ax2.set_xlabel("period Sharpe")
+        ax2.legend(loc="lower right", fontsize=7.0)
 
         tbl_rows: list[list[str]] = []
         survivor = str(bakeoff.get("survivor") or "")
         for idx, curve in enumerate(curves, start=1):
             label = str(curve.get("label") or "")
             status = "SURVIVOR" if label == survivor else "eliminated"
+            p_num = curve.get("round") or ((idx - 1) // 2 + 1)
             tbl_rows.append(
                 [
-                    f"{idx:02d}",
+                    f"P{p_num}",
                     label,
                     _shown(curve.get("sharpe")),
+                    _shown(curve.get("standing")),
+                    str(curve.get("worst_attack") or "in_sample"),
                     _shown(curve.get("annualized_sharpe")),
                     _fmt_pct(curve.get("total_return_pct")),
-                    _fmt_pct(curve.get("volatility_annualized_pct")),
                     _fmt_pct(curve.get("max_drawdown_pct")),
                     status,
                 ]
             )
-        ax_tbl = fig.add_axes((0.075, 0.08, 0.85, 0.30))
+        ax_tbl = fig.add_axes((0.075, 0.07, 0.85, 0.34))
         ax_tbl.axis("off")
-        ax_tbl.set_title("Referee Candidate Scorecard", loc="left", fontsize=9.5)
+        ax_tbl.set_title("Multi-Pass Referee Candidate Scorecard", loc="left", fontsize=9.5)
         _styled_table(
             ax_tbl,
             [
-                "#",
+                "Pass",
                 "Candidate Rule",
-                "Period Sharpe",
-                "Ann Sharpe",
+                "Period SR",
+                "Attacked SR",
+                "Worst Attack",
+                "Ann SR",
                 "Total Ret",
-                "Ann Vol",
                 "Max DD",
-                "Referee Status",
+                "Status",
             ],
             tbl_rows,
-            [0.06, 0.20, 0.12, 0.12, 0.12, 0.12, 0.12, 0.14],
-            fontsize=7.6,
+            [0.06, 0.17, 0.10, 0.11, 0.14, 0.10, 0.10, 0.10, 0.12],
+            fontsize=7.3,
         )
     else:
         trials = list(bakeoff.get("trials") or [])

@@ -143,4 +143,11 @@ is what a changed figure costs. The API may still move underneath it.
 # the sample-count divisor in Ledoit-Wolf shrinkage so hierarchical risk parity
 # and risk parity differentiate weights across a 50-name panel, and writes a
 # multi-page portfolio, scenario, Monte Carlo, and bakeoff report to Downloads.
-__version__ = "1.0.1"
+#
+# 1.0.2 IS THE FOUR-PASS GAN BAKEOFF. No golden in tests/test_goldens.py moves.
+# The bakeoff tournament runs four adversarial passes (eight candidate proposals
+# across `equal`, `hrp`, `risk_parity`, `inverse_vol`, `var_sorted`, `low_vol`,
+# `momentum`, and `reversion` against eight regime, tail, rate, and crash-cluster
+# attacks) under a hard twelve-call, sixty-second ceiling, feeding the referee's
+# post-attack standing back to the board after every pass.
+__version__ = "1.0.2"

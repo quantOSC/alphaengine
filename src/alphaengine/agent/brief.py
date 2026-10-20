@@ -216,7 +216,7 @@ def _books(data: dict[str, list[float]], question: str = "") -> list[dict[str, A
         return []
     if aligned.ndim != 2 or aligned.shape[1] < 2 or aligned.shape[0] < 8:
         return []
-    built: dict[str, np.ndarray] = {}
+    built: dict[str, Any] = {}
     for method in ("hrp", "risk_parity"):
         try:
             result = build_portfolio(data, method=method)
@@ -559,7 +559,7 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
     if not isinstance(raw, dict):
         return None
     curves = []
-    for row in raw.get("curves") or []:
+    for idx, row in enumerate(raw.get("curves") or []):
         if not isinstance(row, dict):
             continue
         growth = row.get("growth")
@@ -570,10 +570,14 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
         stats = _stats([float(x) for x in rets])
         curves.append(
             {
+                "round": int(row.get("round") or (idx // 2 + 1)),
+                "seat": int(row.get("seat") or (idx % 2 + 1)),
                 "label": str(row.get("label") or ""),
                 "growth": growth,
                 "sharpe": row.get("sharpe"),
                 "standing": row.get("standing"),
+                "worst_attack": row.get("worst_attack") or "in_sample",
+                "attack_scores": row.get("attack_scores") or {},
                 "annualized_sharpe": stats.get("sharpe_annualized"),
                 "total_return_pct": stats.get("total_return_pct"),
                 "max_drawdown_pct": stats.get("max_drawdown_pct"),
@@ -583,6 +587,7 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
     trials = [str(line) for line in (raw.get("trials") or [])]
     if not raw.get("survivor") and not trials and not curves:
         return None
+    passes = [p for p in (raw.get("passes") or []) if isinstance(p, dict)]
     return {
         "survivor": raw.get("survivor"),
         "survivor_sharpe": raw.get("survivor_sharpe"),
@@ -590,33 +595,56 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
         "deflated_sharpe": raw.get("deflated_sharpe"),
         "verdict": raw.get("verdict"),
         "n_trials": raw.get("n_trials"),
+        "n_passes": raw.get("n_passes") or max(len(passes), 4),
         "attacks": [str(attack) for attack in (raw.get("attacks") or [])],
         "trials": trials,
-        "curves": curves[:6],
+        "passes": passes,
+        "curves": curves[:8],
+        "survivor_weights": raw.get("survivor_weights") or {},
     }
 
 
 def _default_bakeoff(data: dict[str, list[float]]) -> dict[str, Any] | None:
-    """Run the referee across all six rules when the session did not already run a bakeoff."""
+    """Run the 4-pass referee tournament across all eight rules when the session did not run one."""
     try:
-        from ..core.bakeoff import ATTACKS, referee, trial_paths
+        from ..core.bakeoff import referee, trial_paths
     except Exception:  # noqa: BLE001
         return None
     submissions: list[dict[str, Any]] = [
-        {"rule": "hrp"},
-        {"rule": "risk_parity"},
-        {"rule": "inverse_vol"},
-        {"rule": "equal"},
-        {"rule": "momentum", "lookback": 20},
-        {"rule": "reversion", "lookback": 20},
+        {"rule": "hrp", "_round": 1, "_seat": 1},
+        {"rule": "risk_parity", "_round": 1, "_seat": 2},
+        {"rule": "inverse_vol", "_round": 2, "_seat": 1},
+        {"rule": "var_sorted", "_round": 2, "_seat": 2},
+        {"rule": "low_vol", "_round": 3, "_seat": 1},
+        {"rule": "equal", "_round": 3, "_seat": 2},
+        {"rule": "momentum", "lookback": 20, "_round": 4, "_seat": 1},
+        {"rule": "reversion", "lookback": 20, "_round": 4, "_seat": 2},
     ]
+    pass_attacks = ["last_half", "high_vol", "tail_stress", "rate_shock"]
     try:
-        figures = referee(data, submissions, list(ATTACKS))
-        curves = trial_paths(data, submissions)
+        passes: list[dict[str, Any]] = []
+        for p_idx, atk in enumerate(pass_attacks, start=1):
+            sub_slice = submissions[: p_idx * 2]
+            atk_slice = pass_attacks[:p_idx]
+            step = referee(data, sub_slice, atk_slice)
+            passes.append(
+                {
+                    "pass": p_idx,
+                    "attack": atk,
+                    "leader": step.get("survivor"),
+                    "leader_sharpe": step.get("survivor_sharpe"),
+                    "leader_standing": step.get("attacked_sharpe"),
+                    "n_trials": len(sub_slice),
+                }
+            )
+        figures = referee(data, submissions, pass_attacks)
+        curves = trial_paths(data, submissions, pass_attacks)
     except Exception:  # noqa: BLE001
         return None
     if not figures.get("survivor") and not curves:
         return None
+    survivor_label = str(figures.get("survivor") or "")
+    survivor_curve = next((c for c in curves if c.get("label") == survivor_label), None)
     return {
         "survivor": figures.get("survivor"),
         "survivor_sharpe": figures.get("survivor_sharpe"),
@@ -624,9 +652,12 @@ def _default_bakeoff(data: dict[str, list[float]]) -> dict[str, Any] | None:
         "deflated_sharpe": figures.get("deflated_sharpe"),
         "verdict": figures.get("verdict"),
         "n_trials": figures.get("n_trials"),
+        "n_passes": 4,
         "attacks": list(figures.get("attacks") or []),
         "trials": list(figures.get("trials") or []),
+        "passes": passes,
         "curves": curves,
+        "survivor_weights": (survivor_curve or {}).get("weights") or {},
     }
 
 

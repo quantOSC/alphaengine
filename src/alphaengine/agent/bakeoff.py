@@ -1,8 +1,8 @@
 """Bakeoff mode. Two roles, one clock, and a referee that does not take votes.
 
 Generators may submit a rule. An adversary may submit an attack. Neither may
-start another bakeoff, and neither may name the survivor. The loop is two
-rounds of two proposals plus one attack after each round: six model calls,
+start another bakeoff, and neither may name the survivor. The loop is four
+passes of two proposals plus one attack after each pass: twelve model calls,
 and then it stops even if a model asks to continue.
 
 The clock is the other stop. The default budget is 45 seconds. Nothing can
@@ -25,32 +25,42 @@ from .sim import Call, Think, Trace
 
 DEFAULT_SECONDS = 45.0
 HARD_CEILING = 60.0
-MAX_ROUNDS = 2
+MAX_ROUNDS = 4
 MAX_SEATS = 2
 
 _DROPPED = {"winner", "survivor", "score", "sharpe", "verdict", "deflated_sharpe"}
 
 _GENERATOR = """BAKEOFF GENERATOR
-Propose one strategy. You do not score it, you do not name a winner, and you
+Pass @@ROUND@@ of @@ROUNDS@@ (Seat @@SEAT@@ of @@SEATS@@).
+Propose one strategy that survives the adversary's active attacks and improves on
+the current leader's post-attack standing. Do not repeat a rule+lookback+names
+already on the board. You do not score it, you do not name a winner, and you
 do not start another bakeoff.
 Rules: @@RULES@@
-lookback, for momentum and reversion, is 5 to 60.
+lookback (5 to 60) sets the signal window for momentum/reversion or the calibration
+window for hrp, risk_parity, inverse_vol, var_sorted, and low_vol.
+Optional names: a subset of 2 to 12 symbols from [@@NAMES@@].
+Active attacks: @@ACTIVE_ATTACKS@@
 Question:
 @@QUESTION@@
 Board:
 @@BOARD@@
-Reply with one JSON object: {"rule": "momentum", "lookback": 20}
+Reply with one JSON object: {"rule": "hrp", "lookback": 30, "why": "short reason"}
 """
 
 _ADVERSARY = """BAKEOFF ADVERSARY
-Name one attack. You do not propose a rule, you do not name a winner, and you
-do not start another bakeoff.
+Pass @@ROUND@@ of @@ROUNDS@@.
+Name one attack to stress the current leader's regime or tail vulnerability.
+Prefer an attack from Unused attacks so each pass adds a new stress dimension.
+You do not propose a rule, you do not name a winner, and you do not start another bakeoff.
 Attacks: @@ATTACKS@@
+Active attacks: @@ACTIVE_ATTACKS@@
+Unused attacks: @@UNUSED_ATTACKS@@
 Question:
 @@QUESTION@@
 Board:
 @@BOARD@@
-Reply with one JSON object: {"attack": "last_half"}
+Reply with one JSON object: {"attack": "tail_stress", "why": "short reason"}
 """
 
 
@@ -79,16 +89,24 @@ def run_bakeoff(
     n_seats = min(max(int(seats), 1), MAX_SEATS)
     submissions: list[dict[str, Any]] = []
     attacks: list[str] = []
+    passes: list[dict[str, Any]] = []
     trace = Trace(question=question)
     stopped = "complete"
+    names = _universe_names(data)
 
     def board() -> str:
         if not submissions and not attacks:
             return "nothing proposed yet"
         scored = referee(data, submissions, attacks)
         lines = list(scored.get("trials") or [])
+        if scored.get("survivor"):
+            lines.append(
+                f"leader {scored.get('survivor')}  "
+                f"sharpe {scored.get('survivor_sharpe')}  "
+                f"standing {scored.get('attacked_sharpe')}"
+            )
         if attacks:
-            lines.append("attacks " + ", ".join(attacks))
+            lines.append("attacks " + ", ".join(dict.fromkeys(attacks)))
         return "\n".join(str(line) for line in lines) or "nothing proposed yet"
 
     def emit(call: Call) -> None:
@@ -96,34 +114,80 @@ def run_bakeoff(
         if on_call is not None:
             on_call(call)
 
-    for _round in range(n_rounds):
-        for _seat in range(n_seats):
-            text, in_time = _ask(think, _fill(_GENERATOR, question, board()), deadline)
+    for round_idx in range(1, n_rounds + 1):
+        for seat_idx in range(1, n_seats + 1):
+            prompt = _fill(
+                _GENERATOR,
+                question,
+                board(),
+                round_idx=round_idx,
+                n_rounds=n_rounds,
+                seat_idx=seat_idx,
+                n_seats=n_seats,
+                attacks=attacks,
+                names=names,
+            )
+            text, in_time = _ask(think, prompt, deadline)
             if not in_time:
                 stopped = "clock"
                 break
-            submission = _proposal(text)
+            submission, why = _proposal(text)
+            submission["_round"] = round_idx
+            submission["_seat"] = seat_idx
             submissions.append(submission)
-            emit(Call(tool="submit", args=submission, note=str(submission.get("rule") or "refused")))
+            emit(_submit_call(data, submissions, attacks, submission, why, round_idx, seat_idx))
         if stopped == "clock":
             break
-        text, in_time = _ask(think, _fill(_ADVERSARY, question, board()), deadline)
+        prompt = _fill(
+            _ADVERSARY,
+            question,
+            board(),
+            round_idx=round_idx,
+            n_rounds=n_rounds,
+            seat_idx=0,
+            n_seats=n_seats,
+            attacks=attacks,
+            names=names,
+        )
+        text, in_time = _ask(think, prompt, deadline)
         if not in_time:
             stopped = "clock"
             break
-        attack = _attack(text)
+        attack, why = _attack(text)
         if attack is None:
-            emit(Call(tool="attack", args={}, error="that attack is not in the menu"))
+            emit(
+                Call(
+                    tool="attack",
+                    args={"pass": round_idx},
+                    error="that attack is not in the menu",
+                )
+            )
             continue
         attacks.append(attack)
-        emit(Call(tool="attack", args={"attack": attack}, note=attack))
+        scored_pass = referee(data, submissions, attacks)
+        passes.append(
+            {
+                "pass": round_idx,
+                "attack": attack,
+                "why": why,
+                "leader": scored_pass.get("survivor"),
+                "leader_sharpe": scored_pass.get("survivor_sharpe"),
+                "leader_standing": scored_pass.get("attacked_sharpe"),
+                "n_trials": len(submissions),
+            }
+        )
+        emit(_attack_call(scored_pass, attack, why, round_idx))
 
     figures = referee(data, submissions, attacks)
     elapsed = min(budget, time.monotonic() - (deadline - budget))
     figures["seconds"] = round(elapsed, 1)
     figures["stopped"] = stopped
     figures["budget_seconds"] = budget
+    figures["n_passes"] = len(passes) or n_rounds
     trace.answer = _verdict(figures)
+    curves = trial_paths(data, submissions, attacks)
+    survivor_label = str(figures.get("survivor") or "")
+    survivor_curve = next((c for c in curves if c.get("label") == survivor_label), None)
     trace.bakeoff = {
         "survivor": figures.get("survivor"),
         "survivor_sharpe": figures.get("survivor_sharpe"),
@@ -132,11 +196,81 @@ def run_bakeoff(
         "verdict": figures.get("verdict"),
         "n_trials": figures.get("n_trials"),
         "n_failed": figures.get("n_failed"),
+        "n_passes": len(passes) or n_rounds,
         "attacks": list(figures.get("attacks") or []),
         "trials": list(figures.get("trials") or []),
-        "curves": trial_paths(data, submissions),
+        "passes": passes,
+        "curves": curves,
+        "survivor_weights": (survivor_curve or {}).get("weights") or {},
     }
     return Bakeoff(trace=trace, figures=figures)
+
+
+def _submit_call(
+    data: Any,
+    submissions: list[dict[str, Any]],
+    attacks: list[str],
+    submission: dict[str, Any],
+    why: str,
+    round_idx: int,
+    seat_idx: int,
+) -> Call:
+    clean_args = {k: v for k, v in submission.items() if not str(k).startswith("_")}
+    scored = referee(data, submissions, attacks)
+    trials = list(scored.get("trials") or [])
+    last_line = str(trials[-1]) if trials else ""
+    rule_name = str(submission.get("rule") or "")
+    if not rule_name or "that rule is not in the bakeoff" in last_line:
+        return Call(
+            tool="submit",
+            args=clean_args,
+            figures={"pass": round_idx, "seat": seat_idx, "rule": rule_name or "refused"},
+            note=f"pass {round_idx}.{seat_idx}  refused",
+        )
+    parts = last_line.split()
+    label = parts[1] if len(parts) > 1 else rule_name
+    call_figs: dict[str, Any] = {
+        "pass": round_idx,
+        "seat": seat_idx,
+        "proposal": label,
+        "leader": scored.get("survivor"),
+        "leader_standing": scored.get("attacked_sharpe"),
+    }
+    if "lookback" in clean_args:
+        call_figs["lookback"] = clean_args["lookback"]
+    if why:
+        call_figs["why"] = why
+    note_tail = " ".join(parts[1:]) if len(parts) > 1 else rule_name
+    note = f"pass {round_idx}.{seat_idx}  {note_tail}"
+    return Call(tool="submit", args=clean_args, figures=call_figs, note=note)
+
+
+def _attack_call(
+    scored: dict[str, Any],
+    attack: str,
+    why: str,
+    round_idx: int,
+) -> Call:
+    leader = scored.get("survivor") or "none"
+    standing = scored.get("attacked_sharpe")
+    call_figs: dict[str, Any] = {
+        "pass": round_idx,
+        "attack": attack,
+        "leader": leader,
+        "leader_sharpe": scored.get("survivor_sharpe"),
+        "leader_standing": standing,
+        "n_trials": scored.get("n_trials"),
+    }
+    if why:
+        call_figs["why"] = why
+    note = f"pass {round_idx}  {attack}  leader {leader}  standing {standing}"
+    return Call(tool="attack", args={"attack": attack}, figures=call_figs, note=note)
+
+
+def _universe_names(data: Any) -> list[str]:
+    if not isinstance(data, dict):
+        return []
+    return [str(k) for k in list(data.keys())[:24]]
 
 
 def _budget(seconds: float) -> float:
@@ -177,40 +311,62 @@ def _ask(think: Think, prompt: str, deadline: float) -> tuple[str, bool]:
     return (box[0] if box else ""), True
 
 
-def _fill(template: str, question: str, board: str) -> str:
+def _fill(
+    template: str,
+    question: str,
+    board: str,
+    *,
+    round_idx: int = 1,
+    n_rounds: int = MAX_ROUNDS,
+    seat_idx: int = 1,
+    n_seats: int = MAX_SEATS,
+    attacks: list[str] | None = None,
+    names: list[str] | None = None,
+) -> str:
+    active = list(dict.fromkeys(attacks or []))
+    unused = [a for a in ATTACKS if a not in active]
     return (
         template.replace("@@QUESTION@@", question)
         .replace("@@BOARD@@", board)
+        .replace("@@ROUND@@", str(round_idx))
+        .replace("@@ROUNDS@@", str(n_rounds))
+        .replace("@@SEAT@@", str(seat_idx))
+        .replace("@@SEATS@@", str(n_seats))
         .replace("@@RULES@@", ", ".join(RULES))
         .replace("@@ATTACKS@@", ", ".join(ATTACKS))
+        .replace("@@ACTIVE_ATTACKS@@", ", ".join(active) or "none yet")
+        .replace("@@UNUSED_ATTACKS@@", ", ".join(unused) or "all attacks active")
+        .replace("@@NAMES@@", ", ".join(names or []) or "loaded book")
     )
 
 
-def _proposal(text: str) -> dict[str, Any]:
+def _proposal(text: str) -> tuple[dict[str, Any], str]:
     obj = _object(text)
     if obj is None:
-        return {"rule": ""}
+        return {"rule": ""}, ""
     if "bakeoff" in {str(obj.get("tool") or ""), str(obj.get("rule") or "")}:
-        return {"rule": ""}
+        return {"rule": ""}, ""
     rule = obj.get("rule")
     if not isinstance(rule, str):
-        return {"rule": ""}
+        return {"rule": ""}, ""
     out: dict[str, Any] = {"rule": rule}
-    if "lookback" in obj:
+    if "lookback" in obj and obj["lookback"] is not None:
         out["lookback"] = obj["lookback"]
     if isinstance(obj.get("names"), list):
         out["names"] = [str(name) for name in obj["names"][:12]]
-    return out
+    why = str(obj.get("why") or "").strip()[:80]
+    return out, why
 
 
-def _attack(text: str) -> str | None:
+def _attack(text: str) -> tuple[str | None, str]:
     obj = _object(text)
     if obj is None:
-        return None
+        return None, ""
     attack = str(obj.get("attack") or "").strip().lower().replace("-", "_").replace(" ", "_")
     if attack not in ATTACKS:
-        return None
-    return attack
+        return None, ""
+    why = str(obj.get("why") or "").strip()[:80]
+    return attack, why
 
 
 def _object(text: str) -> dict[str, Any] | None:
@@ -235,6 +391,8 @@ def _verdict(figures: dict[str, Any]) -> str:
     if not survivor:
         return "Referee. No proposal survived."
     return (
-        f"Referee. {figures.get('n_trials')} candidates, source bakeoff. "
-        f"Survivor {survivor}. Verdict {figures.get('verdict')}."
+        f"Referee. {figures.get('n_trials')} candidates across {figures.get('n_passes', MAX_ROUNDS)} passes, "
+        f"source bakeoff. Survivor {survivor} (in-sample Sharpe {figures.get('survivor_sharpe')}, "
+        f"post-attack standing {figures.get('attacked_sharpe')}, "
+        f"deflated Sharpe {figures.get('deflated_sharpe')}). Verdict {figures.get('verdict')}."
     )

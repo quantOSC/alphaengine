@@ -73,6 +73,7 @@ class Desk:
     notes: list[str] = field(default_factory=list)
     portfolio: dict[str, Any] | None = None
     monte: dict[str, Any] | None = None
+    bakeoff: dict[str, Any] | None = None
     boards: list[dict[str, Any]] = field(default_factory=list)
     pending_report: Any = None
     trace_stack: list[str] = field(default_factory=list)
@@ -721,6 +722,7 @@ def _sentence(desk: Desk, line: str) -> None:
         return
     desk.question = line
     desk.trace_stack = []
+    desk.bakeoff = None
     if _wants_bakeoff(line):
         _offer(desk, _begin_bakeoff(desk, think).trace)
         return
@@ -852,6 +854,8 @@ def _attach_local_charts(desk: Desk, trace: Any) -> None:
     trace.boards = list(desk.boards)
     if desk.monte is not None:
         trace.monte = desk.monte
+    if trace.bakeoff is None and desk.bakeoff is not None:
+        trace.bakeoff = desk.bakeoff
     matrix = _chart_matrix(desk.matrix)
     if matrix is not None:
         trace.matrix = matrix
@@ -908,13 +912,25 @@ def _begin_bakeoff(desk: Desk, think: Callable[[str], str], *, seconds: float | 
         desk.trace_stack.append(call.line())
         say(f"  {len(desk.trace_stack):02d}  {call.line()}")
 
-    return run_bakeoff(
+    held = run_bakeoff(
         desk.question,
         _thinking(think),
         desk.data,
         seconds=DEFAULT_SECONDS if seconds is None else seconds,
         on_call=on_call,
     )
+    if isinstance(held.trace.bakeoff, dict):
+        desk.bakeoff = held.trace.bakeoff
+        surv_w = held.trace.bakeoff.get("survivor_weights")
+        if desk.portfolio is None and isinstance(surv_w, dict) and surv_w:
+            desk.portfolio = {
+                "kind": "portfolio",
+                "method": str(held.trace.bakeoff.get("survivor") or "bakeoff"),
+                "weights": surv_w,
+                "n_assets": len(surv_w),
+                "weight_sum": round(sum(float(v) for v in surv_w.values()), 4),
+            }
+    return held
 
 
 def _invoke_tool(desk: Desk, name: str, args: dict[str, Any]) -> dict[str, Any]:

@@ -25,8 +25,26 @@ from .rates import cash_rate
 from .relations import as_returns
 from .validation import deflated_sharpe
 
-RULES = ("equal", "hrp", "risk_parity", "inverse_vol", "momentum", "reversion")
-ATTACKS = ("last_half", "first_half", "drop_best", "high_vol")
+RULES = (
+    "equal",
+    "hrp",
+    "risk_parity",
+    "inverse_vol",
+    "var_sorted",
+    "low_vol",
+    "momentum",
+    "reversion",
+)
+ATTACKS = (
+    "last_half",
+    "first_half",
+    "drop_best",
+    "high_vol",
+    "tail_stress",
+    "rate_shock",
+    "worst_window",
+    "crash_cluster",
+)
 
 _MIN_OBS = 40
 
@@ -57,7 +75,7 @@ def referee(
     attacks: list[str] | None = None,
 ) -> dict[str, Any]:
     """Score every submission. ``n_trials`` is how many were submitted, including the ones that broke."""
-    chosen = [attack for attack in (attacks or []) if attack in ATTACKS]
+    chosen = list(dict.fromkeys(attack for attack in (attacks or []) if attack in ATTACKS))
     panel = _panel(data)
     rows: list[dict[str, Any]] = []
     series: list[np.ndarray | None] = []
@@ -71,6 +89,8 @@ def referee(
             "failed": failed,
             "sharpe": None if per is None else round(per, 4),
             "standing": None,
+            "worst_attack": None,
+            "attack_scores": {},
         }
         rows.append(row)
         if per is not None:
@@ -88,10 +108,7 @@ def referee(
         "attacked_sharpe": None if winner is None else rows[winner]["standing"],
         "attacks": chosen,
         "rules": [row["label"] for row in rows],
-        "trials": [
-            f"{row['index']:02d} {row['label']}  {row['failed'] or 'sharpe ' + str(row['sharpe'])}"
-            for row in rows
-        ],
+        "trials": [_trial_line(row, bool(chosen)) for row in rows],
         "verdict": "no_survivor",
     }
     if winner is None or series[winner] is None:
@@ -108,18 +125,61 @@ def referee(
     return out
 
 
-def trial_paths(data: Any, submissions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Growth of 1 for each proposal. Local to the report. Not a referee figure."""
+def _trial_line(row: dict[str, Any], has_attacks: bool) -> str:
+    if row.get("failed"):
+        return f"{row['index']:02d} {row['label']}  {row['failed']}"
+    if has_attacks and row.get("standing") is not None:
+        worst = row.get("worst_attack") or "in_sample"
+        return (
+            f"{row['index']:02d} {row['label']}  sharpe {row['sharpe']}  standing {row['standing']} ({worst})"
+        )
+    return f"{row['index']:02d} {row['label']}  sharpe {row['sharpe']}"
+
+
+def trial_paths(
+    data: Any,
+    submissions: list[dict[str, Any]],
+    attacks: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Growth of 1, post-attack standing, and terminal weights for each proposal. Local to the report."""
+    chosen = list(dict.fromkeys(attack for attack in (attacks or []) if attack in ATTACKS))
     panel = _panel(data)
-    out: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    series: list[np.ndarray | None] = []
+    weights_list: list[dict[str, float]] = []
     for index, submission in enumerate(submissions):
         label, failed, earned, per = _materialize(panel, submission, index)
-        growth = None if earned is None else np.cumprod(1.0 + earned).tolist()
-        out.append(
+        series.append(earned)
+        weights_list.append(_terminal_weights(panel, submission) if failed is None else {})
+        rows.append(
             {
+                "index": index,
+                "round": int(submission.get("_round") or (index // 2 + 1)),
+                "seat": int(submission.get("_seat") or (index % 2 + 1)),
                 "label": label,
                 "failed": failed,
                 "sharpe": None if per is None else round(float(per), 4),
+                "standing": None,
+                "worst_attack": None,
+                "attack_scores": {},
+            }
+        )
+    _apply_attacks(rows, series, panel, chosen)
+    out: list[dict[str, Any]] = []
+    for row, earned, w_map in zip(rows, series, weights_list, strict=True):
+        growth = None if earned is None else np.cumprod(1.0 + earned).tolist()
+        out.append(
+            {
+                "index": row["index"],
+                "round": row["round"],
+                "seat": row["seat"],
+                "label": row["label"],
+                "failed": row["failed"],
+                "sharpe": row["sharpe"],
+                "standing": row["standing"],
+                "worst_attack": row["worst_attack"],
+                "attack_scores": row["attack_scores"],
+                "weights": w_map,
                 "growth": growth,
             }
         )
@@ -137,14 +197,21 @@ def _apply_attacks(
         if earned is None or row["sharpe"] is None:
             continue
         standing = float(row["sharpe"])
+        worst_name = "in_sample"
+        scores: dict[str, float] = {}
         window = market[-earned.size :] if market is not None and market.size >= earned.size else None
         for attack in attacks:
             attacked = _attack(earned, attack, window)
             score = None if attacked is None else _sharpe(attacked)
             if score is None:
                 continue
-            standing = min(standing, score)
+            scores[attack] = round(score, 4)
+            if score < standing:
+                standing = score
+                worst_name = attack
         row["standing"] = round(standing, 4)
+        row["worst_attack"] = worst_name
+        row["attack_scores"] = scores
 
 
 def _attack(earned: np.ndarray, attack: str, market: np.ndarray | None) -> np.ndarray | None:
@@ -160,6 +227,28 @@ def _attack(earned: np.ndarray, attack: str, market: np.ndarray | None) -> np.nd
     if attack == "high_vol" and market is not None and market.size == earned.size:
         scale = np.abs(market)
         return earned[scale >= float(np.median(scale))]
+    if attack == "tail_stress":
+        if earned.size < 16:
+            return None
+        return np.where(earned < 0.0, earned * 1.5, earned)
+    if attack == "rate_shock":
+        if earned.size < 16:
+            return None
+        mu = float(earned.mean())
+        return (mu - 0.00015) + (earned - mu) * 1.25
+    if attack == "worst_window":
+        span = max(20, earned.size // 3)
+        if earned.size <= span:
+            return earned
+        wealth = np.concatenate((np.array([1.0]), np.cumprod(1.0 + earned)))
+        windows = wealth[span:] / np.maximum(wealth[:-span], 1e-18) - 1.0
+        start = int(np.argmin(windows))
+        return earned[start : start + span]
+    if attack == "crash_cluster" and market is not None and market.size == earned.size:
+        scale = np.abs(market)
+        cut = float(np.quantile(scale, 0.65))
+        picked = earned[scale >= cut]
+        return picked if picked.size >= 10 else None
     return None
 
 
@@ -169,8 +258,12 @@ def _materialize(
     index: int,
 ) -> tuple[str, str | None, np.ndarray | None, float | None]:
     rule = str(submission.get("rule") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    has_lb = "lookback" in submission and submission.get("lookback") is not None
     lookback = _lookback(submission.get("lookback"))
-    label = f"{rule}/{lookback}#{index}" if rule in {"momentum", "reversion"} else f"{rule}#{index}"
+    if rule in {"momentum", "reversion"} or (has_lb and rule in RULES and rule != "equal"):
+        label = f"{rule}/{lookback}#{index}"
+    else:
+        label = f"{rule}#{index}"
     if panel is None:
         return label, "need at least two named series", None, None
     if rule not in RULES:
@@ -179,7 +272,7 @@ def _materialize(
     if returns is None or names is None:
         return label, "those names are not in the book", None, None
     try:
-        earned = _earn(returns, rule, lookback)
+        earned = _earn(returns, rule, lookback if (has_lb or rule in {"momentum", "reversion"}) else None)
     except (ValueError, FloatingPointError):
         return label, "the rule did not run", None, None
     score = None if earned is None else _sharpe(earned)
@@ -188,18 +281,51 @@ def _materialize(
     return label, None, earned, score
 
 
-def _earn(returns: np.ndarray, rule: str, lookback: int) -> np.ndarray | None:
+def _earn(returns: np.ndarray, rule: str, lookback: int | None) -> np.ndarray | None:
+    lb = 20 if lookback is None else lookback
     if rule == "momentum":
-        return _timed(returns, lookback, sign=1.0)
+        return _timed(returns, lb, sign=1.0)
     if rule == "reversion":
-        return _timed(returns, lookback, sign=-1.0)
-    fit = returns[: returns.shape[0] // 2]
+        return _timed(returns, lb, sign=-1.0)
+    half = returns.shape[0] // 2
+    if lookback is not None and half > lookback >= 12:
+        fit = returns[half - lookback : half]
+    else:
+        fit = returns[:half]
     if fit.shape[0] < 8:
         return None
     weights = _weights(fit, rule)
     if weights is None:
         return None
     return returns @ weights
+
+
+def _terminal_weights(
+    panel: tuple[np.ndarray, list[str]] | None,
+    submission: dict[str, Any],
+) -> dict[str, float]:
+    if panel is None:
+        return {}
+    rule = str(submission.get("rule") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if rule not in RULES:
+        return {}
+    sub = _subset(panel, submission.get("names"))
+    if sub[0] is None or sub[1] is None:
+        return {}
+    returns, names = sub
+    lookback = _lookback(submission.get("lookback"))
+    n = len(names)
+    if rule in {"momentum", "reversion"}:
+        sign = 1.0 if rule == "momentum" else -1.0
+        window = returns[-min(lookback, returns.shape[0]) :]
+        score = sign * window.sum(axis=0)
+        shifted = score - float(score.min())
+        total = float(shifted.sum())
+        vec = np.ones(n) / n if total <= 0 else shifted / total
+    else:
+        vec_opt = _weights(returns, rule)
+        vec = np.ones(n) / n if vec_opt is None else vec_opt
+    return {names[i]: round(float(vec[i]), 4) for i in range(n)}
 
 
 def _weights(fit: np.ndarray, rule: str) -> np.ndarray | None:
@@ -209,6 +335,20 @@ def _weights(fit: np.ndarray, rule: str) -> np.ndarray | None:
     if rule == "inverse_vol":
         vol = np.clip(fit.std(axis=0, ddof=1), 1e-8, None)
         raw = 1.0 / vol
+        return raw / raw.sum()
+    if rule == "var_sorted":
+        q05 = np.array(
+            [max(abs(float(np.quantile(fit[:, j], 0.05))), 1e-4) for j in range(n)],
+            dtype=float,
+        )
+        raw = 1.0 / q05
+        return raw / raw.sum()
+    if rule == "low_vol":
+        vol = np.clip(fit.std(axis=0, ddof=1), 1e-8, None)
+        med = float(np.median(vol))
+        inv_var = 1.0 / (vol**2)
+        mask = np.where(vol <= med, 1.0, 0.25)
+        raw = inv_var * mask
         return raw / raw.sum()
     cov, _shrink, _mu = ledoit_wolf_cov(fit)
     labels = [str(i) for i in range(n)]
