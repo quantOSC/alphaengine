@@ -149,6 +149,11 @@ FLAGS: dict[str, Flag] = {
         "",
         "read an upstream JSON result envelope from standard input",
     ),
+    "kill_if": Flag(
+        "--kill-if",
+        "RULE",
+        "kill rule for a hypothesis, e.g. 'DSR < 0.9'",
+    ),
 }
 
 
@@ -634,6 +639,26 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "`validate` needs `load research.momentum` and a screen does not."
         ),
         examples=("load prices.csv", "load research.momentum", "load sp500"),
+    ),
+    Command(
+        verb="idea",
+        group="data",
+        args='new "<thesis>" --kill-if "<rule>" [--family FAMILY] | list | status <id> <state> | show <id>',
+        scope="both",
+        purpose="create, list, update, and evaluate local research hypotheses",
+        body=(
+            "Tracks hypotheses as first-class objects in `.alphaengine/ideas/ideas.jsonl` "
+            'with a falsification rule (`--kill-if "DSR < 0.9"`).\n\n'
+            "Attach runs with `--idea <id>`. `idea show <id>` lists linked runs, "
+            "cumulative trials, and the current verdict against the kill rule."
+        ),
+        examples=(
+            'alphaengine idea new "Cross-sectional momentum holds" --kill-if "DSR < 0.9" --family momentum',
+            "alphaengine idea list",
+            "alphaengine idea status idea_1 testing",
+            "alphaengine idea show idea_1",
+        ),
+        flags=("kill_if", "family"),
     ),
     Command(
         verb="thesis",

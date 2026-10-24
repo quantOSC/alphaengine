@@ -317,3 +317,62 @@ def test_json_envelope_pipes_and_declarative_yaml_pipelines(
     assert proj is not None
     # 3 piped runs + 4 steps in ex1 + 3 steps in ex2 = 10 runs in ledger
     assert len(proj.read_jsonl("ledger/runs.jsonl")) == 10
+
+
+def test_hypotheses_as_objects_kill_rules_and_prior_work_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    assert cli.main(["init", "--name", "idea-test"]) == 0
+    capsys.readouterr()
+
+    # 1. Create an idea with a kill rule
+    assert (
+        cli.main(
+            [
+                "idea",
+                "new",
+                "Moving average crossover on demo walk",
+                "--kill-if",
+                "DSR < 0.9",
+                "--family",
+                "ma_crossover",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    idea_rec = json.loads(capsys.readouterr().out)
+    idea_id = idea_rec["idea_id"]
+    assert idea_rec["status"] == "open"
+    assert idea_rec["family"] == "ma_crossover"
+
+    # 2. Run 1 attached to `--idea <id>`: transitions status to `testing`
+    assert cli.main(["validate", "--project", "alphaengine.demo", "--idea", idea_id]) == 0
+    run1_out = capsys.readouterr().out
+    assert "prior work" not in run1_out
+
+    # 3. Run 2 on the same idea/family: emits prior-work warning!
+    assert cli.main(["validate", "--project", "alphaengine.demo", "--idea", idea_id]) == 0
+    run2_out = capsys.readouterr().out
+    assert "prior work" in run2_out
+    assert "similar to run_" in run2_out
+
+    # 4. `ae idea show <id>` shows linked runs, cumulative trials (18), and kill rule TRIGGERED
+    assert cli.main(["idea", "show", idea_id]) == 0
+    show_out = capsys.readouterr().out
+    assert "testing" in show_out
+    assert "18" in show_out
+    assert "kill_triggered" in show_out
+    assert "TRIGGERED" in show_out
+
+    # 5. Update status to `killed` and verify `ae idea list`
+    assert cli.main(["idea", "status", idea_id[:8], "killed"]) == 0
+    capsys.readouterr()
+    assert cli.main(["idea", "list"]) == 0
+    list_out = capsys.readouterr().out
+    assert idea_id in list_out
+    assert "killed" in list_out

@@ -334,6 +334,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 |---|---|---|
 | `book [<name> \| status]` | show or load sleeves on the multi-strategy book | session |
 | `load <file \| module \| universe>` | a CSV, a project module, or a portal universe | session |
+| `idea new "<thesis>" --kill-if "<rule>" [--family FAMILY] \| list \| status <id> <state> \| show <id>` | create, list, update, and evaluate local research hypotheses | shell + session |
 | `thesis [<name> \| clear]` | choose a portal thesis for the next run | session |
 | `correlation` | the correlation of every loaded name with every other name | session |
 | `covariance` | the sample covariance of every loaded name with every other name | session |
@@ -388,6 +389,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--asof-col COL` | as-of column name or cutoff date for look-ahead checks in data add |
 | `--json` | emit a versioned v1.0 JSON result envelope to stdout |
 | `--stdin` | read an upstream JSON result envelope from standard input |
+| `--kill-if RULE` | kill rule for a hypothesis, e.g. 'DSR < 0.9' |
 
 ### Examples
 
@@ -427,6 +429,10 @@ alphaengine report study.json
 alphaengine report study.json --retail
 alphaengine models
 alphaengine trace
+alphaengine idea new "Cross-sectional momentum holds" --kill-if "DSR < 0.9" --family momentum
+alphaengine idea list
+alphaengine idea status idea_1 testing
+alphaengine idea show idea_1
 alphaengine run screen_universe --thesis momentum
 alphaengine data add prices.csv --name equities
 alphaengine data list

@@ -200,6 +200,22 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "book":
         _book(desk, rest)
         return False
+    if verb == "idea":
+        import shlex
+
+        from ..cli import cmd_idea
+
+        try:
+            toks = shlex.split(rest)
+        except ValueError:
+            toks = rest.split()
+        kill_arg, toks = pop_flag(toks, "--kill-if")
+        fam_arg, toks = pop_flag(toks, "--family")
+        act = toks[0] if toks else "list"
+        tgt = toks[1] if len(toks) > 1 else None
+        st = toks[2] if len(toks) > 2 else None
+        cmd_idea(_ns(desk, action=act, target=tgt, state=st, kill_if=kill_arg or "", family=fam_arg))
+        return False
     if verb in ("thesis", "theses"):
         _thesis(desk, rest)
         return False

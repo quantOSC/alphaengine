@@ -148,7 +148,23 @@ def record_run(
     clean_params = dict(params or {})
     params_hash = sha256_hex(clean_params)
     ds_hashes = list(dataset_hashes or [])
-    resolved_family = (family or "").strip() or (idea_id or "").strip() or command
+
+    resolved_idea_id = (idea_id or "").strip() or None
+    idea_family: str | None = None
+    if resolved_idea_id:
+        try:
+            from .ideas import resolve_idea, update_idea_status
+
+            idea_obj = resolve_idea(proj, resolved_idea_id)
+            resolved_idea_id = str(idea_obj.get("idea_id") or resolved_idea_id)
+            idea_family = str(idea_obj.get("family") or "") or None
+            if idea_obj.get("status") == "open":
+                update_idea_status(proj, resolved_idea_id, "testing")
+        except Exception:  # noqa: BLE001
+            pass
+
+    resolved_family = (family or "").strip() or idea_family or (resolved_idea_id or "") or command
+    idea_id = resolved_idea_id
 
     prior_fam, prior_proj = cumulative_trials_for(
         proj,

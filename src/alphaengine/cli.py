@@ -2116,12 +2116,39 @@ def _run_local_in_project(
         pipe_ctx["returns"] = [float(x) for x in data[:512]]
 
     idea_id = getattr(args, "idea", None) or (upstream_env.get("idea_id") if upstream_env else None)
+    idea_fam: str | None = None
+    if idea_id and proj is not None:
+        with contextlib_suppress():
+            from .ideas import resolve_idea
+
+            resolved_i = resolve_idea(proj, str(idea_id))
+            idea_id = str(resolved_i.get("idea_id") or idea_id)
+            idea_fam = str(resolved_i.get("family") or "") or None
     family = (
         getattr(args, "family", None)
+        or idea_fam
         or (upstream_env.get("family") if upstream_env else None)
         or getattr(args, "project", None)
         or wf
     )
+
+    if proj is not None and not json_out and not getattr(args, "quiet", False):
+        from .ideas import check_prior_work
+
+        priors = check_prior_work(
+            proj,
+            family=str(family),
+            idea_id=str(idea_id) if idea_id else None,
+            params={"workflow": wf, **inputs},
+        )
+        if priors:
+            p0 = priors[0]
+            say(
+                yellow("  prior work")
+                + f"  similar to {bold(str(p0['run_id']))} on {p0['date']}, "
+                + f"verdict {bold(str(p0['verdict']))} "
+                + dim(f"(family {p0['family']}, cumulative trials {p0['cumulative_trials']})")
+            )
 
     ds_hashes = hash_dataset_any(data)
     raw_data_flag = getattr(args, "data", None)
@@ -4285,6 +4312,15 @@ def build_parser() -> argparse.ArgumentParser:
         dest="asof_col",
         help="as-of column name or cutoff date for look-ahead checks",
     )
+    id_cmd = sub.add_parser(
+        "idea",
+        parents=[common],
+        help="create, list, update, and evaluate local research hypotheses",
+    )
+    id_cmd.add_argument("action", nargs="?", default="list", help="new, list, status, or show")
+    id_cmd.add_argument("target", nargs="?", default=None, help="thesis text or idea id")
+    id_cmd.add_argument("state", nargs="?", default=None, help="new status: open, testing, killed, promoted")
+    id_cmd.add_argument("--kill-if", dest="kill_if", default="", help="kill rule, e.g. 'DSR < 0.9'")
     sub.add_parser("gaps", parents=[common], help="what your record says is unanswered")
     tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
@@ -5037,6 +5073,125 @@ def cmd_data(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_idea(args: argparse.Namespace) -> int:
+    """Create, list, update status, or inspect hypotheses in `.alphaengine/ideas/`."""
+    from .envelope import emit_json
+    from .ideas import VALID_STATUSES, create_idea, idea_summary, list_ideas, update_idea_status
+    from .project import find_project
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+
+    action = str(getattr(args, "action", None) or "list").lower().strip()
+    target = getattr(args, "target", None)
+    state = getattr(args, "state", None)
+    json_out = bool(getattr(args, "json_out", False))
+
+    if action == "new":
+        if not target:
+            say(red('idea new requires a thesis: alphaengine idea new "<thesis>" [--kill-if "<rule>"]'))
+            return 2
+        rec = create_idea(
+            proj,
+            str(target),
+            kill_if=str(getattr(args, "kill_if", "") or ""),
+            family=getattr(args, "family", None),
+        )
+        if json_out:
+            emit_json(rec)
+            return 0
+        say(
+            green("Created.")
+            + f"  {bold(str(rec['idea_id']))}  {dim(DOT)}  family {rec['family']}  "
+            + dim(f"status {rec['status']}")
+        )
+        if rec.get("kill_if"):
+            say(f"  {dim('kill_if')}  {rec['kill_if']}")
+        return 0
+
+    if action == "list":
+        rows = list_ideas(proj)
+        if json_out:
+            emit_json({"ideas": rows})
+            return 0
+        if not rows:
+            say(dim("  no hypotheses recorded yet"))
+            return 0
+        say("")
+        for r in rows:
+            say(
+                f"  {bold(str(r.get('idea_id')).ljust(14))}  "
+                f"{str(r.get('status')).ljust(10)}  "
+                f"{dim(str(r.get('family')).ljust(18))}  "
+                f"{r.get('thesis')}"
+            )
+        say("")
+        return 0
+
+    if action == "status":
+        if not target or not state:
+            say(
+                red(
+                    f"idea status requires an id and a state ({', '.join(VALID_STATUSES)}): "
+                    "alphaengine idea status <id> <state>"
+                )
+            )
+            return 2
+        try:
+            updated = update_idea_status(proj, str(target), str(state))
+        except (KeyError, ValueError) as exc:
+            say(red(str(exc)))
+            return 2
+        if json_out:
+            emit_json(updated)
+            return 0
+        say(green("Updated.") + f"  {bold(str(updated['idea_id']))} {ARROW} {updated['status']}")
+        return 0
+
+    if action == "show":
+        if not target:
+            say(red("idea show requires an idea id: alphaengine idea show <id>"))
+            return 2
+        try:
+            summary = idea_summary(proj, str(target))
+        except KeyError as exc:
+            say(red(str(exc)))
+            return 2
+        if json_out:
+            emit_json(summary)
+            return 0
+        say("")
+        say(
+            f"  {bold(str(summary['idea_id']))}  {dim(DOT)}  {summary['status']}  "
+            f"{dim(DOT)}  family {summary['family']}"
+        )
+        say(f"    {dim('thesis')}              {summary['thesis']}")
+        say(f"    {dim('kill_if')}             {summary.get('kill_if') or '(none)'}")
+        say(f"    {dim('linked_runs')}         {summary['n_linked_runs']}")
+        say(f"    {dim('cumulative_trials')}   {summary['cumulative_trials']}")
+        say(f"    {dim('current_verdict')}     {summary.get('current_verdict') or 'none'}")
+        ke = summary.get("kill_evaluation") or {}
+        if ke.get("rule"):
+            say(f"    {dim('kill_evaluation')}     {ke.get('status')} ({ke.get('detail')})")
+        linked = summary.get("linked_runs") or []
+        if linked:
+            say("")
+            say("  " + bold("linked runs"))
+            for r in linked:
+                say(
+                    f"    {r.get('run_id')}  {str(r.get('timestamp') or '')[:10]}  "
+                    f"{str(r.get('command')).ljust(16)}  n={r.get('n_trials')}  "
+                    f"verdict={r.get('verdict')}"
+                )
+        say("")
+        return 0
+
+    say(red(f"Unknown idea action {action!r}. Use new, list, status, or show."))
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -5061,6 +5216,7 @@ def main(argv: list[str] | None = None) -> int:
         "diff": cmd_diff,
         "rerun": cmd_rerun,
         "data": cmd_data,
+        "idea": cmd_idea,
         "gaps": cmd_gaps,
         "tonight": cmd_tonight,
         "demo": cmd_demo,
