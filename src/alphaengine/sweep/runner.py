@@ -61,7 +61,7 @@ def _expand(grid: Mapping[str, Iterable[Any]]) -> list[dict[str, Any]]:
 
 
 def _hash_data(data: Any) -> str:
-    """Content hash of the input series.
+    """Full 64-hex sha256 content hash of the input series.
 
     This is the segment identity, and it is deliberately NOT a user-supplied
     label: a name can be changed to escape a history, an array cannot. Two runs
@@ -70,12 +70,12 @@ def _hash_data(data: Any) -> str:
     """
     try:
         arr = np.asarray(data, dtype=float)
-        return hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()[:16]
+        return hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()
     except (TypeError, ValueError):
         # Not array-shaped (a dict of price series, say). Hash a canonical
         # JSON rendering so the identity is still stable across runs.
         blob = json.dumps(data, sort_keys=True, default=str).encode()
-        return hashlib.sha256(blob).hexdigest()[:16]
+        return hashlib.sha256(blob).hexdigest()
 
 
 def _hash_params(p: Params) -> str:
@@ -167,14 +167,41 @@ class SweepResult:
             }
         return out
 
+    def ledger(self) -> list[dict[str, Any]]:
+        """Per-trial ledger export: parameter hash + Sharpe per trial, plus failed trials."""
+        return [
+            {
+                "index": t.index,
+                "params_hash": t.params_hash,
+                "n_obs": t.n_obs,
+                "sharpe": None if t.failed is not None else t.sharpe,
+                "sharpe_annualized": None if t.failed is not None else t.sharpe_annualized,
+                "total_return_pct": None if t.failed is not None else t.total_return_pct,
+                "failed": t.failed,
+            }
+            for t in self.trials
+        ]
+
     def save(
-        self, path: str | Path = "study.json", *, label: str = "", data_description: str = "", notes: str = ""
+        self,
+        path: str | Path = "study.json",
+        *,
+        label: str = "",
+        data_description: str = "",
+        notes: str = "",
+        include_ledger: bool = False,
     ) -> Path:
         """Write the study to disk. Local file, no account, no upload."""
         from ..study import Study
         from ..study import save as _save
 
-        study = Study.from_sweep(self, label=label, data_description=data_description, notes=notes)
+        study = Study.from_sweep(
+            self,
+            label=label,
+            data_description=data_description,
+            notes=notes,
+            include_ledger=include_ledger,
+        )
         return _save(study, path)
 
     def surface(self) -> dict[str, Any]:

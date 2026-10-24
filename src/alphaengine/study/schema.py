@@ -12,7 +12,9 @@ VERSIONING RULE
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,9 +22,61 @@ from typing import Any
 
 from .._version import __version__
 
-SCHEMA_VERSION = "1.1"
+SCHEMA_VERSION = "1.2"
 
-__all__ = ["Study", "save", "load", "SCHEMA_VERSION"]
+__all__ = [
+    "Study",
+    "save",
+    "load",
+    "seal_study",
+    "verify_study",
+    "canonical_json",
+    "compute_content_sha256",
+    "SCHEMA_VERSION",
+]
+
+
+def _normalize_canonical(node: Any) -> Any:
+    """Normalize nested values with sorted keys and fixed float formatting for hashing."""
+    if isinstance(node, dict):
+        return {str(k): _normalize_canonical(node[k]) for k in sorted(node.keys(), key=str)}
+    if isinstance(node, (list, tuple)):
+        return [_normalize_canonical(v) for v in node]
+    if isinstance(node, bool) or node is None or isinstance(node, (int, str)):
+        return node
+    if isinstance(node, float):
+        if not math.isfinite(node):
+            return None
+        val = 0.0 if node == 0.0 else node
+        return f"{val:.8f}"
+    return str(node)
+
+
+def canonical_json(study: Study | dict[str, Any]) -> str:
+    """Deterministic canonical JSON over a Study (excluding ``content_sha256``)."""
+    raw = dict(study.to_dict() if isinstance(study, Study) else study)
+    raw.pop("content_sha256", None)
+    normalized = _normalize_canonical(raw)
+    return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def compute_content_sha256(study: Study | dict[str, Any]) -> str:
+    """Full 64-hex SHA-256 content hash over canonical JSON of the Study."""
+    return hashlib.sha256(canonical_json(study).encode("utf-8")).hexdigest()
+
+
+def seal_study(study: Study) -> str:
+    """Compute and store ``content_sha256`` on ``study``, returning the 64-hex digest."""
+    digest = compute_content_sha256(study)
+    study.content_sha256 = digest
+    return digest
+
+
+def verify_study(study: Study) -> bool:
+    """True when ``study.content_sha256`` is present and matches its canonical content hash."""
+    if not study.content_sha256:
+        return False
+    return study.content_sha256 == compute_content_sha256(study)
 
 
 @dataclass
@@ -80,6 +134,12 @@ class Study:
     process: dict[str, Any] | None = None
     charts: list[dict[str, Any]] | None = None
 
+    # ── optional, 1.2 ────────────────────────────────────────────────────────
+    # Per-trial ledger (parameter hash + Sharpe per trial, plus failed trials)
+    # and the canonical SHA-256 seal over the study content.
+    trial_ledger: list[dict[str, Any]] | None = None
+    content_sha256: str | None = None
+
     # ── provenance ──────────────────────────────────────────────────────────
     schema_version: str = SCHEMA_VERSION
     engine_version: str = __version__
@@ -89,6 +149,14 @@ class Study:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def seal(self) -> str:
+        """Seal this study in place and return its 64-hex ``content_sha256``."""
+        return seal_study(self)
+
+    def verify(self) -> bool:
+        """Verify that ``content_sha256`` matches this study's canonical content."""
+        return verify_study(self)
 
     def report(self, **kw: Any) -> dict[str, Any]:
         """Send this study to a QuantOS workspace. See `alphaengine.report`.
@@ -112,6 +180,7 @@ class Study:
         risk_free_rate: float | None = None,
         assignment_id: str | None = None,
         thesis_id: str | None = None,
+        include_ledger: bool = False,
     ) -> Study:
         """Build a study from a SweepResult.
 
@@ -120,7 +189,8 @@ class Study:
         something other than a sweep later.
         """
         v = result.verdict(risk_free_rate=risk_free_rate)
-        return cls(
+        ledger = result.ledger() if (include_ledger and hasattr(result, "ledger")) else None
+        study = cls(
             label=label,
             n_trials=v["n_trials"],
             n_trials_source=v["n_trials_source"],
@@ -137,14 +207,19 @@ class Study:
             selection=v.get("selection"),
             surface=result.surface(),
             best_params=v.get("best_params"),
+            trial_ledger=ledger,
             notes=notes,
             assignment_id=assignment_id,
             thesis_id=thesis_id,
         )
+        study.seal()
+        return study
 
 
 def save(study: Study, path: str | Path) -> Path:
     """Write a study to disk. Local file, no network, no account."""
+    if study.content_sha256 is None:
+        study.seal()
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(study.to_dict(), indent=2, default=str), encoding="utf8")

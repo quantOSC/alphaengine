@@ -3881,6 +3881,25 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("commands", parents=[common], help="every command, grouped")
     d.add_argument("verb", nargs="?", help="expand one command in full")
 
+    sl = sub.add_parser(
+        "seal",
+        parents=[common],
+        help="write canonical content_sha256 into a study and verify on re-run",
+    )
+    sl.add_argument("study_path", metavar="study.json", help="path to study.json")
+
+    rp = sub.add_parser(
+        "report",
+        parents=[common],
+        help="send a saved study to quantOS (/api/me/runs/ingest or --retail ledger)",
+    )
+    rp.add_argument("study_path", metavar="study.json", help="path to study.json")
+    rp.add_argument(
+        "--retail",
+        action="store_true",
+        help="post to /api/retail/ledger/import instead of /api/me/runs/ingest",
+    )
+
     r = sub.add_parser("run", parents=[common], help="run one workflow to completion")
     r.add_argument("workflow")
     r.add_argument("--label", help="what to call the artifact")
@@ -4078,6 +4097,84 @@ def cmd_login(args: argparse.Namespace) -> int:
     return 0 if enter_key(which) else 2
 
 
+def cmd_seal(args: argparse.Namespace) -> int:
+    """Write canonical content_sha256 to a study, or verify if already sealed."""
+    import json
+
+    from .study import compute_content_sha256, load, save
+
+    path = pathlib.Path(str(getattr(args, "study_path", "")))
+    if not path.is_file():
+        say(red(f"No study file at {path}."))
+        return 2
+    try:
+        raw_disk = json.loads(path.read_text(encoding="utf-8"))
+        study = load(path)
+    except Exception as exc:  # noqa: BLE001
+        say(red(f"Could not read {path}: {exc}"))
+        return 2
+
+    existing = raw_disk.get("content_sha256")
+    computed = compute_content_sha256(study)
+    if existing:
+        if existing == computed:
+            say(green("Verified.") + f"  {computed}  " + dim(str(path)))
+            return 0
+        say(
+            red("Seal mismatch.")
+            + f"  stored {existing[:16]}... != computed {computed[:16]}...  "
+            + dim(str(path))
+        )
+        return 1
+
+    study.content_sha256 = computed
+    save(study, path)
+    say(green("Sealed.") + f"  {computed}  " + dim(str(path)))
+    return 0
+
+
+def cmd_report_study(args: argparse.Namespace) -> int:
+    """Report a saved study.json to /api/me/runs/ingest or --retail /api/retail/ledger/import."""
+    from .study import ReportError, load
+    from .study.report import report as send_report
+
+    path = pathlib.Path(str(getattr(args, "study_path", "")))
+    if not path.is_file():
+        say(red(f"No study file at {path}."))
+        return 2
+    try:
+        study = load(path)
+    except Exception as exc:  # noqa: BLE001
+        say(red(f"Could not read {path}: {exc}"))
+        return 2
+
+    if study.content_sha256 and not study.verify():
+        say(red(f"Refusing to report {path}: content_sha256 seal does not match study content."))
+        return 2
+
+    retail = bool(getattr(args, "retail", False))
+    source = str(getattr(args, "source", "AlphaEngine CLI") or "AlphaEngine CLI")
+    family = str(getattr(args, "family", "alphaengine_study") or "alphaengine_study")
+    try:
+        res = send_report(
+            study,
+            api_key=getattr(args, "key", None),
+            base_url=getattr(args, "url", None),
+            retail=retail,
+            source=source,
+            family=family,
+        )
+    except ReportError as exc:
+        say(red(str(exc)))
+        return 2
+
+    target = "/api/retail/ledger/import" if retail else "/api/me/runs/ingest"
+    rec_id = res.get("id") or res.get("study_id") or (res.get("imported") or {}).get("id") or ""
+    tail = f"  ({rec_id})" if rec_id else ""
+    say(green("Reported.") + f"  {study.label or path.name} {ARROW} {target}{tail}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -4105,6 +4202,8 @@ def main(argv: list[str] | None = None) -> int:
         "commands": cmd_commands,
         "models": cmd_models,
         "trace": cmd_trace,
+        "seal": cmd_seal,
+        "report": cmd_report_study,
         "run": cmd_run,
         None: cmd_session,  # bare `alphaengine` opens the full-screen session
     }

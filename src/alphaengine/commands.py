@@ -104,6 +104,11 @@ FLAGS: dict[str, Flag] = {
         "",
         "remove ~/.config/alphaengine/credentials.json and clean up its config directory",
     ),
+    "retail": Flag(
+        "--retail",
+        "",
+        "send the study to the retail experiment ledger (/api/retail/ledger/import)",
+    ),
 }
 
 
@@ -377,6 +382,41 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "url",
             "key",
         ),
+    ),
+    Command(
+        verb="seal",
+        group="run",
+        args="<study.json>",
+        scope="cli",
+        purpose="write canonical content_sha256 into a study and verify on re-run",
+        body=(
+            "Computes the canonical-JSON SHA-256 over the study (sorted keys, fixed "
+            "8-decimal float formatting) and writes `content_sha256` into the file.\n\n"
+            "On re-run against a study that already carries `content_sha256`, verifies "
+            "that the content still matches the stored seal and exits non-zero if the "
+            "file was modified."
+        ),
+        examples=("alphaengine seal study.json",),
+    ),
+    Command(
+        verb="report",
+        group="run",
+        args="<study.json> [--retail]",
+        scope="cli",
+        purpose="send a saved study to quantOS (/api/me/runs/ingest or --retail ledger)",
+        body=(
+            "Sends a saved `study.json` to your quantOS workspace. Default posts the "
+            "allowlisted study payload to `POST /api/me/runs/ingest`.\n\n"
+            "Pass `--retail` to import into the retail experiment ledger at "
+            "`POST /api/retail/ledger/import` with `source`, `title`, `sharpe`, "
+            "`total_return_pct`, `max_drawdown_pct`, `n_trials_in_import`, `family`, "
+            "and `notes`."
+        ),
+        examples=(
+            "alphaengine report study.json",
+            "alphaengine report study.json --retail",
+        ),
+        flags=("retail", "url", "key"),
     ),
     Command(
         verb="<anything else>",

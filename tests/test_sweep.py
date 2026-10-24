@@ -298,3 +298,142 @@ def test_study_report_payload_includes_all_ingest_fields_and_guards_length(monke
     assert sent[0]["sr0_expected_max"] == study.sr0_expected_max
     assert sent[0]["min_track_record_length"] == study.min_track_record_length
     assert sent[0]["selection"] == study.selection
+
+
+def test_study_seal_full_data_hash_trial_ledger_and_1_1_backward_compat(tmp_path):
+    def flaky(data=None, fast: int = 10, slow: int = 50):
+        if fast == 15:
+            raise ValueError("bad window")
+        return ma_cross(data=data, fast=fast, slow=slow)
+
+    r = sweep(flaky, {"fast": [5, 10, 15], "slow": [50]}, data=prices())
+    # Full 64-hex data hash
+    assert len(r.data_hash) == 64
+    int(r.data_hash, 16)
+
+    # Optional per-trial ledger export
+    ledger = r.ledger()
+    assert len(ledger) == 3
+    assert ledger[0]["params_hash"] and isinstance(ledger[0]["sharpe"], float)
+    assert ledger[2]["failed"] is not None and ledger[2]["sharpe"] is None
+
+    study = Study.from_sweep(r, label="sealed study", include_ledger=True)
+    assert study.schema_version == "1.2"
+    assert study.trial_ledger is not None and len(study.trial_ledger) == 3
+    assert study.content_sha256 is not None and len(study.content_sha256) == 64
+    assert study.verify() is True
+
+    # Backward compatibility with reading 1.1
+    v11 = study.to_dict()
+    v11["schema_version"] = "1.1"
+    v11.pop("content_sha256", None)
+    v11.pop("trial_ledger", None)
+    v11_path = tmp_path / "study_v11.json"
+    v11_path.write_text(json.dumps(v11), encoding="utf-8")
+    loaded_v11 = load(v11_path)
+    assert loaded_v11.schema_version == "1.1"
+    assert loaded_v11.content_sha256 is None
+    assert loaded_v11.verify() is False
+
+
+def test_cli_seal_and_report_retail_and_default(tmp_path, monkeypatch, capsys):
+    import io
+    import urllib.request
+
+    from alphaengine import cli
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+
+    r = sweep(ma_cross, {"fast": [5, 10], "slow": [50]}, data=prices())
+    study = Study.from_sweep(r, label="cli study", notes="ready")
+    # Write unsealed study first so `alphaengine seal` writes the hash, then re-run to verify
+    raw = study.to_dict()
+    raw["content_sha256"] = None
+    study_path = tmp_path / "study.json"
+    study_path.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+
+    rc1 = cli.main(["seal", str(study_path)])
+    assert rc1 == 0
+    out1 = capsys.readouterr().out
+    assert "Sealed." in out1
+
+    rc2 = cli.main(["seal", str(study_path)])
+    assert rc2 == 0
+    out2 = capsys.readouterr().out
+    assert "Verified." in out2
+
+    # Tamper with the sealed file and verify `seal` fails
+    tampered = json.loads(study_path.read_text(encoding="utf-8"))
+    tampered["n_trials"] = 999
+    tampered_path = tmp_path / "tampered.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    assert cli.main(["seal", str(tampered_path)]) == 1
+    capsys.readouterr()
+
+    # CLI report default -> /api/me/runs/ingest, --retail -> /api/retail/ledger/import
+    requests_seen: list[tuple[str, dict]] = []
+
+    def fake_urlopen(req, timeout=None):
+        requests_seen.append((req.full_url, json.loads(req.data.decode("utf-8"))))
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp(b'{"id": "rec_1", "imported": {"id": "imp_1"}}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    assert (
+        cli.main(
+            [
+                "report",
+                str(study_path),
+                "--key",
+                "ae_live_test",
+                "--url",
+                "https://api.example.invalid",
+            ]
+        )
+        == 0
+    )
+    assert (
+        cli.main(
+            [
+                "report",
+                str(study_path),
+                "--retail",
+                "--key",
+                "ae_live_test",
+                "--url",
+                "https://api.example.invalid",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    assert len(requests_seen) == 2
+    assert requests_seen[0][0] == "https://api.example.invalid/api/me/runs/ingest"
+    assert requests_seen[0][1]["content_sha256"] == study.content_sha256
+
+    assert requests_seen[1][0] == "https://api.example.invalid/api/retail/ledger/import"
+    retail_body = requests_seen[1][1]
+    for k in (
+        "source",
+        "title",
+        "sharpe",
+        "total_return_pct",
+        "max_drawdown_pct",
+        "n_trials_in_import",
+        "family",
+        "notes",
+    ):
+        assert k in retail_body
+    assert retail_body["title"] == "cli study"
+    assert retail_body["n_trials_in_import"] == 2

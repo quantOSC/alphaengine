@@ -29,9 +29,29 @@ WHAT IS NOT IN IT
 
 from typing import Any
 
-from .schema import SCHEMA_VERSION, Study, load, save
+from .schema import (
+    SCHEMA_VERSION,
+    Study,
+    canonical_json,
+    compute_content_sha256,
+    load,
+    save,
+    seal_study,
+    verify_study,
+)
 
-__all__ = ["report", "ReportError", "Study", "save", "load", "SCHEMA_VERSION"]
+__all__ = [
+    "report",
+    "ReportError",
+    "Study",
+    "save",
+    "load",
+    "seal_study",
+    "verify_study",
+    "canonical_json",
+    "compute_content_sha256",
+    "SCHEMA_VERSION",
+]
 
 
 def __getattr__(name: str) -> Any:  # PEP 562

@@ -309,6 +309,8 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `size` | what sizing does the risk model imply? | shell + session |
 | `monitor` | still inside the lines? | shell + session |
 | `run <workflow>` | run one workflow exactly as written | shell + session |
+| `seal <study.json>` | write canonical content_sha256 into a study and verify on re-run | shell |
+| `report <study.json> [--retail]` | send a saved study to quantOS (/api/me/runs/ingest or --retail ledger) | shell |
 | `<anything else>` | ask in plain English; your model picks a workflow and drives it | session |
 | `status` | the current run, and what is loaded | session |
 
@@ -363,6 +365,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--limit N` | how many rows to show (default 25) |
 | `--budget N` | how many runs a night is worth (default 3) |
 | `--purge` | remove ~/.config/alphaengine/credentials.json and clean up its config directory |
+| `--retail` | send the study to the retail experiment ledger (/api/retail/ledger/import) |
 
 ### Examples
 
@@ -389,6 +392,9 @@ alphaengine commands
 alphaengine run screen_universe --universe sp500
 alphaengine run size_position --data returns.csv
 alphaengine run validate_study --project research.momentum
+alphaengine seal study.json
+alphaengine report study.json
+alphaengine report study.json --retail
 alphaengine models
 alphaengine trace
 alphaengine run screen_universe --thesis momentum

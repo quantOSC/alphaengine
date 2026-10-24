@@ -39,13 +39,14 @@ from .._version import API_URL_ENV, DEFAULT_API_URL, LEGACY_API_URL_ENV
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .schema import Study
 
-__all__ = ["report", "ReportError"]
+__all__ = ["report", "ReportError", "_retail_payload"]
 
 DEFAULT_BASE_URL = DEFAULT_API_URL
 _ENV_KEY = "QUANTOS_API_KEY"
 _ENV_API_URL = API_URL_ENV
 _ENV_URL = LEGACY_API_URL_ENV
 _PATH = "/api/me/runs/ingest"
+_RETAIL_PATH = "/api/retail/ledger/import"
 _TIMEOUT = 30
 
 
@@ -122,6 +123,7 @@ def _payload(
         "surface": study.surface or {},
         "performance": study.performance or {},
         "notes": study.notes,
+        "content_sha256": study.content_sha256,
         "assignment_id": assignment_id if assignment_id is not None else study.assignment_id,
         "thesis_id": thesis_id if thesis_id is not None else study.thesis_id,
     }
@@ -129,7 +131,38 @@ def _payload(
         out["process"] = study.process
     if study.charts:
         out["charts"] = study.charts
+    if study.trial_ledger and len(study.trial_ledger) <= MAX_FIGURE_LIST:
+        out["trial_ledger"] = study.trial_ledger
     return {k: v for k, v in out.items() if v is not None}
+
+
+def _retail_payload(
+    study: Study,
+    *,
+    source: str = "AlphaEngine CLI",
+    family: str = "alphaengine_study",
+) -> dict[str, Any]:
+    """Payload for ``POST /api/retail/ledger/import``."""
+    perf = study.performance or {}
+    surf = study.surface or {}
+    sharpe = perf.get("sharpe_annualized")
+    if sharpe is None:
+        sharpe = perf.get("sharpe_ratio")
+    if sharpe is None:
+        sharpe = surf.get("best_sharpe", 0.0)
+    total_ret = perf.get("total_return_pct", 0.0)
+    max_dd = perf.get("max_drawdown_pct", 0.0)
+    n_trials = int(study.n_trials) if study.n_trials and study.n_trials > 0 else 1
+    return {
+        "source": str(source or "AlphaEngine CLI"),
+        "title": str(study.label or "(untitled study)"),
+        "sharpe": float(sharpe or 0.0),
+        "total_return_pct": float(total_ret or 0.0),
+        "max_drawdown_pct": float(max_dd or 0.0),
+        "n_trials_in_import": n_trials,
+        "family": str(family or "alphaengine_study"),
+        "notes": str(study.notes or ""),
+    }
 
 
 def report(
@@ -140,6 +173,9 @@ def report(
     timeout: int = _TIMEOUT,
     assignment_id: str | None = None,
     thesis_id: str | None = None,
+    retail: bool = False,
+    source: str = "AlphaEngine CLI",
+    family: str = "alphaengine_study",
 ) -> dict[str, Any]:
     """Send a study to your workspace and return what the server recorded.
 
@@ -153,6 +189,10 @@ def report(
         timeout: seconds before giving up.
         assignment_id: optional portal assignment id this study answers.
         thesis_id: optional portal thesis id this study was run against.
+        retail: when True, posts to ``/api/retail/ledger/import`` instead of
+            ``/api/me/runs/ingest``.
+        source: ``source`` field when ``retail=True``.
+        family: ``family`` field when ``retail=True``.
 
     Raises:
         ReportError: no key, the key was rejected, or the server could not be
@@ -167,7 +207,7 @@ def report(
     import urllib.error
     import urllib.request
 
-    key = api_key or os.environ.get(_ENV_KEY, "")
+    key = os.environ.get(_ENV_KEY, "") if api_key is None else api_key
     if not key.strip():
         raise ReportError(
             f"No API key. Pass api_key=..., or set {_ENV_KEY}. Create one in the portal under Settings."
@@ -176,10 +216,15 @@ def report(
     root = (base_url or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip(
         "/"
     )
-    body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
+    if retail:
+        body = _guard(_retail_payload(study, source=source, family=family))
+        target_path = _RETAIL_PATH
+    else:
+        body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
+        target_path = _PATH
 
     req = urllib.request.Request(
-        root + _PATH,
+        root + target_path,
         data=json.dumps(body).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
