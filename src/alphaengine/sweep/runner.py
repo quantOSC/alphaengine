@@ -132,7 +132,21 @@ class SweepResult:
         """
         best = self.best
         col = self.matrix[:, best.index]
-        dsr = deflated_sharpe(col.tolist(), n_trials=self.n_trials, risk_free_rate=risk_free_rate)
+        # Cross-trial variance of Sharpe ratios per Bailey & López de Prado (2014).
+        # Fallback to single-series sampling error (trials_sharpe_std=None) only when fewer
+        # than 2 valid trials exist.
+        ok = [t for t in self.trials if t.failed is None]
+        trials_sharpe_std: float | None = None
+        if len(ok) >= 2:
+            dispersion = float(np.std([t.sharpe for t in ok], ddof=1))
+            if math.isfinite(dispersion) and dispersion > 0:
+                trials_sharpe_std = dispersion
+        dsr = deflated_sharpe(
+            col.tolist(),
+            n_trials=self.n_trials,
+            trials_sharpe_std=trials_sharpe_std,
+            risk_free_rate=risk_free_rate,
+        )
         out: dict[str, Any] = {
             "n_trials": self.n_trials,
             "n_trials_source": "derived_from_grid",

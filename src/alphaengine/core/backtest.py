@@ -629,7 +629,12 @@ def score_backtest(
     distribution across many purged held-out partitions. When the sim carried
     costs, a `costs` block reports turnover + net-of-cost vs gross Sharpe."""
     from .performance import performance_report
-    from .validation import cpcv_score, deflated_sharpe, min_track_record_length, pbo_cscv
+    from .validation import (
+        combinatorial_oos_stability,
+        deflated_sharpe,
+        min_track_record_length,
+        pbo_cscv,
+    )
 
     # NOT RECORDED is not the same claim as "one trial", so the two are kept
     # apart: `n_trials_eff` drives the arithmetic, `source` drives the gate and
@@ -718,9 +723,9 @@ def score_backtest(
     elif not pbo_ok:
         not_computed["validation.pbo"] = pbo.get("error", "pbo unavailable")
 
-    # A1, CPCV (opt-in): OOS Sharpe/DSR distribution across purged partitions.
+    # A1, Combinatorial OOS stability (opt-in): OOS Sharpe/DSR distribution across purged partitions.
     if cpcv:
-        cp = cpcv_score(
+        cp = combinatorial_oos_stability(
             returns,
             n_groups=cpcv_n_groups,
             n_test_groups=cpcv_n_test_groups,

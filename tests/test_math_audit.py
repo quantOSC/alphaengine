@@ -14,10 +14,13 @@ import numpy as np
 import pytest
 
 from alphaengine.core import (
+    combinatorial_oos_stability,
     compute_var_cvar,
     cpcv_score,
+    deflated_sharpe,
     drawdown_anatomy,
     overlap_stats,
+    pbo_cscv,
     performance_report,
     run_backtest,
     score_backtest,
@@ -31,7 +34,7 @@ def test_cpcv_purge_and_embargo_drop_the_edges_of_each_held_out_group() -> None:
     """Each test group loses `purge` observations at the front and `embargo` at the back.
 
     The path Sharpe is then the annualised per-period Sharpe of what remains,
-    which is the definition in cpcv_score. Computed here from the same slices
+    which is the definition in combinatorial_oos_stability. Computed here from the same slices
     so a shift of the window fails even when the headline still looks plausible.
     """
     from alphaengine.core.rates import TREASURY_BILL_RATE
@@ -45,20 +48,62 @@ def test_cpcv_purge_and_embargo_drop_the_edges_of_each_held_out_group() -> None:
         path = arr[block]
         paths.append(_per_period_sharpe(path, risk_free_per_period=rf) * math.sqrt(252))
 
-    got = cpcv_score(arr.tolist(), n_groups=4, n_test_groups=1, purge=1, embargo=1)
+    got = combinatorial_oos_stability(arr.tolist(), n_groups=4, n_test_groups=1, purge=1, embargo=1)
     assert got["n_paths"] == 4
     assert got["purge"] == 1
     assert got["embargo"] == 1
     assert got["sharpe_annualized"]["mean"] == round(float(np.mean(paths)), 4)
 
-    untouched = cpcv_score(arr.tolist(), n_groups=4, n_test_groups=1, purge=0, embargo=0)
+    untouched = combinatorial_oos_stability(arr.tolist(), n_groups=4, n_test_groups=1, purge=0, embargo=0)
     assert untouched["sharpe_annualized"]["mean"] != got["sharpe_annualized"]["mean"]
+
+    with pytest.deprecated_call(match="combinatorial_oos_stability"):
+        alias_got = cpcv_score(arr.tolist(), n_groups=4, n_test_groups=1, purge=1, embargo=1)
+    assert alias_got == got
 
 
 def test_cpcv_with_nothing_left_after_purge_is_an_absence() -> None:
-    got = cpcv_score(list(np.linspace(-0.01, 0.01, 16)), n_groups=4, n_test_groups=1, purge=2, embargo=2)
+    got = combinatorial_oos_stability(
+        list(np.linspace(-0.01, 0.01, 16)), n_groups=4, n_test_groups=1, purge=2, embargo=2
+    )
     assert "error" in got
     assert got["n_groups"] == 4
+
+
+def test_deflated_sharpe_n_trials_one_returns_psr_with_note() -> None:
+    r = np.linspace(-0.005, 0.015, 60).tolist()
+    got = deflated_sharpe(r, n_trials=1)
+    assert got["sr0_expected_max"] == 0.0
+    assert got["deflated_sharpe"] == got["psr_vs_zero"]
+    assert "no multiple-testing deflation applies" in got["note"]
+
+
+def test_pbo_cscv_validates_n_splits_even_and_at_least_two() -> None:
+    m = np.random.default_rng(1).normal(0.0, 0.01, size=(40, 4)).tolist()
+    for bad in (0, 1, 3, 5, -2, True):
+        with pytest.raises(ValueError, match="n_splits must be an even integer >= 2"):
+            pbo_cscv(m, n_splits=bad)  # type: ignore[arg-type]
+
+
+def test_sweep_verdict_uses_cross_trial_sharpe_dispersion() -> None:
+    from alphaengine.sweep import sweep
+
+    base = np.random.default_rng(42).normal(0.0, 0.01, 300)
+
+    def bt(data=None, drift: float = 0.0):
+        arr = np.asarray(data, dtype=float)
+        return (arr + float(drift)).tolist()
+
+    res = sweep(bt, {"drift": [-0.004, -0.002, 0.0, 0.001, 0.002]}, data=base)
+    v = res.verdict()
+    ok = [t for t in res.trials if t.failed is None]
+    expected_std = float(np.std([t.sharpe for t in ok], ddof=1))
+    best_col = res.matrix[:, res.best.index].tolist()
+    direct = deflated_sharpe(best_col, n_trials=res.n_trials, trials_sharpe_std=expected_std)
+    no_disp = deflated_sharpe(best_col, n_trials=res.n_trials)
+    assert v["deflated_sharpe"] == direct["deflated_sharpe"]
+    assert v["sr0_expected_max"] == direct["sr0_expected_max"]
+    assert v["sr0_expected_max"] > no_disp["sr0_expected_max"]
 
 
 def test_close_fill_uses_that_bars_close_and_next_open_waits() -> None:

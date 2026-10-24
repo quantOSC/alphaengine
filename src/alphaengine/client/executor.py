@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -37,9 +38,9 @@ import numpy as np
 from ..charts import chart
 from ..core import (
     breadth_ir,
+    combinatorial_oos_stability,
     compute_var_cvar,
     cost_ladder,
-    cpcv_score,
     cs_rank,
     cs_winsorize,
     cs_zscore,
@@ -530,8 +531,15 @@ class StepExecutor:
         result = ws.get("sweep")
         if result is not None:
             n_trials, source = int(result.n_trials), "derived_from_grid"
+            ok = [t for t in result.trials if t.failed is None]
+            if len(ok) >= 2:
+                disp = float(np.std([t.sharpe for t in ok], ddof=1))
+                trials_std_from_grid: float | None = disp if (math.isfinite(disp) and disp > 0) else None
+            else:
+                trials_std_from_grid = None
         elif params.get("n_trials") is not None:
             n_trials, source = int(params["n_trials"]), "asserted"
+            trials_std_from_grid = None
         else:
             # No count, so no deflation. Reported as absent-with-a-reason rather
             # than as a number, because a DSR standing on an invented denominator
@@ -554,6 +562,8 @@ class StepExecutor:
             rf_kwargs["risk_free_rate"] = float(params["risk_free_rate"])
         if params.get("periods_per_year") is not None:
             rf_kwargs["periods_per_year"] = int(params["periods_per_year"])
+        if trials_std_from_grid is not None:
+            rf_kwargs["trials_sharpe_std"] = trials_std_from_grid
         out = deflated_sharpe(self._returns_column(ws), n_trials=n_trials, **rf_kwargs)
         figures = {
             "deflated_sharpe": out.get("deflated_sharpe"),
@@ -896,7 +906,7 @@ class StepExecutor:
         if params.get("periods_per_year") is not None:
             cpcv_kwargs["periods_per_year"] = int(params["periods_per_year"])
         return dict(
-            cpcv_score(
+            combinatorial_oos_stability(
                 returns,
                 n_groups=int(params.get("n_groups") or 8),
                 n_test_groups=int(params.get("n_test_groups") or 2),

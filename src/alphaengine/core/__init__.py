@@ -55,6 +55,7 @@ from .signals import information_coefficient, quantile_returns, signal_decay, si
 from .stress import cost_ladder, drawdown_anatomy, overlap_stats, subperiod_stability
 from .technical import technical_features
 from .validation import (
+    combinatorial_oos_stability,
     cpcv_score,
     deflated_sharpe,
     expected_max_sharpe,
@@ -70,6 +71,7 @@ __all__ = [
     "expected_max_sharpe",
     "min_track_record_length",
     "pbo_cscv",
+    "combinatorial_oos_stability",
     "cpcv_score",
     # performance and risk
     "performance_report",

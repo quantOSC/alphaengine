@@ -44,8 +44,11 @@ def rets(seed: int, n: int) -> list[float]:
 # the same series is "marginal" at one trial and "likely_noise" at five.
 # 0.11.0 subtracted the pinned 4.21% bill, so these are not the 0.10 excess
 # of zero. sr0 moves with the Sharpe because the sampling-error floor does.
+# 1.0.3: at n_trials=1, no multiple-testing deflation applies (SR0 = 0.0,
+# DSR = PSR vs zero = 0.8434, previously 0.6875 and SR0 = 0.037 when silently
+# deflating as N=2).
 DSR_GOLDEN = {
-    1: {"deflated_sharpe": 0.6875, "sr0_expected_max": 0.037, "verdict": "marginal"},
+    1: {"deflated_sharpe": 0.8434, "sr0_expected_max": 0.0, "verdict": "marginal"},
     5: {"deflated_sharpe": 0.427, "sr0_expected_max": 0.0849, "verdict": "likely_noise"},
     40: {"deflated_sharpe": 0.1188, "sr0_expected_max": 0.1559, "verdict": "likely_noise"},
     250: {"deflated_sharpe": 0.0337, "sr0_expected_max": 0.2021, "verdict": "likely_noise"},

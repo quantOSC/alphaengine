@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import warnings
 
 import numpy as np
 from scipy import stats
@@ -106,11 +107,25 @@ def deflated_sharpe(
     psr0 = probabilistic_sharpe_ratio(sr, n, skew, kurt, 0.0)
 
     # Sampling SD of the Sharpe estimator under the null (Lo, 2002), a floor
-    # for trial-Sharpe dispersion when the caller doesn't supply one.
+    # for trial-Sharpe dispersion when the caller doesn't supply one (or when
+    # the empirical cross-trial dispersion is narrower than single-series
+    # sampling noise).
     sr_est_sd = math.sqrt((1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) / (n - 1)) if n > 1 else 0.0
-    std_for_max = trials_sharpe_std if (trials_sharpe_std and trials_sharpe_std > 0) else sr_est_sd
-    sr0 = expected_max_sharpe(max(2, n_trials), std_for_max)
-    dsr = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0)
+    std_for_max = (
+        max(float(trials_sharpe_std), sr_est_sd)
+        if (trials_sharpe_std and trials_sharpe_std > 0)
+        else sr_est_sd
+    )
+    if int(n_trials) <= 1:
+        sr0 = 0.0
+        dsr = psr0
+        no_deflation_note: str | None = (
+            "n_trials=1: no multiple-testing deflation applies; deflated_sharpe equals psr_vs_zero."
+        )
+    else:
+        sr0 = expected_max_sharpe(int(n_trials), std_for_max)
+        dsr = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0)
+        no_deflation_note = None
 
     out = {
         "n_obs": int(n),
@@ -128,6 +143,8 @@ def deflated_sharpe(
         # The headline shown INSTEAD of raw Sharpe.
         "verdict": ("likely_noise" if dsr < 0.5 else "marginal" if dsr < 0.9 else "robust"),
     }
+    if no_deflation_note is not None:
+        out["note"] = no_deflation_note
     record(
         "deflated_sharpe",
         "PSR(SR*) where SR* is the expected maximum Sharpe across n_trials",
@@ -145,7 +162,7 @@ def deflated_sharpe(
     record(
         "sr0_expected_max",
         "sigma_SR * ((1-gamma)*Phi^{-1}(1-1/N) + gamma*Phi^{-1}(1-1/(N*e)))",
-        inputs={"n_trials": int(max(2, n_trials)), "trials_sharpe_std": round(std_for_max, 4)},
+        inputs={"n_trials": int(n_trials), "trials_sharpe_std": round(std_for_max, 4)},
         series={"returns": arr},
         result=round(sr0, 4),
     )
@@ -235,12 +252,15 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
     and for each picks the IS-best config and measures its OOS rank. PBO =
     fraction of partitions where the IS-best config lands below the OOS median.
     """
+    if isinstance(n_splits, bool) or not isinstance(n_splits, int) or n_splits < 2 or n_splits % 2 != 0:
+        raise ValueError(
+            f"n_splits must be an even integer >= 2 (got {n_splits!r}); "
+            "CSCV partitions blocks into equal in-sample and out-of-sample halves."
+        )
     M = np.asarray(pnl_matrix, dtype=float)
     if M.ndim != 2 or M.shape[1] < 2 or M.shape[0] < n_splits * 2:
         return {"error": "need (T>=2S observations, N>=2 configs)", "shape": list(M.shape)}
     T, N = M.shape
-    if n_splits % 2 != 0:
-        n_splits -= 1  # CSCV needs an even number of blocks to halve
 
     blocks = np.array_split(np.arange(T), n_splits)
     # Precompute per-block moments per config.
@@ -289,10 +309,10 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
     return out
 
 
-# ── CPCV, Combinatorial Purged Cross-Validation (single return stream) ──────
+# ── Combinatorial OOS stability (single return stream) ───────────────────────
 
 
-def cpcv_score(
+def combinatorial_oos_stability(
     returns: list[float],
     *,
     n_groups: int = 8,
@@ -304,27 +324,23 @@ def cpcv_score(
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
 ) -> dict:
-    """Combinatorial Purged Cross-Validation (López de Prado, 2018) on ONE return
-    stream, the robustness read a single backtest Sharpe hides.
+    """Combinatorial out-of-sample stability over a single pre-computed return stream.
 
-    Splits the T returns into `n_groups` contiguous groups and enumerates every
-    C(n_groups, n_test_groups) way of holding out `n_test_groups` groups as an
-    out-of-sample (OOS) test PATH. Each held-out block is PURGED (`purge` obs
-    dropped at its leading edge, where a multi-bar return label could overlap the
-    preceding training block) and EMBARGOED (`embargo` obs dropped at its trailing
-    edge). For every path we measure the OOS Sharpe and, when the path is long
-    enough (>= 8 obs), its deflated Sharpe (haircut by `n_trials`). The output is
-    the DISTRIBUTION of those metrics across all paths.
+    WHAT THIS MEASURES (AND HOW IT DIFFERS FROM FULL CPCV):
+    True Combinatorial Purged Cross-Validation (López de Prado, 2018) fits a model
+    on each training partition, purges/embargoes the training labels around test
+    boundaries, predicts on the held-out test groups, and stitches test predictions
+    into full-length backtest paths.
 
-    This reuses the combinatorial-block machinery of `pbo_cscv` (itertools
-    combinations of contiguous blocks) but differs in purpose: pbo_cscv needs a
-    matrix of competing configs to measure SELECTION overfitting; cpcv_score
-    scores a SINGLE strategy's stability across many purged held-out partitions.
-    A 2024 controlled study (ScienceDirect S0950705124011110) finds CPCV superior
-    to K-Fold / Purged-K-Fold / Walk-Forward on both PBO and the DSR test stat.
-
-    Purge/embargo are effectively no-ops for the non-overlapping 1-bar returns the
-    backtester emits, but are applied so overlapping-label callers are covered.
+    Because AlphaEngine evaluates an already-computed return stream without a
+    re-trainable model, this function measures **combinatorial out-of-sample
+    stability**: it splits the `T` returns into `n_groups` contiguous blocks,
+    enumerates `C(n_groups, n_test_groups)` held-out block combinations, trims
+    `purge` observations from the leading edge and `embargo` observations from
+    the trailing edge of each held-out block, concatenates the held-out blocks
+    in time order, and computes the distribution of annualized Sharpe and
+    deflated Sharpe (haircut by `n_trials`) across all held-out sub-sample
+    combinations.
     """
     arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
     n = arr.size
@@ -446,3 +462,40 @@ def cpcv_score(
         result=out["sharpe_annualized"]["median"],
     )
     return out
+
+
+def cpcv_score(
+    returns: list[float],
+    *,
+    n_groups: int = 8,
+    n_test_groups: int = 2,
+    purge: int = 1,
+    embargo: int = 1,
+    n_trials: int = 1,
+    max_paths: int = 2000,
+    risk_free_rate: float | None = None,
+    periods_per_year: int = 252,
+) -> dict:
+    """Deprecated alias for :func:`combinatorial_oos_stability`.
+
+    Measures combinatorial out-of-sample sub-sample stability on a single return
+    stream (no model re-training, paths are held-out block combinations with
+    purge/embargo trimmed from each test block).
+    """
+    warnings.warn(
+        "cpcv_score is deprecated and will be removed in a future major release; "
+        "use combinatorial_oos_stability instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return combinatorial_oos_stability(
+        returns,
+        n_groups=n_groups,
+        n_test_groups=n_test_groups,
+        purge=purge,
+        embargo=embargo,
+        n_trials=n_trials,
+        max_paths=max_paths,
+        risk_free_rate=risk_free_rate,
+        periods_per_year=periods_per_year,
+    )

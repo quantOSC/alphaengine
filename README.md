@@ -558,19 +558,35 @@ Frontier." *Journal of Risk* 15(2), 3 to 44.
 Bailey, D. H., and López de Prado, M. (2014). "The Deflated Sharpe Ratio:
 Correcting for Selection Bias, Backtest Overfitting, and Non-Normality."
 *Journal of Portfolio Management* 40(5), 94 to 107.
+*Implementation notes:* Grid trials are treated as independent (`N = len(grid)`
+with no effective-$N$ clustering adjustment). Cross-trial Sharpe dispersion
+($\sigma_{\text{SR}}$) is computed across valid grid trials when at least two
+exist, falling back to single-series Lo (2002) sampling error otherwise. At
+`n_trials=1`, no multiple-testing deflation applies (`sr0_expected_max = 0.0`,
+`deflated_sharpe = psr_vs_zero`). Verdict thresholds on `deflated_sharpe`:
+`< 0.5` is `likely_noise`, `0.5` to `< 0.9` is `marginal`, and `DSR >= 0.9` is
+`robust`.
 
 **Probability of Backtest Overfitting via CSCV**
 Bailey, D. H., Borwein, J., López de Prado, M., and Zhu, Q. J. (2017). "The
 Probability of Backtest Overfitting." *Journal of Computational Finance* 20(4),
 39 to 69.
 
-**Combinatorial purged cross-validation**
+**Combinatorial out-of-sample stability (`combinatorial_oos_stability`)**
 López de Prado, M. (2018). *Advances in Financial Machine Learning.* Wiley,
 chapters 7 and 12.
+*Implementation note:* Evaluates a single pre-computed return stream across all
+$\binom{G}{k}$ held-out block combinations with `purge` and `embargo` trimmed
+from each test block (no model re-fitting or stitched training predictions).
+`cpcv_score` is retained as a deprecated alias.
 
 **Hierarchical Risk Parity**
 López de Prado, M. (2016). "Building Diversified Portfolios that Outperform
 Out of Sample." *Journal of Portfolio Management* 42(4), 59 to 69.
+*Implementation note:* `hrp_weights` uses the correlation metric distance
+$d_{ij} = \sqrt{\frac{1}{2}(1 - \rho_{ij})}$ with single-linkage hierarchical
+clustering (`scipy.cluster.hierarchy.linkage(..., method="single")`), followed
+by quasi-diagonalization and recursive inverse-variance bisection.
 
 **Covariance shrinkage and spectral denoising**
 Ledoit, O., and Wolf, M. (2004). "A Well-Conditioned Estimator for
