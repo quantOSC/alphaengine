@@ -89,7 +89,7 @@ dev = [
     # PINNED, not floored. A range here means CI can pick up a new lint release
     # on any given day and fail a build that passed yesterday with no change
     # from us. Bump these deliberately.
-    "ruff==0.16.1",
+    "ruff==0.17.1",
     "mypy==2.3.0",
     # The optional extra is installed for development so CI actually exercises
     # and type-checks the factors/pairs path instead of skipping it. Without
