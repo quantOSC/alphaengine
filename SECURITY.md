@@ -2,8 +2,8 @@
 
 ## Reporting a vulnerability
 
-Report privately through [GitHub Security Advisories](https://github.com/quantOSC/alphaengine/security/advisories/new),
-or email **security@quantos.dev**. Please don't open a public issue for a
+Report privately through [GitHub Private Vulnerability Reporting / Security Advisories](https://github.com/quantOSC/alphaengine/security/advisories/new),
+or email **wfe818@gmail.com**. Please don't open a public issue for a
 suspected vulnerability.
 
 We'll acknowledge within **3 working days** and give an assessment within **10**.
