@@ -4370,6 +4370,12 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="open the interactive research shell with project completion and status",
     )
+    plg = sub.add_parser(
+        "plugin",
+        parents=[common],
+        help="list installed loader, method, and report template plugins",
+    )
+    plg.add_argument("action", nargs="?", default="list", help="list (default)")
     lg = sub.add_parser("login", parents=[common], help="sign in, or enter a model key")
     lg.add_argument("provider", nargs="?", default="quantos", help="quantos, anthropic, openai, ...")
     sub.add_parser("models", parents=[common], help="which model providers this machine can use")
@@ -5455,6 +5461,29 @@ def cmd_shell(args: argparse.Namespace) -> int:
     return run_shell(args)
 
 
+def cmd_plugin(args: argparse.Namespace) -> int:
+    """List installed loader, method, and report template plugins."""
+    from .envelope import emit_json
+    from .plugins import discover_plugins
+
+    action = str(getattr(args, "action", None) or "list").lower().strip()
+    if action != "list":
+        say(red(f"Unknown plugin action {action!r}. Use `alphaengine plugin list`."))
+        return 2
+    plugins = discover_plugins()
+    if getattr(args, "json_out", False):
+        emit_json({"plugins": [p.to_dict() for p in plugins]})
+        return 0
+    say("")
+    for p in plugins:
+        say(
+            f"  {bold(p.name.ljust(28))}  {dim(p.kind.ljust(10))}  "
+            f"{dim('[' + p.source + ']')}  {p.description}"
+        )
+    say("")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -5489,6 +5518,7 @@ def main(argv: list[str] | None = None) -> int:
         "push": cmd_push,
         "pull": cmd_pull,
         "shell": cmd_shell,
+        "plugin": cmd_plugin,
         "login": cmd_login,
         "commands": cmd_commands,
         "models": cmd_models,

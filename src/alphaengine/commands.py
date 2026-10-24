@@ -872,6 +872,20 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         flags=("url", "key"),
     ),
     Command(
+        verb="plugin",
+        group="session",
+        args="list",
+        scope="both",
+        purpose="list installed loader, method, and report template plugins",
+        body=(
+            "Discovers plugins registered under the `alphaengine.plugins` entry-point "
+            "group across three kinds: `loader` (e.g. `quantconnect`, `vectorbt`, `csv`), "
+            "`method` (`deflated_sharpe`, `combinatorial_oos_stability`), and `template` "
+            "(`committee_memo`)."
+        ),
+        examples=("alphaengine plugin list",),
+    ),
+    Command(
         verb="shell",
         group="session",
         args="",

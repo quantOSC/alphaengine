@@ -309,6 +309,11 @@ def submit(desk: Desk, line: str) -> bool:
         toks = [t for t in rest.split() if not t.startswith("--")]
         cmd_pull(_ns(desk, remote_name=toks[0] if toks else "quantos"))
         return False
+    if verb == "plugin":
+        from ..cli import cmd_plugin
+
+        cmd_plugin(_ns(desk, action=rest.strip() or "list"))
+        return False
     if verb in ("key", "keys", "login"):
         _key(desk, rest, verb=verb)
         return False

@@ -728,3 +728,89 @@ def test_research_shell_tab_completion_status_line_inline_commands_and_agent_rec
     assert after_runs[-1]["command"] == "agent_tools"
     assert after_runs[-1]["n_trials_source"] == "agent_proposal"
     capsys.readouterr()
+
+
+def test_plugin_system_loaders_methods_templates_and_entrypoint_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import importlib.metadata
+    import json
+
+    from alphaengine.plugins import (
+        PluginSpec,
+        discover_plugins,
+        load_with_plugin,
+        register_plugin,
+        run_method_plugin,
+    )
+
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "docs" / "plugins.md").is_file()
+
+    # 1. `ae plugin list` shows built-in loader, method, and template plugins
+    assert cli.main(["plugin", "list"]) == 0
+    list_out = capsys.readouterr().out
+    for expected in ("quantconnect", "vectorbt", "csv", "deflated_sharpe", "committee_memo"):
+        assert expected in list_out
+
+    assert cli.main(["plugin", "list", "--json"]) == 0
+    pl_json = json.loads(capsys.readouterr().out)
+    names = {p["name"] for p in pl_json["plugins"]}
+    assert {"quantconnect", "vectorbt", "csv", "deflated_sharpe", "committee_memo"} <= names
+
+    # 2. QuantConnect and VectorBT loaders work via `load_with_plugin`
+    qc_study = load_with_plugin(
+        "quantconnect",
+        {"returns": [0.001 * ((i % 7) - 3) for i in range(40)], "totalBacktests": 5},
+    )
+    assert qc_study.n_trials == 5
+    assert qc_study.n_trials_source == "asserted"
+
+    vbt_study = load_with_plugin(
+        "vectorbt",
+        {"returns": [0.001 * ((i % 5) - 2) for i in range(40)]},
+    )
+    assert vbt_study.n_trials_source == "not_recorded"
+    assert vbt_study.verdict is None
+
+    # 3. Method plugin returns a `v1.0` result envelope
+    env_dsr = run_method_plugin(
+        "deflated_sharpe",
+        [0.002 * ((i % 5) - 1) for i in range(50)],
+        n_trials=4,
+    )
+    assert env_dsr["schema_version"] == "1.0"
+    assert env_dsr["command"] == "deflated_sharpe"
+    assert "deflated_sharpe" in env_dsr["figures"]
+
+    # 4. Register a custom method plugin and mock an entry point
+    register_plugin(
+        PluginSpec(
+            name="custom_tail_ratio",
+            kind="method",
+            description="Custom tail ratio diagnostic",
+            fn=lambda rets: {"tail_ratio": 1.35, "n_trials": 2, "verdict": "robust"},
+            source="test",
+        )
+    )
+    custom_env = run_method_plugin("custom_tail_ratio", [0.01, -0.01, 0.02])
+    assert custom_env["schema_version"] == "1.0"
+    assert custom_env["figures"]["tail_ratio"] == 1.35
+
+    class _FakeEP:
+        name = "ep_diagnostic"
+        dist = type("_D", (), {"name": "ext-pkg"})()
+
+        @staticmethod
+        def load():
+            def fn(rets):
+                """Entrypoint diagnostic."""
+                return {"ep_ok": True, "len": len(rets)}
+
+            fn.plugin_kind = "method"  # type: ignore[attr-defined]
+            return fn
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group=None: [_FakeEP()])
+    all_found = {p.name: p for p in discover_plugins()}
+    assert "ep_diagnostic" in all_found
+    assert all_found["ep_diagnostic"].source == "ext-pkg"

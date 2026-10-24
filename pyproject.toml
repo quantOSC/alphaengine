@@ -56,6 +56,11 @@ dependencies = [
 alphaengine = "alphaengine.cli:main"
 ae = "alphaengine.cli:main"
 
+[project.entry-points."alphaengine.plugins"]
+quantconnect = "alphaengine.plugins:quantconnect_plugin"
+vectorbt = "alphaengine.plugins:vectorbt_plugin"
+committee_memo = "alphaengine.plugins:committee_memo_plugin"
+
 [project.optional-dependencies]
 # Factor decomposition (OLS with HAC errors) and cointegration (ADF) need
 # statsmodels, which pulls pandas and patsy behind it. Kept OUT of the core so

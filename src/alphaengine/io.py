@@ -210,7 +210,7 @@ def _extract_qc_trials(raw: Mapping[str, Any]) -> int | None:
     return None
 
 
-def from_quantconnect(
+def _from_quantconnect_impl(
     path: str | Path | Mapping[str, Any],
     *,
     n_trials: int | None = None,
@@ -218,7 +218,6 @@ def from_quantconnect(
     notes: str = "",
     risk_free_rate: float | None = None,
 ) -> StudyWithReturns:
-    """Build a :class:`Study` from a QuantConnect backtest result JSON file (or parsed dict)."""
     if isinstance(path, Mapping):
         raw: Mapping[str, Any] = path
         desc = "quantconnect:dict"
@@ -242,6 +241,28 @@ def from_quantconnect(
         notes=notes,
         risk_free_rate=risk_free_rate,
     )
+
+
+def from_quantconnect(
+    path: str | Path | Mapping[str, Any],
+    *,
+    n_trials: int | None = None,
+    label: str = "",
+    notes: str = "",
+    risk_free_rate: float | None = None,
+) -> StudyWithReturns:
+    """Build a :class:`Study` from a QuantConnect backtest JSON via the `quantconnect` plugin."""
+    from .plugins import load_with_plugin
+
+    res: StudyWithReturns = load_with_plugin(
+        "quantconnect",
+        path,
+        n_trials=n_trials,
+        label=label,
+        notes=notes,
+        risk_free_rate=risk_free_rate,
+    )
+    return res
 
 
 def _extract_vbt_from_csv(path: Path) -> tuple[list[float], int | None]:
@@ -351,7 +372,7 @@ def _extract_vbt_object(obj: Any) -> tuple[list[float], int | None]:
     raise ValueError(f"Unsupported VectorBT input shape: {arr.shape}")
 
 
-def from_vectorbt(
+def _from_vectorbt_impl(
     portfolio_or_csv: Any,
     *,
     n_trials: int | None = None,
@@ -359,7 +380,6 @@ def from_vectorbt(
     notes: str = "",
     risk_free_rate: float | None = None,
 ) -> StudyWithReturns:
-    """Build a :class:`Study` from a VectorBT ``Portfolio`` object, return array, or exported CSV."""
     if isinstance(portfolio_or_csv, (str, Path)):
         p = Path(portfolio_or_csv)
         returns, detected_trials = _extract_vbt_from_csv(p)
@@ -379,3 +399,25 @@ def from_vectorbt(
         notes=notes,
         risk_free_rate=risk_free_rate,
     )
+
+
+def from_vectorbt(
+    portfolio_or_csv: Any,
+    *,
+    n_trials: int | None = None,
+    label: str = "",
+    notes: str = "",
+    risk_free_rate: float | None = None,
+) -> StudyWithReturns:
+    """Build a :class:`Study` from a VectorBT ``Portfolio`` or CSV via the `vectorbt` loader plugin."""
+    from .plugins import load_with_plugin
+
+    res: StudyWithReturns = load_with_plugin(
+        "vectorbt",
+        portfolio_or_csv,
+        n_trials=n_trials,
+        label=label,
+        notes=notes,
+        risk_free_rate=risk_free_rate,
+    )
+    return res
