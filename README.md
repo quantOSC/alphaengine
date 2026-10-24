@@ -386,6 +386,8 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--since DATE` | filter project log to runs on or after YYYY-MM-DD |
 | `--verdict VERDICT` | filter project log by verdict (e.g. robust, marginal, likely_noise) |
 | `--asof-col COL` | as-of column name or cutoff date for look-ahead checks in data add |
+| `--json` | emit a versioned v1.0 JSON result envelope to stdout |
+| `--stdin` | read an upstream JSON result envelope from standard input |
 
 ### Examples
 
@@ -418,6 +420,7 @@ alphaengine commands
 alphaengine run screen_universe --universe sp500
 alphaengine run size_position --data returns.csv
 alphaengine run validate_study --project research.momentum
+alphaengine run examples/screen_validate_size.yaml
 alphaengine rerun HEAD
 alphaengine seal study.json
 alphaengine report study.json

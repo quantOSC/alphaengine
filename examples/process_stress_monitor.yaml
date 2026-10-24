@@ -1,0 +1,15 @@
+# Example 2: Process Calibration -> Stress -> Monitor Pipeline
+# Run with: ae run examples/process_stress_monitor.yaml
+name: process-stress-monitor
+family: ou_mean_reversion
+steps:
+  - command: process
+    dgp: ou
+    inputs:
+      n_paths: 80
+  - command: stress
+    inputs:
+      turnover: 0.15
+  - command: monitor
+    inputs:
+      tolerances: '{"max_drawdown_pct": 25.0, "var_pct": 4.0}'

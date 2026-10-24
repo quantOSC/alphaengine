@@ -252,3 +252,68 @@ def test_dataset_registry_hygiene_checks_and_lineage(
     lin_out = capsys.readouterr().out
     assert "clean_panel" in lin_out
     assert "diagnose_data" in lin_out
+
+
+def test_json_envelope_pipes_and_declarative_yaml_pipelines(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+    import json
+
+    root = Path(__file__).resolve().parents[1]
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    assert cli.main(["init", "--name", "pipe-test"]) == 0
+    capsys.readouterr()
+
+    # 1. Test `ae screen --json | ae validate --stdin --json | ae size --stdin --json`
+    assert cli.main(["screen", "--json"]) == 0
+    screen_json = capsys.readouterr().out
+    env1 = json.loads(screen_json)
+    assert env1["schema_version"] == "1.0"
+    assert env1["command"] == "screen_universe"
+    assert env1["context"]["top_symbol"]
+    assert len(env1["context"]["returns"]) >= 20
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(screen_json))
+    assert cli.main(["validate", "--stdin", "--json"]) == 0
+    val_json = capsys.readouterr().out
+    env2 = json.loads(val_json)
+    assert env2["command"] == "validate_study"
+    assert env2["n_trials"] == 60
+    assert env2["figures"]["deflated_sharpe"] is not None
+
+    monkeypatch.setattr("sys.stdin", io.StringIO(val_json))
+    assert cli.main(["size", "--stdin", "--json"]) == 0
+    size_json = capsys.readouterr().out
+    env3 = json.loads(size_json)
+    assert env3["command"] == "size_position"
+    assert "cvar_pct" in env3["figures"]
+
+    # 2. Test declarative YAML pipelines shipped in `examples/`
+    ex1 = root / "examples" / "screen_validate_size.yaml"
+    ex2 = root / "examples" / "process_stress_monitor.yaml"
+    assert ex1.is_file() and ex2.is_file()
+    assert (root / "docs" / "result-format.md").is_file()
+
+    assert cli.main(["run", str(ex1), "--json"]) == 0
+    pipe1 = json.loads(capsys.readouterr().out)
+    assert pipe1["command"] == "pipeline"
+    assert len(pipe1["steps"]) == 4
+    assert [s["command"] for s in pipe1["steps"]] == [
+        "diagnose_data",
+        "screen_universe",
+        "validate_study",
+        "size_position",
+    ]
+
+    assert cli.main(["run", str(ex2)]) == 0
+    pipe2_out = capsys.readouterr().out
+    assert "process" in pipe2_out
+    assert "stress_study" in pipe2_out
+    assert "monitor_sleeve" in pipe2_out
+
+    proj = find_project(tmp_path)
+    assert proj is not None
+    # 3 piped runs + 4 steps in ex1 + 3 steps in ex2 = 10 runs in ledger
+    assert len(proj.read_jsonl("ledger/runs.jsonl")) == 10

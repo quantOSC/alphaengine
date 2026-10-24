@@ -139,6 +139,16 @@ FLAGS: dict[str, Flag] = {
         "COL",
         "as-of column name or cutoff date for look-ahead checks in data add",
     ),
+    "json": Flag(
+        "--json",
+        "",
+        "emit a versioned v1.0 JSON result envelope to stdout",
+    ),
+    "stdin": Flag(
+        "--stdin",
+        "",
+        "read an upstream JSON result envelope from standard input",
+    ),
 }
 
 
@@ -456,6 +466,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "alphaengine run screen_universe --universe sp500",
             "alphaengine run size_position --data returns.csv",
             "alphaengine run validate_study --project research.momentum",
+            "alphaengine run examples/screen_validate_size.yaml",
         ),
         flags=(
             "project",
@@ -468,6 +479,10 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "quiet",
             "stream",
             "share_series",
+            "json",
+            "stdin",
+            "idea",
+            "family",
             "url",
             "key",
         ),

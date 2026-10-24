@@ -347,7 +347,9 @@ def execute_local_workflow(
     """Execute a workflow locally via `StepExecutor` and return its figures, verdict, and trials."""
     from .client.executor import StepExecutor
 
-    inp = dict(inputs or {})
+    raw_inp = dict(inputs or {})
+    inp = {k: v for k, v in raw_inp.items() if k not in ("grid", "label")}
+    no_trials_inp = {k: v for k, v in inp.items() if k != "n_trials"}
     ex = StepExecutor(data=data, backtest_fn=backtest_fn)
     wf = workflow.lower().strip()
     figures: dict[str, Any] = {}
@@ -358,7 +360,7 @@ def execute_local_workflow(
     trial_rows: list[dict[str, Any]] = []
 
     if wf in ("diagnose", "diagnose_data"):
-        figures = ex.execute("data.profile", inp)
+        figures = ex.execute("data.profile", no_trials_inp)
         n_bad = sum(
             int(figures.get(k) or 0)
             for k in (
@@ -374,30 +376,29 @@ def execute_local_workflow(
         n_trials = 1
         source = "diagnostic"
     elif wf in ("screen", "screen_universe"):
-        figures = ex.execute("compute.screen", inp)
+        figures = ex.execute("compute.screen", no_trials_inp)
         rows = figures.get("rows") or []
         verdict = "ranked" if rows else "empty"
         n_trials = int(figures.get("n_evaluated") or len(rows) or 1)
         source = "derived_from_universe"
     elif wf in ("signal", "evaluate_signal"):
-        ic = ex.execute("compute.signal_ic", inp)
-        qr = ex.execute("compute.signal_quantiles", inp)
-        dec = ex.execute("compute.signal_decay", inp)
+        ic = ex.execute("compute.signal_ic", no_trials_inp)
+        qr = ex.execute("compute.signal_quantiles", no_trials_inp)
+        dec = ex.execute("compute.signal_decay", no_trials_inp)
         figures = {**ic, **qr, **dec}
         t_stat = abs(float(ic.get("ic_t_stat") or 0.0))
         verdict = "informative" if t_stat >= 2.0 else "marginal" if t_stat >= 1.5 else "likely_noise"
         n_trials = int(inp.get("n_trials") or 1)
         source = "asserted" if "n_trials" in inp else "single_signal"
     elif wf in ("validate", "validate_study"):
-        clean_inp = {k: v for k, v in inp.items() if k not in ("grid", "label")}
         with suppress_auto_sweep_record():
-            if backtest_fn is not None and (grid or inp.get("grid")):
-                g = grid or inp.get("grid") or {}
+            if backtest_fn is not None and (grid or raw_inp.get("grid")):
+                g = grid or raw_inp.get("grid") or {}
                 sw = ex.execute("compute.sweep", {"grid": g})
-                dsr = ex.execute("compute.deflated_sharpe", clean_inp)
-                pbo = ex.execute("compute.pbo_cscv", clean_inp)
-                mintrl = ex.execute("compute.min_track_record_length", clean_inp)
-                perf = ex.execute("compute.performance_report", clean_inp)
+                dsr = ex.execute("compute.deflated_sharpe", no_trials_inp)
+                pbo = ex.execute("compute.pbo_cscv", no_trials_inp)
+                mintrl = ex.execute("compute.min_track_record_length", no_trials_inp)
+                perf = ex.execute("compute.performance_report", no_trials_inp)
                 figures = {
                     **perf,
                     **sw,
@@ -414,9 +415,9 @@ def execute_local_workflow(
                     returns_col = sweep_res.matrix[:, best.index].tolist()
                     trial_rows = sweep_res.ledger()
             else:
-                perf = ex.execute("compute.performance_report", clean_inp)
-                mintrl = ex.execute("compute.min_track_record_length", clean_inp)
-                dsr = ex.execute("compute.deflated_sharpe", clean_inp)
+                perf = ex.execute("compute.performance_report", no_trials_inp)
+                mintrl = ex.execute("compute.min_track_record_length", no_trials_inp)
+                dsr = ex.execute("compute.deflated_sharpe", inp)
                 figures = {**perf, **dsr, "min_track_record_length": mintrl.get("min_track_record_length")}
                 verdict = dsr.get("verdict")
                 n_trials = dsr.get("n_trials")
@@ -426,30 +427,42 @@ def execute_local_workflow(
                 except Exception:  # noqa: BLE001
                     returns_col = None
     elif wf in ("stress", "stress_study"):
-        cl = ex.execute("compute.cost_ladder", inp)
-        sub = ex.execute("compute.subperiods", inp)
-        dd = ex.execute("compute.drawdown_anatomy", inp)
+        cl = ex.execute("compute.cost_ladder", no_trials_inp)
+        sub = ex.execute("compute.subperiods", no_trials_inp)
+        dd = ex.execute("compute.drawdown_anatomy", no_trials_inp)
         figures = {**cl, **sub, **dd}
         worst_sr = float(sub.get("worst_segment_sharpe") or 0.0)
         verdict = "robust" if worst_sr > 0 else "fragile"
         n_trials = int(inp.get("n_trials") or 1)
         source = "asserted" if "n_trials" in inp else "stress_test"
     elif wf in ("overlap", "check_overlap"):
-        figures = ex.execute("compute.overlap", inp)
+        figures = ex.execute("compute.overlap", no_trials_inp)
         verdict = str(figures.get("verdict") or "related")
         n_trials = 1
         source = "overlap_check"
     elif wf in ("size", "size_position"):
-        perf = ex.execute("compute.performance_report", inp)
-        var = ex.execute("compute.compute_var_cvar", inp)
-        mintrl = ex.execute("compute.min_track_record_length", inp)
-        vt = ex.execute("compute.vol_target", inp)
+        perf = ex.execute("compute.performance_report", no_trials_inp)
+        var = ex.execute("compute.compute_var_cvar", no_trials_inp)
+        mintrl = ex.execute("compute.min_track_record_length", no_trials_inp)
+        vt = ex.execute("compute.vol_target", no_trials_inp)
         sufficient = bool(mintrl.get("sufficient", False))
-        cvar_val = float(var.get("cvar_pct") or var.get("var_pct") or 2.0)
+        cvar_val = float(
+            (var.get("cvar") or {}).get("cvar_pct")
+            or (var.get("historical") or {}).get("var_pct")
+            or (var.get("parametric") or {}).get("var_pct")
+            or 2.0
+        )
+        var_val = float(
+            (var.get("historical") or {}).get("var_pct")
+            or (var.get("parametric") or {}).get("var_pct")
+            or cvar_val
+        )
         target_w = round(min(1.0, max(0.0, 2.0 / max(cvar_val, 0.25))), 4) if sufficient else None
         figures = {
             **perf,
             **var,
+            "var_pct": var_val,
+            "cvar_pct": cvar_val,
             "min_track_record_length": mintrl.get("min_track_record_length"),
             "sufficient_track_record": sufficient,
             "target_weight": target_w,
@@ -459,17 +472,20 @@ def execute_local_workflow(
         n_trials = int(inp.get("n_trials") or 1)
         source = "asserted" if "n_trials" in inp else "sizing"
     elif wf in ("monitor", "monitor_sleeve"):
-        perf = ex.execute("compute.performance_report", inp)
-        var = ex.execute("compute.compute_var_cvar", inp)
+        mon_inp = {k: v for k, v in no_trials_inp.items() if k != "tolerances"}
+        perf = ex.execute("compute.performance_report", mon_inp)
+        var = ex.execute("compute.compute_var_cvar", mon_inp)
+        mon_var = (var.get("historical") or {}).get("var_pct") or (var.get("parametric") or {}).get("var_pct")
+        mon_cvar = (var.get("cvar") or {}).get("cvar_pct")
+        base_mon = {**perf, **var, "var_pct": mon_var, "cvar_pct": mon_cvar}
         tols = inp.get("tolerances")
         if not isinstance(tols, dict) or not tols:
-            figures = {**perf, **var, "status": "unchecked", "n_checked": 0, "breaches": []}
+            figures = {**base_mon, "status": "unchecked", "n_checked": 0, "breaches": []}
             verdict = "unchecked"
         else:
-            observed_map = {**perf, **var}
             breaches = []
             for k, lim in tols.items():
-                obs_v = observed_map.get(k)
+                obs_v = base_mon.get(k)
                 if (
                     isinstance(obs_v, (int, float))
                     and isinstance(lim, (int, float))
@@ -477,7 +493,7 @@ def execute_local_workflow(
                 ):
                     breaches.append({"limit": k, "observed": obs_v, "tolerance": lim, "direction": "above"})
             status = "breached" if breaches else "ok"
-            figures = {**perf, **var, "status": status, "n_checked": len(tols), "breaches": breaches}
+            figures = {**base_mon, "status": status, "n_checked": len(tols), "breaches": breaches}
             verdict = status
         n_trials = 1
         source = "monitor"

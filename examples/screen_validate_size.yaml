@@ -1,0 +1,12 @@
+# Example 1: Screen -> Validate -> Size Pipeline
+# Run with: ae run examples/screen_validate_size.yaml
+name: screen-validate-size
+family: cross_sectional_momentum
+steps:
+  - command: diagnose
+  - command: screen
+    inputs:
+      rank_by: return_pct
+      top_n: 5
+  - command: validate
+  - command: size

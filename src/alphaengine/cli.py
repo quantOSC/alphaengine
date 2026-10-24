@@ -838,6 +838,7 @@ def load_project(spec: str | None) -> tuple[Any, Any]:
     """
     global _PROJECT_GRID
     if not spec:
+        _PROJECT_GRID = None
         return None, None
 
     if os.getcwd() not in sys.path:
@@ -1814,6 +1815,12 @@ def _overlap_payload(data: Any, symbol: str) -> dict[str, Any] | None:
 def cmd_run(args: argparse.Namespace) -> int:
     from .client import Offline, ServerError
     from .core.relations import KINDS
+    from .project import find_project
+
+    proj = find_project()
+    wf_str = str(getattr(args, "workflow", "") or "")
+    if wf_str.lower().endswith((".yaml", ".yml")):
+        return _cmd_run_pipeline(args, wf_str, proj)
 
     session, url = _session(
         args.url,
@@ -1876,14 +1883,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.label:
         inputs["label"] = args.label
 
-    from .project import find_project
-
-    proj = find_project()
-    # Inside a local `.alphaengine/` project, if the caller did not specify a remote
-    # `--url` or `--key` and no portal key is set, execute the workflow locally and
-    # record it in `.alphaengine/ledger/`.
+    # Inside a local `.alphaengine/` project, or when `--json` / `--stdin` is passed
+    # and no remote `--url` or `--key` was specified, execute locally.
     if (
-        proj is not None
+        (proj is not None or getattr(args, "json_out", False) or getattr(args, "stdin_in", False))
         and getattr(args, "url", None) is None
         and getattr(args, "key", None) is None
         and not os.environ.get(_ENV_KEY)
@@ -1978,6 +1981,40 @@ _LOCAL_CATALOGUE: list[dict[str, Any]] = [
 ]
 
 
+def _cmd_run_pipeline(args: argparse.Namespace, pipeline_file: str, proj: Any) -> int:
+    from .envelope import ENVELOPE_SCHEMA_VERSION, emit_json
+    from .pipeline import run_pipeline
+
+    try:
+        envelopes = run_pipeline(pipeline_file, proj=proj)
+    except Exception as exc:  # noqa: BLE001
+        say(red(str(exc)))
+        return 2
+    if getattr(args, "json_out", False):
+        emit_json(
+            {
+                "schema_version": ENVELOPE_SCHEMA_VERSION,
+                "command": "pipeline",
+                "pipeline": str(pipeline_file),
+                "steps": envelopes,
+            }
+        )
+        return 0
+    say("")
+    say(f"  {bold('pipeline')}  {pipeline_file}  {dim(DOT)}  {len(envelopes)} steps")
+    for idx, env in enumerate(envelopes, start=1):
+        nt_val = env.get("n_trials")
+        ct_val = env.get("cumulative_trials")
+        say(
+            f"    {idx:02d}  {bold(str(env.get('command')).ljust(18))}  "
+            f"{str(env.get('verdict') or '').ljust(12)}  "
+            f"{dim(str(env.get('run_id')))}  "
+            f"{dim(f'trials={nt_val} cum={ct_val}')}"
+        )
+    say("")
+    return 0
+
+
 def _run_local_in_project(
     args: argparse.Namespace,
     proj: Any,
@@ -1986,13 +2023,63 @@ def _run_local_in_project(
     backtest_fn: Any,
     inputs: dict[str, Any],
 ) -> int:
+    from .envelope import build_envelope, emit_json, read_stdin_envelope, returns_from_panel_or_series
     from .ledger import execute_local_workflow, hash_dataset_any, record_run, record_trials
 
     wf = str(args.workflow)
+    json_out = bool(getattr(args, "json_out", False))
+    stdin_in = bool(getattr(args, "stdin_in", False))
+    upstream_env: dict[str, Any] | None = None
+
+    if stdin_in:
+        try:
+            upstream_env = read_stdin_envelope()
+        except Exception as exc:  # noqa: BLE001
+            say(red(str(exc)))
+            return 2
+        up_ctx = upstream_env.get("context") or {}
+        if data is None and up_ctx.get("returns"):
+            data = [float(x) for x in up_ctx["returns"]]
+        elif data is None and up_ctx.get("data_path"):
+            from .connectors import load_panel
+
+            dp = pathlib.Path(str(up_ctx["data_path"]))
+            if dp.is_file():
+                data = load_panel(dp)
+        if (
+            wf in ("validate_study", "size_position", "stress_study", "monitor_sleeve")
+            and backtest_fn is None
+            and "n_trials" not in inputs
+            and upstream_env.get("n_trials")
+        ):
+            inputs["n_trials"] = int(upstream_env["n_trials"])
+
+    # In `--json` or `--stdin` mode with no explicit data flag, provide the built-in demo data
+    # so `ae screen --json | ae validate --stdin | ae size --stdin` works out of the box.
+    if data is None and (json_out or stdin_in):
+        if wf in ("screen_universe", "diagnose_data"):
+            from .demo_universe import data as demo_u
+
+            data = demo_u
+        elif wf in ("size_position", "stress_study", "monitor_sleeve") or (
+            wf == "validate_study" and backtest_fn is None
+        ):
+            from .demo_returns import data as demo_r
+
+            data = demo_r
+
     if "grid" not in inputs and project_grid():
         inputs["grid"] = project_grid()
 
-    gap = preflight(_LOCAL_CATALOGUE, wf, data=data, backtest_fn=backtest_fn)
+    local_cat = list(_LOCAL_CATALOGUE)
+    if wf == "validate_study" and stdin_in and backtest_fn is None:
+        local_cat = [
+            {"name": "validate_study", "version": "1.0.0", "requires": ["returns"], "reproducible": True}
+            if r.get("name") == "validate_study"
+            else r
+            for r in local_cat
+        ]
+    gap = preflight(local_cat, wf, data=data, backtest_fn=backtest_fn)
     if gap:
         say("")
         say(yellow(gap))
@@ -2010,28 +2097,35 @@ def _run_local_in_project(
         say(red(str(exc)))
         return 2
 
-    data_obj_sha: str | None = None
-    if data is not None:
-        try:
-            data_obj_sha = proj.put_object(data)
-        except Exception:  # noqa: BLE001
-            data_obj_sha = None
-
-    idea_id = getattr(args, "idea", None)
-    family = getattr(args, "family", None) or getattr(args, "project", None) or wf
-    repro_spec: dict[str, Any] = {
-        "kind": "workflow",
-        "workflow": wf,
-        "project_module": getattr(args, "project", None),
+    # Build pipe handoff context for downstream `--stdin` consumers
+    pipe_ctx: dict[str, Any] = {
         "data_path": getattr(args, "data", None),
-        "data_object_sha256": data_obj_sha,
-        "symbol": getattr(args, "symbol", None),
-        "grid": inputs.get("grid"),
-        "inputs": inputs,
+        "project_module": getattr(args, "project", None),
     }
+    rows = figures.get("rows")
+    if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+        top_sym = str(rows[0].get("symbol") or rows[0].get("ticker") or "")
+        pipe_ctx["top_symbol"] = top_sym
+        pipe_ctx["shortlist"] = [str(r.get("symbol") or r.get("ticker") or "") for r in rows[:10]]
+        rets_top, _ = returns_from_panel_or_series(data, top_sym)
+        if rets_top:
+            pipe_ctx["returns"] = rets_top
+    elif returns_col:
+        pipe_ctx["returns"] = returns_col
+    elif isinstance(data, list) and data and isinstance(data[0], (int, float)):
+        pipe_ctx["returns"] = [float(x) for x in data[:512]]
+
+    idea_id = getattr(args, "idea", None) or (upstream_env.get("idea_id") if upstream_env else None)
+    family = (
+        getattr(args, "family", None)
+        or (upstream_env.get("family") if upstream_env else None)
+        or getattr(args, "project", None)
+        or wf
+    )
+
     ds_hashes = hash_dataset_any(data)
     raw_data_flag = getattr(args, "data", None)
-    if raw_data_flag:
+    if raw_data_flag and proj is not None:
         with contextlib_suppress():
             from .datasets import get_dataset
 
@@ -2046,44 +2140,93 @@ def _run_local_in_project(
             if f_sha not in ds_hashes:
                 ds_hashes.insert(0, f_sha)
 
-    rec = record_run(
-        proj,
-        command=wf,
-        params={"workflow": wf, **inputs},
-        dataset_hashes=ds_hashes,
-        n_trials=n_trials,
-        n_trials_source=source,
-        figures=figures,
-        verdict=verdict,
-        idea_id=idea_id,
-        family=str(family),
-        repro_spec=repro_spec,
-        returns_for_deflation=returns_col,
-    )
-    if trial_rows:
-        record_trials(
+    if proj is not None:
+        data_obj_sha: str | None = None
+        if data is not None:
+            try:
+                data_obj_sha = proj.put_object(data)
+            except Exception:  # noqa: BLE001
+                data_obj_sha = None
+        repro_spec: dict[str, Any] = {
+            "kind": "workflow",
+            "workflow": wf,
+            "project_module": getattr(args, "project", None),
+            "data_path": getattr(args, "data", None),
+            "data_object_sha256": data_obj_sha,
+            "symbol": getattr(args, "symbol", None),
+            "grid": inputs.get("grid"),
+            "inputs": inputs,
+        }
+        rec = record_run(
             proj,
-            run_id=str(rec["run_id"]),
-            trials=trial_rows,
+            command=wf,
+            params={"workflow": wf, **inputs},
+            dataset_hashes=ds_hashes,
+            n_trials=n_trials,
+            n_trials_source=source,
+            figures=figures,
+            verdict=verdict,
             idea_id=idea_id,
             family=str(family),
+            repro_spec=repro_spec,
+            returns_for_deflation=returns_col,
+        )
+        if trial_rows:
+            record_trials(
+                proj,
+                run_id=str(rec["run_id"]),
+                trials=trial_rows,
+                idea_id=idea_id,
+                family=str(family),
+                timestamp=str(rec["timestamp"]),
+            )
+        env = build_envelope(
+            command=wf,
+            figures=rec["figures"],
+            verdict=rec["verdict"],
+            run_id=str(rec["run_id"]),
             timestamp=str(rec["timestamp"]),
+            idea_id=idea_id,
+            family=str(rec["family"]),
+            params_hash=str(rec["params_hash"]),
+            dataset_hashes=rec["dataset_hashes"],
+            n_trials=rec["n_trials"],
+            n_trials_source=str(rec["n_trials_source"]),
+            cumulative_trials=int(rec["cumulative_trials"]),
+            project_trials=int(rec["project_trials"]),
+            context=pipe_ctx,
+        )
+    else:
+        env = build_envelope(
+            command=wf,
+            figures=figures,
+            verdict=verdict,
+            idea_id=idea_id,
+            family=str(family),
+            dataset_hashes=ds_hashes,
+            n_trials=n_trials,
+            n_trials_source=source,
+            context=pipe_ctx,
         )
 
+    if json_out:
+        emit_json(env)
+        return 0
+
     if not getattr(args, "quiet", False):
-        say(f"  {green(ON)}  {bold(wf)}  {dim(DOT)}  {rec['run_id']}")
-        _render_artifact({"figures": {"local": rec["figures"]}})
+        say(f"  {green(ON)}  {bold(wf)}  {dim(DOT)}  {env['run_id']}")
+        _render_artifact({"figures": {"local": env["figures"]}})
         say("")
-        src_note = dim(f"({rec['n_trials_source']})")
-        say(f"  {dim('trials (this run)')}     {rec['n_trials']}  {src_note}")
+        src_note = dim(f"({env['n_trials_source']})")
+        say(f"  {dim('trials (this run)')}     {env['n_trials']}  {src_note}")
         say(
-            f"  {dim('trials (cumulative)')}   {rec['cumulative_trials']}  "
-            f"{dim('(family ' + str(rec['family']) + ', project total ' + str(rec['project_trials']) + ')')}"
+            f"  {dim('trials (cumulative)')}   {env['cumulative_trials']}  "
+            f"{dim('(family ' + str(env['family']) + ', project total ' + str(env['project_trials']) + ')')}"
         )
-        if rec["figures"].get("cumulative_deflated_sharpe") is not None:
+        if env["figures"].get("cumulative_deflated_sharpe") is not None:
             say(
-                f"  {dim('cumulative DSR')}        {rec['figures']['cumulative_deflated_sharpe']}  "
-                f"{dim('(' + str(rec['figures'].get('cumulative_verdict') or '') + ')')}"
+                f"  {dim('cumulative DSR')}        {env['figures']['cumulative_deflated_sharpe']}  "
+                f"{dim('(' + str(env['figures'].get('cumulative_verdict') or '') + ')')}"
             )
     return 0
 
@@ -4063,6 +4206,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--idea", help="attach the run or filter the log to a local hypothesis id")
     common.add_argument("--family", help="strategy or experiment family for cumulative trial counting")
+    common.add_argument(
+        "--json",
+        dest="json_out",
+        action="store_true",
+        help="emit a versioned v1.0 JSON result envelope to stdout",
+    )
+    common.add_argument(
+        "--stdin",
+        dest="stdin_in",
+        action="store_true",
+        help="read an upstream JSON result envelope from standard input",
+    )
 
     p = argparse.ArgumentParser(
         prog="alphaengine",
@@ -4214,6 +4369,17 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
         say(red("process takes ou, gbm, jump, or garch."))
         return 2
     source = "loaded"
+    if data is None and getattr(args, "stdin_in", False):
+        from .envelope import read_stdin_envelope
+
+        try:
+            up_env = read_stdin_envelope()
+            up_rets = (up_env.get("context") or {}).get("returns")
+            if isinstance(up_rets, list) and up_rets:
+                data = up_rets
+        except Exception as exc:  # noqa: BLE001
+            say(red(str(exc)))
+            return 2
     if data is None:
         loaded, _bt = resolve_data(args)
         data = loaded
@@ -4226,11 +4392,15 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
     if getattr(series, "size", 0) < 3:
         say(red("process needs a numeric series (a close, a spread, or returns)."))
         return 2
-    with Working(f"fitting {dgp}", plain=f"fitting {dgp}"):
+    json_out = bool(getattr(args, "json_out", False))
+    if json_out:
         figures = dgp_stress(series, dgp=dgp, n_paths=80, seed=7)
-    say("")
-    say(f"  {bold('process')}  {dim(DOT)}  {dgp}  {dim(DOT)}  {source}")
-    say("")
+    else:
+        with Working(f"fitting {dgp}", plain=f"fitting {dgp}"):
+            figures = dgp_stress(series, dgp=dgp, n_paths=80, seed=7)
+        say("")
+        say(f"  {bold('process')}  {dim(DOT)}  {dgp}  {dim(DOT)}  {source}")
+        say("")
     keys = (
         "kappa",
         "theta",
@@ -4257,17 +4427,20 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
         "frac_positive",
     )
     present = [k for k in keys if figures.get(k) is not None]
-    width = max((len(k) for k in present), default=8)
-    for k in present:
-        say(f"    {dim(k.ljust(width))}  {figures[k]}")
-    hist = figures.get("sharpe_hist") or {}
-    counts = hist.get("counts") or []
-    if counts:
-        say("")
-        say("    " + dim("sharpe hist") + "  " + sparkline([float(c) for c in counts], width=36))
+    if not json_out:
+        width = max((len(k) for k in present), default=8)
+        for k in present:
+            say(f"    {dim(k.ljust(width))}  {figures[k]}")
+        hist = figures.get("sharpe_hist") or {}
+        counts = hist.get("counts") or []
+        if counts:
+            say("")
+            say("    " + dim("sharpe hist") + "  " + sparkline([float(c) for c in counts], width=36))
     from .project import find_project
 
     proj = find_project()
+    verdict_val = "positive" if float(figures.get("sharpe_q50") or 0.0) > 0 else "likely_noise"
+    rec: dict[str, Any] | None = None
     if proj is not None:
         from .ledger import hash_dataset_any, record_run
 
@@ -4282,7 +4455,7 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
             n_trials=int(figures.get("n_trials") or 80),
             n_trials_source=str(figures.get("n_trials_source") or "monte_carlo"),
             figures={k: figures[k] for k in present},
-            verdict="positive" if float(figures.get("sharpe_q50") or 0.0) > 0 else "likely_noise",
+            verdict=verdict_val,
             idea_id=getattr(args, "idea", None),
             family=getattr(args, "family", None) or f"process:{dgp}",
             repro_spec={
@@ -4293,11 +4466,36 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
                 "data_object_sha256": data_sha,
             },
         )
-        say("")
-        say(
-            f"    {dim('recorded')}  {rec['run_id']}  {dim(DOT)}  "
-            f"run trials {rec['n_trials']}  {dim(DOT)}  cumulative trials {rec['cumulative_trials']}"
+        if not json_out:
+            say("")
+            say(
+                f"    {dim('recorded')}  {rec['run_id']}  {dim(DOT)}  "
+                f"run trials {rec['n_trials']}  {dim(DOT)}  cumulative trials {rec['cumulative_trials']}"
+            )
+    if json_out:
+        from .envelope import build_envelope, emit_json, returns_from_panel_or_series
+        from .ledger import hash_dataset_any
+
+        nt_proc = int(figures.get("n_trials") or 80)
+        rets_ctx, _ = returns_from_panel_or_series(series.tolist())
+        emit_json(
+            build_envelope(
+                command="process",
+                figures=rec["figures"] if rec else {k: figures[k] for k in present},
+                verdict=verdict_val,
+                run_id=str(rec["run_id"]) if rec else None,
+                timestamp=str(rec["timestamp"]) if rec else None,
+                idea_id=getattr(args, "idea", None),
+                family=str(rec["family"]) if rec else f"process:{dgp}",
+                dataset_hashes=hash_dataset_any(series),
+                n_trials=nt_proc,
+                n_trials_source=str(figures.get("n_trials_source") or "monte_carlo"),
+                cumulative_trials=int(rec["cumulative_trials"]) if rec else nt_proc,
+                project_trials=int(rec["project_trials"]) if rec else nt_proc,
+                context={"returns": (rets_ctx or [])[:512]},
+            )
         )
+        return 0
     say("")
     say(
         "  "
