@@ -91,7 +91,12 @@ def _guard(payload: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
-def _payload(study: Study) -> dict[str, Any]:
+def _payload(
+    study: Study,
+    *,
+    assignment_id: str | None = None,
+    thesis_id: str | None = None,
+) -> dict[str, Any]:
     """The subset that crosses. Explicit rather than `asdict()`.
 
     An allowlist, not a denylist: a field added to `Study` later does not start
@@ -104,13 +109,21 @@ def _payload(study: Study) -> dict[str, Any]:
         "engine_version": study.engine_version,
         "n_trials": study.n_trials,
         "n_trials_source": study.n_trials_source,
+        "grid_keys": list(study.grid_keys) if study.grid_keys is not None else [],
+        "n_failed_trials": study.n_failed_trials,
         "data_hash": study.data_hash,
         "data_description": study.data_description,
         "verdict": study.verdict,
         "deflated_sharpe": study.deflated_sharpe,
+        "psr_vs_zero": study.psr_vs_zero,
+        "sr0_expected_max": study.sr0_expected_max,
+        "min_track_record_length": study.min_track_record_length,
+        "selection": study.selection,
         "surface": study.surface or {},
         "performance": study.performance or {},
         "notes": study.notes,
+        "assignment_id": assignment_id if assignment_id is not None else study.assignment_id,
+        "thesis_id": thesis_id if thesis_id is not None else study.thesis_id,
     }
     if study.process:
         out["process"] = study.process
@@ -125,6 +138,8 @@ def report(
     api_key: str | None = None,
     base_url: str | None = None,
     timeout: int = _TIMEOUT,
+    assignment_id: str | None = None,
+    thesis_id: str | None = None,
 ) -> dict[str, Any]:
     """Send a study to your workspace and return what the server recorded.
 
@@ -133,9 +148,11 @@ def report(
         api_key: a portal-issued `ae_live_*` key. Falls back to the
             ``QUANTOS_API_KEY`` environment variable, which is where a key
             belongs — a key pasted into a notebook is a key committed to git.
-        base_url: the platform to report to. Falls back to ``QUANTOS_API_URL``,
-            then to the public API. Set it for a self-hosted or VPC deployment.
+        base_url: the platform to report to. Falls back to ``ALPHAENGINE_API_URL``,
+            ``QUANTOS_API_URL``, then to the public API. Set it for a self-hosted or VPC deployment.
         timeout: seconds before giving up.
+        assignment_id: optional portal assignment id this study answers.
+        thesis_id: optional portal thesis id this study was run against.
 
     Raises:
         ReportError: no key, the key was rejected, or the server could not be
@@ -159,7 +176,7 @@ def report(
     root = (base_url or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip(
         "/"
     )
-    body = _guard(_payload(study))
+    body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
 
     req = urllib.request.Request(
         root + _PATH,

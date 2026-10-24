@@ -209,3 +209,92 @@ def test_study_1_1_keeps_optional_process_and_charts(tmp_path):
     assert back.process == {"dgp": "ou"}
     assert back.charts[0]["kind"] == "hist"
     assert back.schema_version == SCHEMA_VERSION
+
+
+def test_study_report_payload_includes_all_ingest_fields_and_guards_length(monkeypatch):
+    import io
+    import urllib.request
+
+    from alphaengine.study.report import MAX_FIGURE_LIST, _guard, _payload
+
+    r = sweep(ma_cross, {"fast": [5, 10], "slow": [50, 100]}, data=prices(), store_params=True)
+    study = Study.from_sweep(
+        r,
+        label="full ingest payload",
+        data_description="synthetic",
+        notes="checked",
+        assignment_id="asgn_123",
+        thesis_id="th_456",
+    )
+    payload = _payload(study)
+
+    # Every field the quantOS ingest model accepts:
+    for expected in (
+        "label",
+        "schema_version",
+        "engine_version",
+        "n_trials",
+        "n_trials_source",
+        "grid_keys",
+        "n_failed_trials",
+        "data_hash",
+        "data_description",
+        "verdict",
+        "deflated_sharpe",
+        "psr_vs_zero",
+        "sr0_expected_max",
+        "min_track_record_length",
+        "selection",
+        "surface",
+        "performance",
+        "notes",
+        "assignment_id",
+        "thesis_id",
+    ):
+        assert expected in payload, f"missing {expected} from _payload"
+
+    assert payload["grid_keys"] == ["fast", "slow"]
+    assert payload["n_failed_trials"] == 0
+    assert payload["assignment_id"] == "asgn_123"
+    assert payload["thesis_id"] == "th_456"
+    assert payload["selection"]["n_configs"] == 4
+    # Allowlist still excludes best_params
+    assert "best_params" not in payload
+    assert _guard(payload) is payload
+
+    # Length guard still rejects any > 512 list inside any ingest field
+    bad = dict(payload)
+    bad["selection"] = {"logits": list(range(MAX_FIGURE_LIST + 1))}
+    with pytest.raises(ValueError, match="is a series"):
+        _guard(bad)
+
+    # End-to-end report() sends the full payload and supports overriding assignment_id/thesis_id
+    sent: list[dict] = []
+
+    def fake_urlopen(req, timeout=None):
+        sent.append(json.loads(req.data.decode("utf-8")))
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp(b'{"id": "run_1", "study_id": "st_1"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    res = study.report(
+        api_key="ae_live_test",
+        base_url="https://api.example.invalid",
+        assignment_id="asgn_override",
+        thesis_id="th_override",
+    )
+    assert res["id"] == "run_1"
+    assert len(sent) == 1
+    assert sent[0]["assignment_id"] == "asgn_override"
+    assert sent[0]["thesis_id"] == "th_override"
+    assert sent[0]["psr_vs_zero"] == study.psr_vs_zero
+    assert sent[0]["sr0_expected_max"] == study.sr0_expected_max
+    assert sent[0]["min_track_record_length"] == study.min_track_record_length
+    assert sent[0]["selection"] == study.selection

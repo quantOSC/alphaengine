@@ -84,6 +84,8 @@ class Study:
     schema_version: str = SCHEMA_VERSION
     engine_version: str = __version__
     notes: str = ""
+    assignment_id: str | None = None
+    thesis_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -108,6 +110,8 @@ class Study:
         data_description: str = "",
         notes: str = "",
         risk_free_rate: float | None = None,
+        assignment_id: str | None = None,
+        thesis_id: str | None = None,
     ) -> Study:
         """Build a study from a SweepResult.
 
@@ -134,6 +138,8 @@ class Study:
             surface=result.surface(),
             best_params=v.get("best_params"),
             notes=notes,
+            assignment_id=assignment_id,
+            thesis_id=thesis_id,
         )
 
 
