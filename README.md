@@ -116,8 +116,17 @@ Each is useful without the one above it. `login` lights the next one.
 | **Workflows** | a QuantOS `ae_live_` key (`login`) | The loop end to end, with the record. |
 | **Ask anything** | your OWN model key (`login anthropic`) | Plain English in. Runs under your account, not ours. |
 
-Nothing here stores a model key: it is read from your environment at call time
-and handed to the provider's own client. There is no field to put one in.
+**How credentials are handled.** QuantOS never receives your LLM provider key:
+it goes directly from this process to your chosen provider. By default, keys can
+be supplied via environment variables (`QUANTOS_API_KEY`, `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, etc.), which touches nothing on disk. If you run `login` and
+say **yes** to *"Stay signed in on this machine?"*, `auth.py` writes an optional
+`~/.config/alphaengine/credentials.json` (`0600` permissions;
+`%APPDATA%\alphaengine\credentials.json` on Windows) so you do not have to
+re-paste in every terminal. Environment variables always win over that file.
+To avoid disk storage entirely, set environment variables only (or answer `n`
+at `login`). To delete the stored file at any time, run
+`alphaengine logout --purge` (or `alphaengine logout`).
 
 ```mermaid
 flowchart LR
@@ -304,7 +313,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 
 | Command | Does | Where |
 |---|---|---|
-| `logout` | remove stored credentials from this machine | shell + session |
+| `logout [--purge]` | remove stored credentials from this machine | shell + session |
 | `version` | print the version | shell |
 | `help` | the short list: demo, login, load, then a question | session |
 | `quit` | leave the session | session |
@@ -335,6 +344,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--share-series` | opt in to uploading full series on run traces (default off; or $ALPHAENGINE_SHARE_SERIES=1) |
 | `--limit N` | how many rows to show (default 25) |
 | `--budget N` | how many runs a night is worth (default 3) |
+| `--purge` | remove ~/.config/alphaengine/credentials.json and clean up its config directory |
 
 ### Examples
 
@@ -365,6 +375,7 @@ alphaengine models
 alphaengine trace
 alphaengine run screen_universe --thesis momentum
 alphaengine logout
+alphaengine logout --purge
 alphaengine version
 ```
 
@@ -649,10 +660,11 @@ controls switched off. Only a run that could not execute a step exits non-zero.
 > CLI, is the one thing that cannot work here. You cannot have isolation and
 > in-process data access, and your data not moving is the point.
 
-**No LLM dependency and no key field.** `AgentDriver` takes a callable, so you
-bring your own model by passing a function. There is nowhere in this tool to put
-a model key, ours or yours, and that is how "runs under your own account" is
-satisfied structurally rather than promised.
+**No LLM dependency in the core.** `AgentDriver` takes a callable, so you bring
+your own model by passing a function or setting your provider's environment
+variable. LLM keys are never sent to QuantOS; if you choose to persist keys
+locally at `login`, they live in `~/.config/alphaengine/credentials.json`
+(mode `0600`) and are removed by `alphaengine logout --purge`.
 
 ## Development
 

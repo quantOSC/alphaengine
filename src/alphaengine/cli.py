@@ -3837,7 +3837,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("gaps", parents=[common], help="what your record says is unanswered")
     tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
-    sub.add_parser("logout", parents=[common], help="remove stored credentials")
+    lo = sub.add_parser("logout", parents=[common], help="remove stored credentials")
+    lo.add_argument(
+        "--purge",
+        action="store_true",
+        help="remove ~/.config/alphaengine/credentials.json and clean up its config directory",
+    )
     lg = sub.add_parser("login", parents=[common], help="sign in, or enter a model key")
     lg.add_argument("provider", nargs="?", default="quantos", help="quantos, anthropic, openai, ...")
     sub.add_parser("models", parents=[common], help="which model providers this machine can use")
@@ -4017,15 +4022,23 @@ def cmd_trace(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_logout(_args: argparse.Namespace) -> int:
+def cmd_logout(args: argparse.Namespace) -> int:
     """Delete the stored credentials. The file goes, not a flag inside it."""
     from .auth import clear_stored, config_path
 
-    if clear_stored():
-        say(green("Signed out.") + dim(f"  removed {config_path()}"))
+    purge = bool(getattr(args, "purge", False))
+    target = config_path()
+    if clear_stored(purge=purge):
+        action = "Purged." if purge else "Signed out."
+        say(green(action) + dim(f"  removed {target}"))
     else:
-        say(dim("Not signed in — there was nothing stored."))
-    say(dim("Any key exported in your shell is untouched; unset it there."))
+        action = (
+            "Purged — no credentials file was stored."
+            if purge
+            else "Not signed in — there was nothing stored."
+        )
+        say(dim(action))
+    say(dim("Any key exported in your parent shell is untouched; unset it there."))
     return 0
 
 

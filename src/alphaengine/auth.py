@@ -43,13 +43,14 @@ about another, and the distinction is worth being precise about:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import stat
 from pathlib import Path
 from typing import Any
 
-__all__ = ["config_path", "load_stored", "save_key", "clear_stored", "apply_stored"]
+__all__ = ["config_path", "load_stored", "save_key", "clear_stored", "purge_stored", "apply_stored"]
 
 #: Which environment variables this file is allowed to hold.
 #: `QUANTOS_API_KEY` is ours. The provider keys are here because a user who has
@@ -126,16 +127,35 @@ def save_key(name: str, value: str) -> Path:
     return path
 
 
-def clear_stored() -> bool:
-    """Delete the file. True if there was one."""
+def clear_stored(*, purge: bool = False) -> bool:
+    """Delete the file. True if there was one.
+
+    When ``purge=True``, also removes any temporary file, clears managed keys
+    from the current process environment, and removes the config directory if
+    it is empty.
+    """
     path = config_path()
+    removed = False
     try:
         path.unlink()
-        return True
+        removed = True
     except FileNotFoundError:
-        return False
+        pass
     except OSError:
-        return False
+        pass
+    if purge:
+        with contextlib.suppress(OSError):
+            path.with_suffix(".tmp").unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            path.parent.rmdir()
+        for name in MANAGED:
+            os.environ.pop(name, None)
+    return removed
+
+
+def purge_stored() -> bool:
+    """Remove ``credentials.json``, clean up empty config dir, and clear in-process keys."""
+    return clear_stored(purge=True)
 
 
 def apply_stored() -> list[str]:

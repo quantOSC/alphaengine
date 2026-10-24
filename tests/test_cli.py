@@ -673,6 +673,24 @@ def test_logout_deletes_the_file_rather_than_flagging_it(tmp_path, monkeypatch):
     assert auth.clear_stored() is False  # idempotent
 
 
+def test_logout_purge_removes_file_and_clears_process_keys(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    from alphaengine import auth
+
+    auth.save_key("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert auth.config_path().exists()
+
+    rc = cli.main(["logout", "--purge"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Purged." in out
+    assert not auth.config_path().exists()
+    assert not auth.config_path().parent.exists()
+    assert "ANTHROPIC_API_KEY" not in os.environ
+
+
 def test_a_corrupt_credentials_file_signs_you_out_rather_than_crashing(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
     monkeypatch.setenv("APPDATA", str(tmp_path))

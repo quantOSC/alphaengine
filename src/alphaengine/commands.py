@@ -99,6 +99,11 @@ FLAGS: dict[str, Flag] = {
     ),
     "limit": Flag("--limit", "N", "how many rows to show (default 25)"),
     "budget": Flag("--budget", "N", "how many runs a night is worth (default 3)"),
+    "purge": Flag(
+        "--purge",
+        "",
+        "remove ~/.config/alphaengine/credentials.json and clean up its config directory",
+    ),
 }
 
 
@@ -606,9 +611,16 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="logout",
         group="session",
-        args="",
+        args="[--purge]",
         purpose="remove stored credentials from this machine",
-        examples=("alphaengine logout",),
+        body=(
+            "Deletes `~/.config/alphaengine/credentials.json` (or "
+            "`%APPDATA%\\alphaengine\\credentials.json` on Windows). Pass `--purge` "
+            "to also remove any leftover temporary file, clean up the config "
+            "directory when empty, and clear managed keys from this process."
+        ),
+        examples=("alphaengine logout", "alphaengine logout --purge"),
+        flags=("purge",),
     ),
     Command(
         verb="version",

@@ -222,7 +222,7 @@ def submit(desk: Desk, line: str) -> bool:
         cmd_tonight(_ns(desk, budget=0))
         return False
     if verb == "logout":
-        _logout(desk)
+        _logout(desk, rest)
         return False
     if verb in ("key", "keys", "login"):
         _key(desk, rest)
@@ -321,13 +321,14 @@ def _ns(desk: Desk, **extra: Any) -> Any:
     )
 
 
-def _logout(desk: Desk) -> None:
+def _logout(desk: Desk, rest: str = "") -> None:
     import os
 
     from ..auth import MANAGED
     from ..cli import _session, cmd_logout
 
-    cmd_logout(_ns(desk))
+    purge = "--purge" in rest.split() or rest.strip().lower() == "purge"
+    cmd_logout(_ns(desk, purge=purge))
     for name in MANAGED:
         os.environ.pop(name, None)
     desk.session, desk.url = _session(getattr(desk.args, "url", None), getattr(desk.args, "key", None))
