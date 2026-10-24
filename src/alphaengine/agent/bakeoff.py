@@ -1,13 +1,20 @@
 """Bakeoff mode. Two roles, one clock, and a referee that does not take votes.
 
 Generators may submit a rule. An adversary may submit an attack. Neither may
-start another bakeoff, and neither may name the survivor. The loop is four
-passes of two proposals plus one attack after each pass: twelve model calls,
+start another bakeoff, and neither may name the top-ranked config. The loop is
+four passes of two proposals plus one attack after each pass: twelve model calls,
 and then it stops even if a model asks to continue.
 
 The clock is the other stop. The default budget is 45 seconds. Nothing can
 stretch it past 60. When the budget is gone, the call in flight is abandoned
 and the referee scores whatever already came back.
+
+DEPRECATION NOTE
+    User-facing terminology now uses ``top_ranked_config`` ("top-ranked config"),
+    ``top_ranked_sharpe``, and ``model_weights`` ("model weights"). The keys
+    ``survivor``, ``survivor_sharpe``, and ``survivor_weights`` remain in returned
+    dicts as backward-compatible API aliases and are deprecated for user-facing
+    display.
 """
 
 from __future__ import annotations
@@ -184,13 +191,27 @@ def run_bakeoff(
     figures["stopped"] = stopped
     figures["budget_seconds"] = budget
     figures["n_passes"] = len(passes) or n_rounds
+    top_cfg = figures.get("top_ranked_config") or figures.get("survivor")
+    top_sh = (
+        figures.get("top_ranked_sharpe")
+        if figures.get("top_ranked_sharpe") is not None
+        else figures.get("survivor_sharpe")
+    )
+    figures["top_ranked_config"] = top_cfg
+    figures["top_ranked_sharpe"] = top_sh
     trace.answer = _verdict(figures)
     curves = trial_paths(data, submissions, attacks)
-    survivor_label = str(figures.get("survivor") or "")
-    survivor_curve = next((c for c in curves if c.get("label") == survivor_label), None)
+    top_label = str(top_cfg or "")
+    top_curve = next((c for c in curves if c.get("label") == top_label), None)
+    weights = (top_curve or {}).get("weights") or {}
     trace.bakeoff = {
-        "survivor": figures.get("survivor"),
-        "survivor_sharpe": figures.get("survivor_sharpe"),
+        "top_ranked_config": top_cfg,
+        "top_ranked_sharpe": top_sh,
+        "model_weights": weights,
+        # Deprecated aliases kept for API backward compatibility:
+        "survivor": top_cfg,
+        "survivor_sharpe": top_sh,
+        "survivor_weights": weights,
         "attacked_sharpe": figures.get("attacked_sharpe"),
         "deflated_sharpe": figures.get("deflated_sharpe"),
         "verdict": figures.get("verdict"),
@@ -201,7 +222,6 @@ def run_bakeoff(
         "trials": list(figures.get("trials") or []),
         "passes": passes,
         "curves": curves,
-        "survivor_weights": (survivor_curve or {}).get("weights") or {},
     }
     return Bakeoff(trace=trace, figures=figures)
 
@@ -387,12 +407,17 @@ def _object(text: str) -> dict[str, Any] | None:
 
 
 def _verdict(figures: dict[str, Any]) -> str:
-    survivor = figures.get("survivor")
-    if not survivor:
-        return "Referee. No proposal survived."
+    top_cfg = figures.get("top_ranked_config") or figures.get("survivor")
+    if not top_cfg:
+        return "Referee. No proposal cleared the checks."
+    top_sh = (
+        figures.get("top_ranked_sharpe")
+        if figures.get("top_ranked_sharpe") is not None
+        else figures.get("survivor_sharpe")
+    )
     return (
         f"Referee. {figures.get('n_trials')} candidates across {figures.get('n_passes', MAX_ROUNDS)} passes, "
-        f"source bakeoff. Survivor {survivor} (in-sample Sharpe {figures.get('survivor_sharpe')}, "
+        f"source bakeoff. Top-ranked config {top_cfg} (in-sample Sharpe {top_sh}, "
         f"post-attack standing {figures.get('attacked_sharpe')}, "
         f"deflated Sharpe {figures.get('deflated_sharpe')}). Verdict {figures.get('verdict')}."
     )

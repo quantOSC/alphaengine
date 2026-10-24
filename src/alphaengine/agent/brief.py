@@ -585,12 +585,24 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
             }
         )
     trials = [str(line) for line in (raw.get("trials") or [])]
-    if not raw.get("survivor") and not trials and not curves:
+    top_cfg = raw.get("top_ranked_config") or raw.get("survivor")
+    top_sh = (
+        raw.get("top_ranked_sharpe")
+        if raw.get("top_ranked_sharpe") is not None
+        else raw.get("survivor_sharpe")
+    )
+    weights = raw.get("model_weights") or raw.get("survivor_weights") or {}
+    if not top_cfg and not trials and not curves:
         return None
     passes = [p for p in (raw.get("passes") or []) if isinstance(p, dict)]
     return {
-        "survivor": raw.get("survivor"),
-        "survivor_sharpe": raw.get("survivor_sharpe"),
+        "top_ranked_config": top_cfg,
+        "top_ranked_sharpe": top_sh,
+        "model_weights": weights,
+        # Deprecated aliases kept for API backward compatibility:
+        "survivor": top_cfg,
+        "survivor_sharpe": top_sh,
+        "survivor_weights": weights,
         "attacked_sharpe": raw.get("attacked_sharpe"),
         "deflated_sharpe": raw.get("deflated_sharpe"),
         "verdict": raw.get("verdict"),
@@ -600,7 +612,6 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
         "trials": trials,
         "passes": passes,
         "curves": curves[:8],
-        "survivor_weights": raw.get("survivor_weights") or {},
     }
 
 
@@ -631,8 +642,10 @@ def _default_bakeoff(data: dict[str, list[float]]) -> dict[str, Any] | None:
                 {
                     "pass": p_idx,
                     "attack": atk,
-                    "leader": step.get("survivor"),
-                    "leader_sharpe": step.get("survivor_sharpe"),
+                    "leader": step.get("top_ranked_config") or step.get("survivor"),
+                    "leader_sharpe": step.get("top_ranked_sharpe")
+                    if step.get("top_ranked_sharpe") is not None
+                    else step.get("survivor_sharpe"),
                     "leader_standing": step.get("attacked_sharpe"),
                     "n_trials": len(sub_slice),
                 }
@@ -641,13 +654,25 @@ def _default_bakeoff(data: dict[str, list[float]]) -> dict[str, Any] | None:
         curves = trial_paths(data, submissions, pass_attacks)
     except Exception:  # noqa: BLE001
         return None
-    if not figures.get("survivor") and not curves:
+    top_cfg = figures.get("top_ranked_config") or figures.get("survivor")
+    top_sh = (
+        figures.get("top_ranked_sharpe")
+        if figures.get("top_ranked_sharpe") is not None
+        else figures.get("survivor_sharpe")
+    )
+    if not top_cfg and not curves:
         return None
-    survivor_label = str(figures.get("survivor") or "")
-    survivor_curve = next((c for c in curves if c.get("label") == survivor_label), None)
+    top_label = str(top_cfg or "")
+    top_curve = next((c for c in curves if c.get("label") == top_label), None)
+    weights = (top_curve or {}).get("weights") or {}
     return {
-        "survivor": figures.get("survivor"),
-        "survivor_sharpe": figures.get("survivor_sharpe"),
+        "top_ranked_config": top_cfg,
+        "top_ranked_sharpe": top_sh,
+        "model_weights": weights,
+        # Deprecated aliases kept for API backward compatibility:
+        "survivor": top_cfg,
+        "survivor_sharpe": top_sh,
+        "survivor_weights": weights,
         "attacked_sharpe": figures.get("attacked_sharpe"),
         "deflated_sharpe": figures.get("deflated_sharpe"),
         "verdict": figures.get("verdict"),
@@ -657,7 +682,6 @@ def _default_bakeoff(data: dict[str, list[float]]) -> dict[str, Any] | None:
         "trials": list(figures.get("trials") or []),
         "passes": passes,
         "curves": curves,
-        "survivor_weights": (survivor_curve or {}).get("weights") or {},
     }
 
 
@@ -780,11 +804,17 @@ def _findings(
             f"(q10 {monte.get('sharpe_q10')}, q90 {monte.get('sharpe_q90')}, "
             f"positive paths {monte.get('positive_pct')}%)."
         )
-    if bakeoff and bakeoff.get("survivor"):
+    if bakeoff and (bakeoff.get("top_ranked_config") or bakeoff.get("survivor")):
+        top_cfg = bakeoff.get("top_ranked_config") or bakeoff.get("survivor")
+        top_sh = (
+            bakeoff.get("top_ranked_sharpe")
+            if bakeoff.get("top_ranked_sharpe") is not None
+            else bakeoff.get("survivor_sharpe")
+        )
         lines.append(
-            f"Bakeoff referee survivor: {bakeoff.get('survivor')} across "
+            f"Bakeoff referee top-ranked config: {top_cfg} across "
             f"{bakeoff.get('n_trials')} candidate rules. "
-            f"In-sample period Sharpe {bakeoff.get('survivor_sharpe')}, "
+            f"In-sample period Sharpe {top_sh}, "
             f"after adversarial attacks {bakeoff.get('attacked_sharpe')}, "
             f"deflated Sharpe {bakeoff.get('deflated_sharpe')} ({bakeoff.get('verdict')})."
         )
@@ -884,7 +914,13 @@ def _narrate_figures(
             if isinstance(val, (int, float)):
                 out[f"monte_carlo.{key}"] = float(val)
     if bakeoff is not None:
-        for key in ("n_trials", "survivor_sharpe", "attacked_sharpe", "deflated_sharpe"):
+        for key in (
+            "n_trials",
+            "top_ranked_sharpe",
+            "survivor_sharpe",
+            "attacked_sharpe",
+            "deflated_sharpe",
+        ):
             val = bakeoff.get(key)
             if isinstance(val, (int, float)):
                 out[f"bakeoff.{key}"] = float(val)

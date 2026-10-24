@@ -922,11 +922,12 @@ def _begin_bakeoff(desk: Desk, think: Callable[[str], str], *, seconds: float | 
     )
     if isinstance(held.trace.bakeoff, dict):
         desk.bakeoff = held.trace.bakeoff
-        surv_w = held.trace.bakeoff.get("survivor_weights")
+        surv_w = held.trace.bakeoff.get("model_weights") or held.trace.bakeoff.get("survivor_weights")
         if desk.portfolio is None and isinstance(surv_w, dict) and surv_w:
+            top_cfg = held.trace.bakeoff.get("top_ranked_config") or held.trace.bakeoff.get("survivor")
             desk.portfolio = {
                 "kind": "portfolio",
-                "method": str(held.trace.bakeoff.get("survivor") or "bakeoff"),
+                "method": str(top_cfg or "bakeoff"),
                 "weights": surv_w,
                 "n_assets": len(surv_w),
                 "weight_sum": round(sum(float(v) for v in surv_w.values()), 4),

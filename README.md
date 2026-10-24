@@ -6,9 +6,10 @@
 
 <p align="center">
   <strong>The research loop, on your machine.</strong><br>
-  Ask what is worth looking at, whether it holds up, how much to hold,<br>
+  Ask what is worth looking at, whether it holds up, what sizing the risk model implies,<br>
   and whether anything has crossed a line.<br>
-  Computation runs locally; when you are signed in to quantOS, summary figures are reported to your account; full series are shared only if you opt in.
+  Computation runs locally; when you are signed in to quantOS, summary figures are reported to your account; full series are shared only if you opt in.<br>
+  <em>Research tool, not investment advice.</em>
 </p>
 
 <p align="center">
@@ -38,7 +39,7 @@ python -m alphaengine
 ┌──────────┬─────────────────────────────────────┬──────────────────┐
 │ ● maths  │  Ask in plain English.              │  sharpe          │
 │   always │                                     │  mean / std √252 │
-│ ○ flows  │  > which names are overbought?      │  ▁▂▃▅▇█▇▅▃       │
+│ ○ flows  │  > which names rank highest on RSI? │  ▁▂▃▅▇█▇▅▃       │
 │ ○ ask    │                                     │  0    0.0012     │
 │          │  chose screen_universe              │  1   -0.0040     │
 │ loaded   │                                     │                  │
@@ -76,7 +77,7 @@ IS the question; only two of them need code of yours.
 | Is this real, once you count the tries? | `validate` | `validate_study` | prices + your backtest |
 | Where does it break? | `stress` | `stress_study` | a return series |
 | Is it new, or my book again? | `overlap` | `check_overlap` | the candidate + the book |
-| How much should I hold? | `size` | `size_position` | a return series |
+| What sizing does the risk model imply? | `size` | `size_position` | a return series |
 | Still inside the lines? | `monitor` | `monitor_sleeve` | a return series |
 
 ```bash
@@ -96,7 +97,7 @@ Or say it in plain English and let your own model pick:
 
 ```bash
 alphaengine
-❯ which of my names are overbought on RSI?
+❯ which of my names rank highest on RSI?
 ```
 
 That second path is EXPLORATORY: the model chooses a workflow and then chooses
@@ -288,7 +289,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `validate` | is this real? | shell + session |
 | `stress` | where does it break? | shell + session |
 | `overlap` | is it new, or my book again? | shell + session |
-| `size` | how much? | shell + session |
+| `size` | what sizing does the risk model imply? | shell + session |
 | `monitor` | still inside the lines? | shell + session |
 | `run <workflow>` | run one workflow exactly as written | shell + session |
 | `<anything else>` | ask in plain English; your model picks a workflow and drives it | session |

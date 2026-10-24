@@ -41,7 +41,7 @@ TOOLS: tuple[tuple[str, str], ...] = (
     ),
     ("process", "fit ou, gbm, jump, or garch and stress it; args.dgp"),
     ("workflow", "a portal workflow by name, when the account offers it"),
-    ("bakeoff", "generators propose, an adversary attacks, the referee names the survivor"),
+    ("bakeoff", "generators propose, an adversary attacks, the referee names the top-ranked config"),
     ("done", "stop. args.answer may cite only numbers the tools returned"),
 )
 
@@ -332,9 +332,9 @@ Cite only numbers written below. Quote a decimal exactly as it appears.
 Do not invent a weight, a Sharpe, a date, or a name count.
 Write two to three paragraphs (eight to twelve sentences). Cover:
 1) What the universe, regime, and any named tickers in the question show.
-2) How the constructed portfolio weights (hrp, risk_parity, var_sorted, or bakeoff survivor)
+2) How the constructed model weights (hrp, risk_parity, var_sorted, or bakeoff top-ranked config)
    allocate capital and how their Sharpe, volatility, drawdown, and VaR compare.
-3) What the scenario shocks and Monte Carlo simulation paths imply for holding the book.
+3) What the scenario shocks and Monte Carlo simulation paths imply for the book's risk profile.
 
 Question:
 @@QUESTION@@

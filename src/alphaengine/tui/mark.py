@@ -9,6 +9,7 @@ from rich.text import Text
 from .._version import __version__
 
 _TAG = "the research loop, on your machine"
+_NOTICE = "Research tool, not investment advice."
 _HINT = "use /details for a look at important commands"
 _WORD = " ".join("ALPHAENGINE")
 
@@ -77,6 +78,7 @@ def seal(t: float) -> Text:
     out.append(_WORD + "\n", style="bold #e8eef2")
     out.append(__version__ + "\n", style="#9ecbff")
     out.append(_TAG + "\n", style="#6a9ea3")
+    out.append(_NOTICE + "\n", style="#6b7380")
     out.append(_HINT, style="#8b949e")
     return out
 

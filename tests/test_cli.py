@@ -304,6 +304,7 @@ def test_boot_never_prints_the_caller_s_data(capsys, monkeypatch):
     assert "computation runs locally" in printed
     assert "summary figures are reported to your account" in printed
     assert "full series are shared only if you opt in" in printed
+    assert "Research tool, not investment advice." in printed
     assert "your data never leaves." not in printed
     assert "Your data stays on this machine" not in printed
 

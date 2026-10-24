@@ -97,14 +97,18 @@ def referee(
             sharpes.append(per)
     _apply_attacks(rows, series, panel, chosen)
     winner = choose_survivor(rows)
-    survivor = rows[winner]["label"] if winner is not None else None
+    top_cfg = rows[winner]["label"] if winner is not None else None
+    top_sh = None if winner is None else rows[winner]["sharpe"]
     out: dict[str, Any] = {
         "mode": "bakeoff",
         "n_trials": len(submissions),
         "n_trials_source": "bakeoff",
         "n_failed": sum(1 for row in rows if row["failed"]),
-        "survivor": survivor,
-        "survivor_sharpe": None if winner is None else rows[winner]["sharpe"],
+        "top_ranked_config": top_cfg,
+        "top_ranked_sharpe": top_sh,
+        # Deprecated aliases kept for API backward compatibility:
+        "survivor": top_cfg,
+        "survivor_sharpe": top_sh,
         "attacked_sharpe": None if winner is None else rows[winner]["standing"],
         "attacks": chosen,
         "rules": [row["label"] for row in rows],

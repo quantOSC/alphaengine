@@ -797,9 +797,15 @@ def _bakeoff(
         stem,
         _question(trace),
     )
+    top_cfg = bakeoff.get("top_ranked_config") or bakeoff.get("survivor")
+    top_sh = (
+        bakeoff.get("top_ranked_sharpe")
+        if bakeoff.get("top_ranked_sharpe") is not None
+        else bakeoff.get("survivor_sharpe")
+    )
     banner = (
-        f"Survivor: {bakeoff.get('survivor')}  |  "
-        f"In-Sample Sharpe: {bakeoff.get('survivor_sharpe')}  |  "
+        f"Top-Ranked Config: {top_cfg}  |  "
+        f"In-Sample Sharpe: {top_sh}  |  "
         f"Post-Attack Standing: {bakeoff.get('attacked_sharpe')}  |  "
         f"Deflated Sharpe: {bakeoff.get('deflated_sharpe')} ({bakeoff.get('verdict')})\n"
         f"Passes: {bakeoff.get('n_passes') or 4}  |  "
@@ -812,7 +818,7 @@ def _bakeoff(
     if curves:
         ax1 = fig.add_axes((0.09, 0.48, 0.44, 0.34))
         ax1.set_title("Cumulative Wealth Across Passes", loc="left", fontsize=9.5)
-        survivor = str(bakeoff.get("survivor") or "")
+        survivor = str(top_cfg or "")
         for index, curve in enumerate(curves):
             label = str(curve.get("label") or "")
             is_win = label == survivor
@@ -845,10 +851,10 @@ def _bakeoff(
         ax2.legend(loc="lower right", fontsize=7.0)
 
         tbl_rows: list[list[str]] = []
-        survivor = str(bakeoff.get("survivor") or "")
+        survivor = str(top_cfg or "")
         for idx, curve in enumerate(curves, start=1):
             label = str(curve.get("label") or "")
-            status = "SURVIVOR" if label == survivor else "eliminated"
+            status = "TOP-RANKED" if label == survivor else "lower-ranked"
             p_num = curve.get("round") or ((idx - 1) // 2 + 1)
             tbl_rows.append(
                 [

@@ -100,7 +100,10 @@ def test_multi_pass_gan_bakeoff_adapts_across_rounds_and_scores_attacks() -> Non
     assert done.trace.bakeoff is not None
     assert len(done.trace.bakeoff["passes"]) == 4
     assert len(done.trace.bakeoff["curves"]) == 8
-    assert done.trace.bakeoff["survivor_weights"]
+    assert done.trace.bakeoff["top_ranked_config"] == done.trace.bakeoff["survivor"]
+    assert done.trace.bakeoff["model_weights"] == done.trace.bakeoff["survivor_weights"]
+    assert done.trace.bakeoff["model_weights"]
+    assert "Top-ranked config" in done.trace.answer
 
 
 def test_the_clock_ends_the_bakeoff() -> None:

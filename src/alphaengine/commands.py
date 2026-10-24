@@ -156,8 +156,8 @@ _QUESTIONS: tuple[tuple[str, str, str, str], ...] = (
     (
         "size",
         "size_position",
-        "how much?",
-        "A target weight of capital with CVaR, drawdown and the minimum track record beside "
+        "what sizing does the risk model imply?",
+        "A model-implied weight of capital with CVaR, drawdown and the minimum track record beside "
         "it. A record too short to size is refused, not sized small.",
     ),
     (
@@ -396,7 +396,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "`pip install 'alphaengine[agents]'`."
         ),
         examples=(
-            "which of my names are overbought on RSI?",
+            "which of my names rank highest on RSI?",
             "is the momentum study still standing up?",
         ),
     ),

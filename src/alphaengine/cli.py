@@ -311,7 +311,7 @@ _WORKFLOW_ANSWERS: dict[str, str] = {
     "validate_study": "does this result hold up once you count the tries",
     "stress_study": "where does it break",
     "check_overlap": "is it new, or my book again",
-    "size_position": "how much of it should I hold",
+    "size_position": "what sizing does the risk model imply",
     "monitor_sleeve": "has anything crossed a line",
 }
 #: The held-back-rows marker. Probed like the rest: cp1252 renders a literal
@@ -3178,7 +3178,7 @@ def _next_moves(*, keyed: bool, data: Any, project: str | None) -> list[str]:
             ("validate", "count the tries"),
         ]
         if models:
-            rows.append(('"which names are overbought?"', "the model picks the path"))
+            rows.append(('"which names rank highest?"', "the model picks the path"))
         else:
             rows.append(("login anthropic", "ask in your own words"))
         if project:
@@ -3214,6 +3214,7 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
             "to your account; full series are shared only if you opt in."
         )
     )
+    say("  " + dim("Research tool, not investment advice."))
     say("")
 
     # Data is described by SHAPE, never printed. A boot screen that echoes the
@@ -3821,7 +3822,7 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Run validated research workflows. Computation runs locally; when you are signed in to "
             "quantOS, summary figures are reported to your account; full series are shared only if "
-            "you opt in."
+            "you opt in. Research tool, not investment advice."
         ),
     )
     sub = p.add_subparsers(dest="command")
