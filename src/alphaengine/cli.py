@@ -4330,6 +4330,32 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="remove ~/.config/alphaengine/credentials.json and clean up its config directory",
     )
+    rm_cmd = sub.add_parser(
+        "remote",
+        parents=[common],
+        help="configure or list remote sync endpoints in .alphaengine/project.toml",
+    )
+    rm_cmd.add_argument("action", nargs="?", default="list", help="add or list")
+    rm_cmd.add_argument("remote_name", nargs="?", default="quantos", help="remote name (default quantos)")
+    rm_cmd.add_argument("remote_url", nargs="?", default=None, help="remote URL")
+    ps_cmd = sub.add_parser(
+        "push",
+        parents=[common],
+        help="sync sealed studies, ledger runs, and ideas to quantOS",
+    )
+    ps_cmd.add_argument("remote_name", nargs="?", default="quantos", help="remote name (default quantos)")
+    ps_cmd.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        help="print the exact sync payload without making a network call",
+    )
+    pl_cmd = sub.add_parser(
+        "pull",
+        parents=[common],
+        help="pull team runs and ideas from quantOS into the local ledger (read-only)",
+    )
+    pl_cmd.add_argument("remote_name", nargs="?", default="quantos", help="remote name (default quantos)")
     lg = sub.add_parser("login", parents=[common], help="sign in, or enter a model key")
     lg.add_argument("provider", nargs="?", default="quantos", help="quantos, anthropic, openai, ...")
     sub.add_parser("models", parents=[common], help="which model providers this machine can use")
@@ -5304,6 +5330,110 @@ def cmd_idea(args: argparse.Namespace) -> int:
     return 2
 
 
+def cmd_remote(args: argparse.Namespace) -> int:
+    """Configure or list remotes in `.alphaengine/project.toml`."""
+    from .project import find_project
+    from .sync import remote_add
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+    action = str(getattr(args, "action", None) or "list").lower().strip()
+    if action == "add":
+        r_name = str(getattr(args, "remote_name", None) or "quantos")
+        r_url = getattr(args, "remote_url", None) or getattr(args, "url", None)
+        resolved = remote_add(proj, name=r_name, url=r_url)
+        say(green("Remote configured.") + f"  {bold(r_name)} {ARROW} {resolved}")
+        return 0
+    if action == "list":
+        if not proj.remotes:
+            say(dim("  no remotes configured (run `alphaengine remote add quantos`)"))
+            return 0
+        for k, v in sorted(proj.remotes.items()):
+            say(f"  {bold(k.ljust(12))}  {v}")
+        return 0
+    say(red(f"Unknown remote action {action!r}. Use `remote add <name> [url]` or `remote list`."))
+    return 2
+
+
+def cmd_push(args: argparse.Namespace) -> int:
+    """Push sealed studies, allowlisted runs, and ideas to quantOS (or `--dry-run`)."""
+    import json
+
+    from .project import find_project
+    from .study.report import ReportError
+    from .sync import push_workspace
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    r_name = str(getattr(args, "remote_name", None) or "quantos")
+    try:
+        res = push_workspace(
+            proj,
+            remote_name=r_name,
+            api_key=getattr(args, "key", None),
+            base_url=getattr(args, "url", None),
+            share_series=bool(getattr(args, "share_series", False)),
+            dry_run=dry_run,
+        )
+    except (ReportError, ValueError) as exc:
+        say(red(str(exc)))
+        return 2
+
+    if dry_run:
+        sys.stdout.write(json.dumps(res["payload"], indent=2, sort_keys=True, default=str) + "\n")
+        sys.stdout.flush()
+        return 0
+
+    if res.get("fallback"):
+        say(
+            yellow("  /api/workspace/sync returned 404; fell back to /api/me/runs/ingest")
+            + f" ({res.get('n_studies')} study(s) ingested)."
+        )
+    else:
+        say(
+            green("Pushed.")
+            + f"  {res.get('path_used')}  {dim(DOT)}  "
+            + f"{res.get('n_studies')} studies, {res.get('n_runs')} runs, {res.get('n_ideas')} ideas"
+        )
+    return 0
+
+
+def cmd_pull(args: argparse.Namespace) -> int:
+    """Pull team runs and ideas from quantOS into the local ledger (`read_only: True`)."""
+    from .project import find_project
+    from .study.report import ReportError
+    from .sync import pull_workspace
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+    r_name = str(getattr(args, "remote_name", None) or "quantos")
+    try:
+        res = pull_workspace(
+            proj,
+            remote_name=r_name,
+            api_key=getattr(args, "key", None),
+            base_url=getattr(args, "url", None),
+        )
+    except ReportError as exc:
+        say(red(str(exc)))
+        return 2
+
+    say(
+        green("Pulled.")
+        + f"  {res.get('path_used')}  {dim(DOT)}  "
+        + f"{res.get('pulled_runs')} runs, {res.get('pulled_ideas')} ideas (marked read-only)"
+    )
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -5334,6 +5464,9 @@ def main(argv: list[str] | None = None) -> int:
         "demo": cmd_demo,
         "process": cmd_process,
         "logout": cmd_logout,
+        "remote": cmd_remote,
+        "push": cmd_push,
+        "pull": cmd_pull,
         "login": cmd_login,
         "commands": cmd_commands,
         "models": cmd_models,

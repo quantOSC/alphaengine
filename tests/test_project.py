@@ -449,3 +449,153 @@ def test_seal_run_or_idea_verify_study_with_data_and_export_memo_md_and_pdf(
     pdf_memo = tmp_path / ".alphaengine" / "studies" / f"memo_{run_id}.pdf"
     assert pdf_memo.is_file()
     assert pdf_memo.read_bytes().startswith(b"%PDF")
+
+
+def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+    import json
+    import urllib.error
+    import urllib.request
+
+    from alphaengine.client.session import MAX_FIGURE_LIST
+    from alphaengine.sync import _guard_sync_payload
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    monkeypatch.delenv("ALPHAENGINE_SHARE_SERIES", raising=False)
+    assert cli.main(["init", "--name", "sync-test"]) == 0
+    capsys.readouterr()
+
+    # Register a dataset with secret price values that must NEVER appear in sync payloads
+    secret_csv = tmp_path / "secret_prices.csv"
+    secret_csv.write_text(
+        "date,AAPL,MSFT\n2025-01-01,9876.5432,5432.1098\n2025-01-02,9888.1111,5444.2222\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["data", "add", str(secret_csv), "--name", "secret_eq"]) == 0
+    capsys.readouterr()
+
+    # Create an idea, run a validation, and seal it
+    assert cli.main(["idea", "new", "Momentum persistence", "--kill-if", "DSR < 0.9", "--json"]) == 0
+    idea_id = json.loads(capsys.readouterr().out)["idea_id"]
+    assert cli.main(["validate", "--project", "alphaengine.demo", "--idea", idea_id]) == 0
+    assert cli.main(["seal", idea_id]) == 0
+    capsys.readouterr()
+
+    # 1. `ae remote add quantos <url>`
+    assert cli.main(["remote", "add", "quantos", "https://sync.example.invalid"]) == 0
+    rem_out = capsys.readouterr().out
+    assert "https://sync.example.invalid" in rem_out
+
+    # 2. `ae push --dry-run` prints exact payload without touching network
+    assert cli.main(["push", "--dry-run"]) == 0
+    dry_text = capsys.readouterr().out
+    dry_payload = json.loads(dry_text)
+    assert dry_payload["project"]["name"] == "sync-test"
+    assert len(dry_payload["studies"]) == 1
+    assert len(dry_payload["runs"]) == 1
+    assert len(dry_payload["ideas"]) == 1
+    assert "9876.5432" not in dry_text
+    assert "repro_spec" not in dry_text
+    assert "datasets" not in dry_payload
+
+    # Guard explicitly refuses any > 512 element list or forbidden raw-data key
+    with pytest.raises(ValueError, match="elements is a series"):
+        _guard_sync_payload({"runs": [{"figures": {"curve": list(range(MAX_FIGURE_LIST + 1))}}]})
+    with pytest.raises(ValueError, match="forbidden field"):
+        _guard_sync_payload({"runs": [{"raw_rows": [1, 2, 3]}]})
+
+    # 3. `ae push` against `/api/workspace/sync` (200 OK)
+    sent_requests: list[tuple[str, dict]] = []
+
+    def fake_urlopen_ok(req, timeout=None):
+        sent_requests.append((req.full_url, json.loads(req.data.decode("utf-8")) if req.data else {}))
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp(b'{"ok": true}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_ok)
+    assert cli.main(["push", "--key", "ae_live_test"]) == 0
+    push_ok_out = capsys.readouterr().out
+    assert "/api/workspace/sync" in push_ok_out
+    assert len(sent_requests) == 1
+    assert sent_requests[0][0] == "https://sync.example.invalid/api/workspace/sync"
+
+    # 4. `ae push` when `/api/workspace/sync` returns 404 falls back to `/api/me/runs/ingest`
+    fallback_requests: list[str] = []
+
+    def fake_urlopen_404(req, timeout=None):
+        fallback_requests.append(req.full_url)
+        if req.full_url.endswith("/api/workspace/sync"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b""))
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp(b'{"id": "ing_1"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_404)
+    assert cli.main(["push", "--key", "ae_live_test"]) == 0
+    fb_out = capsys.readouterr().out
+    assert "fell back to /api/me/runs/ingest" in fb_out
+    assert fallback_requests == [
+        "https://sync.example.invalid/api/workspace/sync",
+        "https://sync.example.invalid/api/me/runs/ingest",
+    ]
+
+    # 5. `ae pull` imports team runs and ideas marked `read_only: True`
+    def fake_urlopen_pull(req, timeout=None):
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        body = {
+            "runs": [
+                {
+                    "run_id": "run_team_99",
+                    "timestamp": "2026-10-24T12:00:00Z",
+                    "command": "validate_study",
+                    "family": "team_alpha",
+                    "n_trials": 12,
+                    "n_trials_source": "derived_from_grid",
+                    "verdict": "robust",
+                    "figures": {"deflated_sharpe": 0.94},
+                }
+            ],
+            "ideas": [
+                {
+                    "idea_id": "idea_team_99",
+                    "thesis": "Team cross-asset carry",
+                    "family": "team_alpha",
+                    "status": "testing",
+                }
+            ],
+        }
+        return _Resp(json.dumps(body).encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_pull)
+    assert cli.main(["pull", "--key", "ae_live_test"]) == 0
+    pull_out = capsys.readouterr().out
+    assert "1 runs, 1 ideas (marked read-only)" in pull_out
+
+    proj = find_project(tmp_path)
+    assert proj is not None
+    pulled_run = [r for r in proj.read_jsonl("ledger/runs.jsonl") if r.get("run_id") == "run_team_99"][0]
+    assert pulled_run["read_only"] is True
+    pulled_idea = [i for i in proj.read_jsonl("ideas/ideas.jsonl") if i.get("idea_id") == "idea_team_99"][0]
+    assert pulled_idea["read_only"] is True

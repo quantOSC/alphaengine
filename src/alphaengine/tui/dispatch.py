@@ -285,6 +285,30 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "logout":
         _logout(desk, rest)
         return False
+    if verb == "remote":
+        from ..cli import cmd_remote
+
+        toks = rest.split()
+        act = toks[0] if toks else "list"
+        rname = toks[1] if len(toks) > 1 else "quantos"
+        rurl = toks[2] if len(toks) > 2 else None
+        cmd_remote(_ns(desk, action=act, remote_name=rname, remote_url=rurl))
+        return False
+    if verb == "push":
+        from ..cli import cmd_push
+
+        toks = rest.split()
+        dry = "--dry-run" in toks
+        share = "--share-series" in toks
+        rem = [t for t in toks if not t.startswith("--")]
+        cmd_push(_ns(desk, remote_name=rem[0] if rem else "quantos", dry_run=dry, share_series=share))
+        return False
+    if verb == "pull":
+        from ..cli import cmd_pull
+
+        toks = [t for t in rest.split() if not t.startswith("--")]
+        cmd_pull(_ns(desk, remote_name=toks[0] if toks else "quantos"))
+        return False
     if verb in ("key", "keys", "login"):
         _key(desk, rest, verb=verb)
         return False

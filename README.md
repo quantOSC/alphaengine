@@ -349,6 +349,9 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 
 | Command | Does | Where |
 |---|---|---|
+| `remote add <name> [url] \| list` | configure or list remote sync endpoints in .alphaengine/project.toml | shell + session |
+| `push [remote] [--dry-run] [--share-series]` | sync sealed studies, ledger runs, and ideas to quantOS (opt-in network) | shell + session |
+| `pull [remote]` | pull team runs and ideas from quantOS into the local ledger (read-only) | shell + session |
 | `logout [--purge]` | remove stored credentials from this machine | shell + session |
 | `version` | print the version | shell |
 | `help` | the short list: demo, login, load, then a question | session |
@@ -392,6 +395,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--stdin` | read an upstream JSON result envelope from standard input |
 | `--kill-if RULE` | kill rule for a hypothesis, e.g. 'DSR < 0.9' |
 | `--format FMT` | output format for report memo: md or pdf (default md) |
+| `--dry-run` | print the exact sync payload without making a network call |
 
 ### Examples
 
@@ -444,6 +448,11 @@ alphaengine data add prices.csv --name equities
 alphaengine data list
 alphaengine data show equities
 alphaengine data lineage HEAD
+alphaengine remote add quantos
+alphaengine remote add quantos https://qosai.app
+alphaengine push --dry-run
+alphaengine push
+alphaengine pull
 alphaengine logout
 alphaengine logout --purge
 alphaengine version

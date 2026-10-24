@@ -159,6 +159,11 @@ FLAGS: dict[str, Flag] = {
         "FMT",
         "output format for report memo: md or pdf (default md)",
     ),
+    "dry_run": Flag(
+        "--dry-run",
+        "",
+        "print the exact sync payload without making a network call",
+    ),
 }
 
 
@@ -818,6 +823,53 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "they were going to run anyway."
         ),
         examples=("project research.momentum", "project alphaengine.demo_universe"),
+    ),
+    Command(
+        verb="remote",
+        group="session",
+        args="add <name> [url] | list",
+        scope="both",
+        purpose="configure or list remote sync endpoints in .alphaengine/project.toml",
+        body=(
+            "Registers a named remote in `.alphaengine/project.toml` (`remote add quantos [url]`), "
+            "defaulting to `$ALPHAENGINE_API_URL` or the default quantOS API URL."
+        ),
+        examples=(
+            "alphaengine remote add quantos",
+            "alphaengine remote add quantos https://qosai.app",
+        ),
+    ),
+    Command(
+        verb="push",
+        group="session",
+        args="[remote] [--dry-run] [--share-series]",
+        scope="both",
+        purpose="sync sealed studies, ledger runs, and ideas to quantOS (opt-in network)",
+        body=(
+            "Posts sealed studies, allowlisted ledger run records, and idea objects to "
+            "`POST /api/workspace/sync` using your `ae_live_` key, falling back to "
+            "`POST /api/me/runs/ingest` for studies when the sync endpoint returns 404.\n\n"
+            "Never sends raw dataset rows or series longer than 512 elements unless "
+            "`--share-series` is passed. `--dry-run` prints the exact JSON payload."
+        ),
+        examples=(
+            "alphaengine push --dry-run",
+            "alphaengine push",
+        ),
+        flags=("dry_run", "share_series", "url", "key"),
+    ),
+    Command(
+        verb="pull",
+        group="session",
+        args="[remote]",
+        scope="both",
+        purpose="pull team runs and ideas from quantOS into the local ledger (read-only)",
+        body=(
+            "Fetches team runs and ideas from the configured remote into `.alphaengine/ledger/` "
+            "and `.alphaengine/ideas/`, marking pulled records `read_only: true`."
+        ),
+        examples=("alphaengine pull",),
+        flags=("url", "key"),
     ),
     Command(
         verb="logout",
