@@ -118,25 +118,13 @@ is what a changed figure costs. The API may still move underneath it.
 # or risk parity when asked) from the loaded returns. Those two add no
 # figure to the goldens.
 #
-# 0.11.0 MOVES THE CASH RATE, ON PURPOSE. An omitted rate is the H.15
-# 3-month Treasury constant maturity, investment basis, 4.21% as of
-# 2026-10-06 (DGS3MO). It is a pinned print, not a download. Pass 0 for
-# excess of zero. Sharpe, Sortino, the deflated Sharpe, and PSR versus a
-# Sharpe of zero all move because the excess is no longer the raw return.
-# The five-trial golden crosses from marginal to likely_noise (0.5090 to
-# 0.427). sr0 moves slightly because its sampling-error floor depends on
-# the Sharpe. Drawdown, total return, geometric CAGR, volatility, and PBO
-# do not use the rate and stay. HAC lags are the Newey-West automatic rule,
-# so a factor t-stat on a short sample uses fewer than five lags and reports
-# the lag it chose. A close below $1.50 is still a price when the path is
-# calm. The cointegration screen reports Benjamini-Hochberg survivors;
-# the single-test flag remains on the pair as cointegrated_raw.
-#
-# 1.0.0 IS THE FIRST RELEASE. Everything through 0.11 was the beta: the
-# maths, the session, the airlock. 1.0 is the simulator. A sentence is a
-# stack of tool calls. The trace is the product, drawn while the tools
-# run. A report file is written on this machine only when the user
-# accepts it. The golden figures stay the 0.11 contract.
+# 1.0.0 IS THE FIRST RELEASE. Everything before 1.0 was the beta: the
+# maths, the session, the airlock, the pinned 4.21% H.15 3-month Treasury
+# bill rate (as of 2026-10-06, DGS3MO; pass 0 for excess of zero), automatic
+# Newey-West HAC lag selection, and Benjamini-Hochberg FDR cointegration
+# screening. 1.0 is the simulator: a sentence is a stack of tool calls, the
+# trace is drawn while the tools run, and a report file is written on this
+# machine only when the user accepts it.
 #
 # 1.0.1 IS THE REPORT AND THE HARNESS TOOLS. No golden in tests/test_goldens.py
 # moves. The session adds `monte_carlo` and `scenarios` to the tool stack, fixes
@@ -150,7 +138,18 @@ is what a changed figure costs. The API may still move underneath it.
 # `momentum`, and `reversion` against eight regime, tail, rate, and crash-cluster
 # attacks) under a hard twelve-call, sixty-second ceiling, feeding the referee's
 # post-attack standing back to the board after every pass.
-__version__ = "1.0.2"
+#
+# 1.0.3 IS TRUST, SEALED STUDIES, AND THE N=1 DSR CORRECTION.
+# `deflated_sharpe(..., n_trials=1)` now returns `psr_vs_zero` with
+# `sr0_expected_max = 0.0` (the n_trials=1 golden moves from 0.6875 / 0.037 to
+# 0.8434 / 0.0) instead of silently deflating as N=2. `sweep.verdict()` passes
+# cross-trial Sharpe dispersion into `deflated_sharpe` per Bailey & López de
+# Prado (2014). `combinatorial_oos_stability` replaces `cpcv_score` (kept as a
+# deprecated alias). Study schema 1.2 adds `content_sha256` sealing, full 64-hex
+# data hashes, `alphaengine seal`, `alphaengine report [--retail]`, and
+# `alphaengine.io` loaders (`from_quantconnect`, `from_vectorbt`). Series upload
+# on `/traces` is opt-in via `--share-series` or `ALPHAENGINE_SHARE_SERIES=1`.
+__version__ = "1.0.3"
 
 #: Default workflow/ingest API host until a dedicated qosai.app API host exists.
 #: Overridable via ``ALPHAENGINE_API_URL`` (or ``QUANTOS_API_URL``).

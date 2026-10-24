@@ -202,6 +202,15 @@ distinction is the whole of the data boundary below.
 
 ---
 
+## What's new in 1.0.3
+
+- **Opt-in series sharing & 512-element wire guard:** By default, workflow step traces (`/api/harness/runs/{id}/traces`) report scalar figures only; full series are shared only when you pass `--share-series` or set `ALPHAENGINE_SHARE_SERIES=1`.
+- **Sealed studies (schema 1.2) & CLI reporting:** Studies now carry a canonical-JSON SHA-256 seal (`content_sha256`), a full 64-hex `data_hash`, and an optional per-trial ledger (`include_ledger=True`). Use `alphaengine seal <study.json>` to seal or verify a study file, and `alphaengine report <study.json> [--retail]` to ingest into quantOS or the retail experiment ledger.
+- **Math fixes:** `SweepResult.verdict()` passes cross-trial Sharpe dispersion into `deflated_sharpe` per Bailey & López de Prado (2014); `deflated_sharpe(n_trials=1)` returns `psr_vs_zero` with `sr0_expected_max = 0.0` instead of deflating as `N=2`; `combinatorial_oos_stability` replaces `cpcv_score` (kept as a deprecated alias); and `pbo_cscv` validates that `n_splits` is an even integer $\ge 2$.
+- **Interop loaders (`alphaengine.io`):** `from_quantconnect(path)` and `from_vectorbt(portfolio_or_csv)` build a `Study` with returns and preserve trial-count provenance (`"asserted"` vs. `"not_recorded"`).
+
+See [CHANGELOG.md](CHANGELOG.md) for 1.0.0–1.0.3 release notes.
+
 ## What's new in 0.9.0
 
 `next_open` fills wait for a prior close. The first bar of a next-open backtest
