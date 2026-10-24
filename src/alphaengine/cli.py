@@ -3233,6 +3233,15 @@ def status_line(url: str, *, data: Any, project: str | None, keyed: bool) -> str
     models = available_models()
     bits.append(models[0][0] if models else "no model")
 
+    from .project import find_project
+
+    proj = find_project()
+    if proj is not None:
+        from .ledger import cumulative_trials_for
+
+        _fam_t, proj_trials = cumulative_trials_for(proj)
+        bits.insert(0, f"project:{proj.name} ({proj_trials} trials)")
+
     return "  " + dim(f" {DOT} ".join(bits))
 
 
@@ -4356,6 +4365,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="pull team runs and ideas from quantOS into the local ledger (read-only)",
     )
     pl_cmd.add_argument("remote_name", nargs="?", default="quantos", help="remote name (default quantos)")
+    sub.add_parser(
+        "shell",
+        parents=[common],
+        help="open the interactive research shell with project completion and status",
+    )
     lg = sub.add_parser("login", parents=[common], help="sign in, or enter a model key")
     lg.add_argument("provider", nargs="?", default="quantos", help="quantos, anthropic, openai, ...")
     sub.add_parser("models", parents=[common], help="which model providers this machine can use")
@@ -5434,6 +5448,13 @@ def cmd_pull(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_shell(args: argparse.Namespace) -> int:
+    """Open the interactive research shell (`ae shell`)."""
+    from .repl import run_shell
+
+    return run_shell(args)
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -5467,6 +5488,7 @@ def main(argv: list[str] | None = None) -> int:
         "remote": cmd_remote,
         "push": cmd_push,
         "pull": cmd_pull,
+        "shell": cmd_shell,
         "login": cmd_login,
         "commands": cmd_commands,
         "models": cmd_models,

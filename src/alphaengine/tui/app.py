@@ -294,6 +294,14 @@ class QuantOSApp(App[None]):
         detail = self._account_detail()
         if detail:
             parts.append((detail, "#e6edf3"))
+        from ..project import find_project
+
+        proj = find_project()
+        if proj is not None:
+            from ..ledger import cumulative_trials_for
+
+            _ft, proj_trials = cumulative_trials_for(proj)
+            parts.append((f"project:{proj.name} · {proj_trials} trials", "#7ec8c4"))
         if models:
             parts.append((models[0][0], "#8b949e"))
         if self.loading and not self.busy:

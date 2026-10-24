@@ -872,6 +872,20 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         flags=("url", "key"),
     ),
     Command(
+        verb="shell",
+        group="session",
+        args="",
+        scope="cli",
+        purpose="open the interactive research shell with project completion and status",
+        body=(
+            "Opens the interactive research shell (`ae shell`) with tab completion "
+            "over command verbs, run IDs, dataset names, and hypothesis IDs, a status "
+            "line showing the active project name and cumulative trial count, and "
+            "inline access to `help`, `log`, `show`, `diff`, and `idea`."
+        ),
+        examples=("alphaengine shell",),
+    ),
+    Command(
         verb="logout",
         group="session",
         args="[--purge]",

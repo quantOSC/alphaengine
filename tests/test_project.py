@@ -599,3 +599,132 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     assert pulled_run["read_only"] is True
     pulled_idea = [i for i in proj.read_jsonl("ideas/ideas.jsonl") if i.get("idea_id") == "idea_team_99"][0]
     assert pulled_idea["read_only"] is True
+
+
+def test_research_shell_tab_completion_status_line_inline_commands_and_agent_recording(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+    import types
+
+    from alphaengine.commands import COMMANDS
+    from alphaengine.complete import enable, make_completer, project_completions, verbs_of
+    from alphaengine.repl import SLASH, SessionState, run_shell
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    monkeypatch.setattr("alphaengine.events.data_dir", lambda: tmp_path / "events")
+    assert cli.main(["init", "--name", "shell-os"]) == 0
+    capsys.readouterr()
+
+    # Register a dataset, an idea, and two runs
+    csv_p = tmp_path / "panel.csv"
+    csv_p.write_text(
+        "\n".join(
+            ["date,AAPL,MSFT"] + [f"2025-01-{i + 1:02d},{100.0 + i:.2f},{200.0 + i:.2f}" for i in range(25)]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["data", "add", str(csv_p), "--name", "eq_panel"]) == 0
+    assert (
+        cli.main(["idea", "new", "Shell hypothesis", "--kill-if", "DSR < 0.9", "--family", "shell_fam"]) == 0
+    )
+    assert cli.main(["diagnose", "--data", "eq_panel", "--family", "shell_fam"]) == 0
+    assert cli.main(["process", "gbm", "--family", "shell_fam"]) == 0
+    capsys.readouterr()
+
+    proj = find_project(tmp_path)
+    assert proj is not None
+    runs = proj.read_jsonl("ledger/runs.jsonl")
+    ideas = proj.read_jsonl("ideas/ideas.jsonl")
+    r_a = str(runs[0]["run_id"])
+    r_b = str(runs[1]["run_id"])
+    idea_id = str(ideas[0]["idea_id"])
+
+    # 1. Test `complete.py`: verbs_of, project_completions, make_completer, enable()
+    verbs = verbs_of(COMMANDS, extra=SLASH)
+    pool = project_completions(proj, verbs=verbs, symbols=["AAPL", "MSFT"])
+    assert r_a in pool and r_b in pool
+    assert "eq_panel" in pool
+    assert idea_id in pool
+    assert "log" in pool and "/log" in pool
+
+    comp = make_completer(verbs=verbs, symbols=["AAPL"], proj=proj)
+    assert comp(r_a[:6], 0) == r_a
+    assert comp("eq_pa", 0) == "eq_panel"
+    assert comp(idea_id[:7], 0) == idea_id
+    assert comp("nonexistent_prefix_xyz", 0) is None
+
+    # Fake readline module to exercise `enable()` and its atexit hook
+    rl_calls: dict[str, object] = {}
+    fake_rl = types.ModuleType("readline")
+    fake_rl.read_history_file = lambda p: rl_calls.setdefault("read", p)  # type: ignore[attr-defined]
+    fake_rl.set_history_length = lambda n: rl_calls.setdefault("len", n)  # type: ignore[attr-defined]
+    fake_rl.set_completer = lambda fn: rl_calls.setdefault("comp", fn)  # type: ignore[attr-defined]
+    fake_rl.set_completer_delims = lambda d: rl_calls.setdefault("delims", d)  # type: ignore[attr-defined]
+    fake_rl.parse_and_bind = lambda b: rl_calls.setdefault("bind", b)  # type: ignore[attr-defined]
+    fake_rl.write_history_file = lambda p: rl_calls.setdefault("write", p)  # type: ignore[attr-defined]
+    (tmp_path / "events").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "events" / "history").write_text("help\n", encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "readline", fake_rl)
+    enable(verbs=verbs, symbols=["AAPL"], proj=proj)
+    assert callable(rl_calls.get("comp"))
+    assert rl_calls.get("len") == 1000
+
+    # 2. Test `SessionState` in `repl.py`
+    st = SessionState()
+
+    class _FakeRunObj:
+        run_id = "r_mem_1"
+        artifact = {"figures": {"rows": [{"symbol": "AAPL"}, {"symbol": "MSFT"}]}}
+
+    st.last_answer = types.SimpleNamespace(text="AAPL led.")
+    st.remember_run(_FakeRunObj(), question="which led?")
+    assert st.last_shortlist == ["AAPL", "MSFT"]
+    assert st.resolve_followup_symbol("now size AAPL") == "AAPL"
+    assert st.resolve_followup_symbol("now size TSLA") is None
+
+    # 3. Test `ae shell` (`run_shell`) status line & inline commands
+    script_lines = iter(
+        [
+            "help",
+            "log --family shell_fam",
+            f"show {r_a}",
+            f"diff {r_a} {r_b}",
+            f"idea show {idea_id}",
+            f"seal {r_a}",
+            f"verify {r_a}",
+            "remote list",
+            "push --dry-run",
+            "quit",
+        ]
+    )
+    assert run_shell(input_fn=lambda _prompt: next(script_lines)) == 0
+    shell_out = capsys.readouterr().out
+    # Status line includes project name and cumulative trial count (1 + 80 = 81 trials)
+    assert "project:shell-os (81 trials)" in shell_out
+    assert r_a in shell_out and r_b in shell_out
+    assert "Shell hypothesis" in shell_out
+
+    # 4. Agent sentence inside project records a run to `.alphaengine/ledger/runs.jsonl`
+    from alphaengine.tui.dispatch import Desk, submit
+
+    desk = Desk(
+        session=object(),
+        url="https://api.example.invalid",
+        args=None,
+        data={"AAPL": [100.0 + i for i in range(40)], "MSFT": [200.0 + i for i in range(40)]},
+        think=lambda p: (
+            '{"tool":"profile","args":{}}'
+            if "none yet" in p.split("Calls already made this turn:")[-1]
+            else '{"tool":"done","args":{"answer":"Measured 2 names across 40 observations."}}'
+        ),
+    )
+    before_count = len(proj.read_jsonl("ledger/runs.jsonl"))
+    assert submit(desk, "profile the loaded dataset") is False
+    after_runs = proj.read_jsonl("ledger/runs.jsonl")
+    assert len(after_runs) == before_count + 1
+    assert after_runs[-1]["command"] == "agent_tools"
+    assert after_runs[-1]["n_trials_source"] == "agent_proposal"
+    capsys.readouterr()

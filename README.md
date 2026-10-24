@@ -352,6 +352,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `remote add <name> [url] \| list` | configure or list remote sync endpoints in .alphaengine/project.toml | shell + session |
 | `push [remote] [--dry-run] [--share-series]` | sync sealed studies, ledger runs, and ideas to quantOS (opt-in network) | shell + session |
 | `pull [remote]` | pull team runs and ideas from quantOS into the local ledger (read-only) | shell + session |
+| `shell` | open the interactive research shell with project completion and status | shell |
 | `logout [--purge]` | remove stored credentials from this machine | shell + session |
 | `version` | print the version | shell |
 | `help` | the short list: demo, login, load, then a question | session |
@@ -453,6 +454,7 @@ alphaengine remote add quantos https://qosai.app
 alphaengine push --dry-run
 alphaengine push
 alphaengine pull
+alphaengine shell
 alphaengine logout
 alphaengine logout --purge
 alphaengine version

@@ -1,22 +1,26 @@
-"""Research session state for the terminal OS.
+"""Research session state and interactive line shell (`ae shell`).
 
-Holds data, book, last run, pinned model, conversation turns. The REPL in
-`cli.py` owns the prompt loop so `say` / `boot` stay in one place; this module
-is the memory.
+Holds data, book, last run, pinned model, conversation turns, and provides
+`run_shell()` for interactive project sessions with tab completion over run IDs,
+dataset names, and idea IDs, plus a status line displaying the project name and
+cumulative trial count.
 """
 
 from __future__ import annotations
 
+import argparse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from .book import Book
 from .events import EventSink
 
-__all__ = ["SessionState", "SLASH"]
+__all__ = ["SessionState", "SLASH", "run_shell"]
 
 #: Verbs that also work with a leading `/`, Claude-Code style.
 SLASH = (
+    "init",
     "login",
     "load",
     "demo",
@@ -26,10 +30,20 @@ SLASH = (
     "models",
     "key",
     "data",
+    "idea",
     "universe",
     "project",
     "book",
     "run",
+    "log",
+    "show",
+    "diff",
+    "rerun",
+    "seal",
+    "verify",
+    "remote",
+    "push",
+    "pull",
     "trace",
     "gaps",
     "tonight",
@@ -78,3 +92,58 @@ class SessionState:
         upper = text.upper()
         hits = [s for s in self.last_shortlist if s.upper() in upper]
         return hits[0] if len(hits) == 1 else None
+
+
+def run_shell(
+    args: argparse.Namespace | None = None,
+    *,
+    input_fn: Callable[[str], str] = input,
+) -> int:
+    """Run the interactive research shell with project status line and tab completion."""
+    import os
+
+    from .cli import PROMPT, ProjectError, _session, resolve_data, say, status_line
+    from .commands import COMMANDS
+    from .complete import enable, verbs_of
+    from .project import find_project
+    from .tui.dispatch import Desk, submit
+
+    ns = args or argparse.Namespace(url=None, key=None, project=None, data=None, universe=None, symbol=None)
+    session, url = _session(getattr(ns, "url", None), getattr(ns, "key", None))
+    data: Any = None
+    backtest_fn: Any = None
+    loaded: str | None = None
+    try:
+        data, backtest_fn = resolve_data(ns, session)
+    except (ProjectError, ValueError) as exc:
+        say(str(exc))
+    if getattr(ns, "project", None):
+        loaded = str(ns.project)
+    elif getattr(ns, "data", None):
+        loaded = f"data:{ns.data}"
+
+    keyed = bool(getattr(ns, "key", None) or os.environ.get("QUANTOS_API_KEY"))
+    proj = find_project()
+    symbols = [str(k) for k in data] if isinstance(data, dict) else None
+    enable(verbs=verbs_of(COMMANDS, extra=SLASH), symbols=symbols, proj=proj)
+
+    desk = Desk(
+        session=session,
+        url=url,
+        args=ns,
+        data=data,
+        backtest_fn=backtest_fn,
+        loaded=loaded,
+        keyed=keyed,
+    )
+
+    say(status_line(url, data=desk.data, project=desk.loaded, keyed=desk.keyed))
+    while True:
+        try:
+            line = input_fn(f"{PROMPT} ")
+        except (EOFError, KeyboardInterrupt):
+            say("")
+            break
+        if submit(desk, line):
+            break
+    return 0

@@ -973,11 +973,55 @@ def _offer(desk: Desk, trace: Any) -> None:
         return
     _attach_local_charts(desk, trace)
     _read(desk, trace)
+    _record_agent_trace_in_project(desk, trace)
     say("\x1f")
     desk.pending_report = trace
     if getattr(trace, "answer", ""):
         say(trace.answer)
     say(dim("  Type yes to save this report in Downloads."))
+
+
+def _record_agent_trace_in_project(desk: Desk, trace: Any) -> None:
+    """When inside a `.alphaengine/` project, record every agent trace as a ledger run."""
+    from ..project import find_project
+
+    proj = find_project()
+    if proj is None:
+        return
+    try:
+        from ..ledger import hash_dataset_any, record_run
+
+        calls = list(getattr(trace, "calls", []) or [])
+        tool_names = [str(getattr(c, "tool", "")) for c in calls if getattr(c, "tool", "")]
+        bo = getattr(trace, "bakeoff", None)
+        figs: dict[str, Any] = {}
+        for c in calls:
+            c_figs = getattr(c, "figures", None)
+            if isinstance(c_figs, dict):
+                figs.update(c_figs)
+        if isinstance(bo, dict):
+            n_trials = int(bo.get("n_trials") or len(calls) or 1)
+            source = "bakeoff"
+            verdict = str(bo.get("verdict") or "completed")
+            figs["top_ranked_config"] = bo.get("top_ranked_config")
+            figs["deflated_sharpe"] = bo.get("deflated_sharpe")
+        else:
+            n_trials = max(len(calls), 1)
+            source = "agent_proposal"
+            verdict = "refused" if getattr(trace, "refused", False) else "proposed"
+        record_run(
+            proj,
+            command="agent_bakeoff" if isinstance(bo, dict) else "agent_tools",
+            params={"question": getattr(trace, "question", ""), "tools": tool_names},
+            dataset_hashes=hash_dataset_any(desk.data),
+            n_trials=n_trials,
+            n_trials_source=source,
+            figures=figs,
+            verdict=verdict,
+            family="agent",
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _thinking(think: Callable[[str], str]) -> Callable[[str], str]:
@@ -1431,12 +1475,28 @@ def _loaded_note(desk: Desk) -> str:
 
 
 def _session_prior(desk: Desk) -> str | None:
-    """Every note, plus the last run if it is not already one of them."""
+    """Every note, plus the last run and any `.alphaengine/` project objects."""
     parts = list(desk.notes)
     if desk.last is not None:
         line = _prior_line(desk.last)
         if line not in parts:
             parts.append(line)
+    from ..project import find_project
+
+    proj = find_project()
+    if proj is not None:
+        from ..datasets import list_datasets
+        from ..ideas import list_ideas
+        from ..ledger import cumulative_trials_for
+
+        _ft, proj_trials = cumulative_trials_for(proj)
+        ds_names = [str(d.get("name")) for d in list_datasets(proj)[:8] if d.get("name")]
+        idea_ids = [str(i.get("idea_id")) for i in list_ideas(proj)[:8] if i.get("idea_id")]
+        parts.append(
+            f"project {proj.name}: {proj_trials} cumulative trials"
+            + (f", datasets [{', '.join(ds_names)}]" if ds_names else "")
+            + (f", ideas [{', '.join(idea_ids)}]" if idea_ids else "")
+        )
     if not parts:
         return None
     return "\n".join(parts)
