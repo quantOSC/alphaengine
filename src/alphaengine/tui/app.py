@@ -853,7 +853,11 @@ def launch(args: argparse.Namespace) -> int:
     """Open the session from the bare `alphaengine` command."""
     from ..cli import ProjectError, _session, say
 
-    session, url = _session(getattr(args, "url", None), getattr(args, "key", None))
+    session, url = _session(
+        getattr(args, "url", None),
+        getattr(args, "key", None),
+        share_series=bool(getattr(args, "share_series", False)),
+    )
     data: Any = None
     backtest_fn: Any = None
     loaded: str | None = None

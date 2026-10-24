@@ -301,7 +301,10 @@ def test_boot_never_prints_the_caller_s_data(capsys, monkeypatch):
     assert "2 series" in printed, "the SHAPE should still be reported"
     assert "A L P H A E N G I N E" in printed
     assert "the research loop, on your machine" in printed
-    assert "your data never leaves." in printed
+    assert "computation runs locally" in printed
+    assert "summary figures are reported to your account" in printed
+    assert "full series are shared only if you opt in" in printed
+    assert "your data never leaves." not in printed
     assert "Your data stays on this machine" not in printed
 
 
@@ -392,11 +395,15 @@ def test_process_runs_offline_without_an_account():
         [sys.executable, "-m", "alphaengine", "process"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     )
     assert "n_trials" in out.stdout
     assert "monte_carlo" in out.stdout
-    assert "your data never leaves." in out.stdout
+    assert "computation runs locally" in out.stdout
+    assert "summary figures are reported to your account" in out.stdout
+    assert "full series are shared only if you opt in" in out.stdout
+    assert "your data never leaves." not in out.stdout
     assert "1234" not in out.stdout
 
 

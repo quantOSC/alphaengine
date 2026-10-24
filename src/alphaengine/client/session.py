@@ -35,24 +35,79 @@ import contextlib
 import contextvars
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-from .executor import Figures, Handler, StepExecutor
+from .executor import MAX_FIGURE_LIST, Figures, Handler, StepExecutor
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["connect", "Session", "Run", "Offline", "ServerError", "connect_or_offline"]
+__all__ = [
+    "connect",
+    "Session",
+    "Run",
+    "Offline",
+    "ServerError",
+    "connect_or_offline",
+    "share_series_enabled",
+    "_cap_series",
+    "_guard",
+]
 
 _TIMEOUT = 120
+_ENV_SHARE_SERIES = "ALPHAENGINE_SHARE_SERIES"
 _REQUEST_TIMEOUT: contextvars.ContextVar[float | None] = contextvars.ContextVar(
     "alphaengine_request_timeout", default=None
 )
+
+
+def share_series_enabled(flag: bool | None = None) -> bool:
+    """True only when the caller opted in via ``--share-series`` or ``ALPHAENGINE_SHARE_SERIES=1``."""
+    if flag:
+        return True
+    raw = os.environ.get(_ENV_SHARE_SERIES, "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _cap_series(values: Sequence[Any], limit: int = MAX_FIGURE_LIST) -> list[Any]:
+    """Cap/downsample a sequence to at most ``limit`` points."""
+    items = list(values)
+    n = len(items)
+    if n <= limit or limit <= 0:
+        return items
+    if limit == 1:
+        return [items[-1]]
+    return [items[round(i * (n - 1) / (limit - 1))] for i in range(limit)]
+
+
+def _guard(payload: Any, *, limit: int = MAX_FIGURE_LIST) -> Any:
+    """Refuse to send any list longer than ``limit`` without series opt-in.
+
+    Matches the length-keyed guard style in ``study.report._guard`` and
+    ``client.executor._guard``.
+    """
+
+    def walk(node: Any, path: str) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                walk(v, f"{path}.{k}")
+        elif isinstance(node, (list, tuple)):
+            if len(node) > limit:
+                raise ValueError(
+                    f"refusing to send {path}: {len(node)} elements is a series, "
+                    "not a figure. Your data stays on your machine."
+                )
+            for i, v in enumerate(node):
+                walk(v, f"{path}[{i}]")
+
+    walk(payload, "payload")
+    return payload
 
 
 @contextmanager
@@ -243,25 +298,53 @@ class Run:
     def _report_trace(self, step: Figures, attempt_id: str) -> None:
         """POST the math lines. A refusal is recorded and does not fail the step.
 
-        Figures already went out, and they are what the run is. The trace is
-        the series those figures were computed from. The server that exists
-        today rejects a long list, so this call is allowed to fail.
+        By default only scalar figures (`id`, `formula`, `inputs`, `result`) are
+        sent on `/traces`; full series are uploaded only when the caller opted in
+        via `--share-series` or `ALPHAENGINE_SHARE_SERIES=1`. Any series sent
+        without opt-in is stripped or capped to at most 512 points and guarded.
+        The in-memory `self.traces` list always keeps the local lines for the
+        session inspector.
         """
         lines = list(self.executor.last_lines)
         if not lines:
             return
         from .._version import __version__
 
-        payload: Figures = {
+        local_payload: Figures = {
             "step_id": step.get("step_id"),
             "attempt_id": attempt_id,
             "op": step.get("op"),
             "engine": f"alphaengine@{__version__}",
             "lines": lines,
         }
-        self.traces.append(payload)
+        self.traces.append(local_payload)
+
+        share = self.session._share_series()
+        wire_lines: list[Figures] = []
+        for line in lines:
+            if share:
+                wire_lines.append(line)
+            else:
+                wire_lines.append(
+                    {
+                        "id": line.get("id"),
+                        "formula": line.get("formula"),
+                        "inputs": dict(line.get("inputs") or {}),
+                        "series": {},
+                        "result": line.get("result"),
+                    }
+                )
+        wire_payload: Figures = {
+            "step_id": step.get("step_id"),
+            "attempt_id": attempt_id,
+            "op": step.get("op"),
+            "engine": f"alphaengine@{__version__}",
+            "lines": wire_lines,
+        }
+        if not share:
+            _guard(wire_payload)
         try:
-            self.session._post(f"/api/harness/runs/{self.run_id}/traces", payload)
+            self.session._post(f"/api/harness/runs/{self.run_id}/traces", wire_payload)
             self.trace_rejected = None
         except (ServerError, Offline, OSError, ValueError, TypeError) as exc:
             self.trace_rejected = str(exc)
@@ -341,6 +424,10 @@ class Run:
 class Session:
     base_url: str
     api_key: str | None = None
+    share_series: bool = False
+
+    def _share_series(self) -> bool:
+        return share_series_enabled(self.share_series)
 
     def open(
         self,
@@ -570,6 +657,8 @@ class Session:
 
     # ── transport ──────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Figures | None = None) -> Figures:
+        if body is not None and not self._share_series():
+            _guard(body)
         url = f"{self.base_url.rstrip('/')}{path}"
         payload = json.dumps(body).encode() if body is not None else None
         req = urllib.request.Request(url, data=payload, method=method)
@@ -603,12 +692,14 @@ class Session:
         return self._request("POST", path, body)
 
 
-def connect(base_url: str, *, api_key: str | None = None) -> Session:
+def connect(base_url: str, *, api_key: str | None = None, share_series: bool = False) -> Session:
     """A session against a workflow server. Makes no network call by itself."""
-    return Session(base_url=base_url, api_key=api_key)
+    return Session(base_url=base_url, api_key=api_key, share_series=share_series)
 
 
-def connect_or_offline(base_url: str, *, api_key: str | None = None) -> Session | None:
+def connect_or_offline(
+    base_url: str, *, api_key: str | None = None, share_series: bool = False
+) -> Session | None:
     """Connect, or return None if no server answers.
 
     For the script that should keep working either way. Returning None rather
@@ -616,7 +707,7 @@ def connect_or_offline(base_url: str, *, api_key: str | None = None) -> Session 
     without workflows, and a stub that silently does less would make that
     decision for them and hide it.
     """
-    session = connect(base_url, api_key=api_key)
+    session = connect(base_url, api_key=api_key, share_series=share_series)
     try:
         session.workflows()
     except Offline:

@@ -7,7 +7,8 @@
 <p align="center">
   <strong>The research loop, on your machine.</strong><br>
   Ask what is worth looking at, whether it holds up, how much to hold,<br>
-  and whether anything has crossed a line. Your data never leaves.
+  and whether anything has crossed a line.<br>
+  Computation runs locally; when you are signed in to quantOS, summary figures are reported to your account; full series are shared only if you opt in.
 </p>
 
 <p align="center">
@@ -56,8 +57,9 @@ alphaengine
 > screen
 ```
 
-Prices stay on this machine. A math line's series can travel on its own trace
-so it can be charted. The figures posted with the step stay summaries.
+Computation runs locally on this machine. When you are signed in to quantOS,
+summary figures are reported to your account; full series are shared on
+`/traces` only if you opt in (`--share-series` or `ALPHAENGINE_SHARE_SERIES=1`).
 
 ---
 
@@ -180,9 +182,10 @@ no longer trades that bar's own signal at that bar's open. Close fills are
 unchanged, and the published goldens do not move.
 
 The session is the full-screen terminal (`pip install "alphaengine[tui]"`).
-Each statistic keeps its formula, inputs, and series. Those series post to
-`/api/harness/runs/{id}/traces`. A portal that rejects the trace does not fail
-the run.
+Each statistic keeps its formula, inputs, and series locally. By default,
+`/api/harness/runs/{id}/traces` receives scalar figures only; full series are
+uploaded only when you opt in (`--share-series` or `ALPHAENGINE_SHARE_SERIES=1`).
+A portal that rejects the trace does not fail the run.
 
 ## What's new in 0.8.0
 
@@ -199,8 +202,8 @@ are a public contract from this release. The study schema is **1.1**: optional
 | Figures that already travel | `{kind, key, title}` hints a portal maps to a chart | `charts`, [figure contract](docs/figure_contract.md) |
 
 The terminal boot is the README banner: tracked `ALPHAENGINE`, the subtitle,
-a teal-left / amber-right mesh (plateau, valley, knife-edge ridge), and
-`your data never leaves.` `alphaengine process` fits a DGP offline, no account.
+a teal-left / amber-right mesh (plateau, valley, knife-edge ridge), and the
+local-computation notice. `alphaengine process` fits a DGP offline, no account.
 
 ```python
 from alphaengine.core import ou_calibrate, garch_calibrate, dgp_stress, grinold_alpha
@@ -329,6 +332,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--input K=V` | a workflow input; repeatable |
 | `--quiet` | only the result, no step narration |
 | `--stream` | print the answer once the citation guard has passed |
+| `--share-series` | opt in to uploading full series on run traces (default off; or $ALPHAENGINE_SHARE_SERIES=1) |
 | `--limit N` | how many rows to show (default 25) |
 | `--budget N` | how many runs a night is worth (default 3) |
 
@@ -414,7 +418,7 @@ def backtest_fn(*, data, fast, slow):
 ```
 
 `data` is whatever you want it to be — a DataFrame, a dict of series, an array.
-The package never inspects it and it never leaves your machine.
+The package never inspects it; computation runs locally on your machine.
 
 ## What it does
 
@@ -484,8 +488,10 @@ Study.from_sweep(r, label="momentum, 9 configs").report()
 
 What crosses is an explicit allowlist: the trial count and how it was obtained,
 a content hash of the data, the verdict, the shape of the neighbourhood, the
-performance figures. Your returns, your prices and your parameter grid stay on
-the machine, and a guard keyed on length rather than field name refuses to send
+performance figures. Computation runs locally; when you are signed in to
+quantOS, summary figures are reported to your account, and full series are
+shared only if you opt in (`--share-series` or `ALPHAENGINE_SHARE_SERIES=1`).
+Without opt-in, a guard keyed on length (at most 512 elements) refuses to send
 anything series-shaped whatever it is called.
 
 Reporting is the only part of this package that touches a network, so it is the

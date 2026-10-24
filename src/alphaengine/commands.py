@@ -92,6 +92,11 @@ FLAGS: dict[str, Flag] = {
     "input": Flag("--input", "K=V", "a workflow input; repeatable"),
     "quiet": Flag("--quiet", "", "only the result, no step narration"),
     "stream": Flag("--stream", "", "print the answer once the citation guard has passed"),
+    "share_series": Flag(
+        "--share-series",
+        "",
+        "opt in to uploading full series on run traces (default off; or $ALPHAENGINE_SHARE_SERIES=1)",
+    ),
     "limit": Flag("--limit", "N", "how many rows to show (default 25)"),
     "budget": Flag("--budget", "N", "how many runs a night is worth (default 3)"),
 }
@@ -363,6 +368,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "input",
             "quiet",
             "stream",
+            "share_series",
             "url",
             "key",
         ),

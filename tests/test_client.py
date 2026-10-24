@@ -764,8 +764,8 @@ def _longest_list(node: object) -> int:
 class _TraceSession(Session):
     """One performance step, then close. Traces are a second POST."""
 
-    def __init__(self, *, reject: bool = False) -> None:
-        super().__init__(base_url="fake://", api_key=None)
+    def __init__(self, *, reject: bool = False, share_series: bool = False) -> None:
+        super().__init__(base_url="fake://", api_key=None, share_series=share_series)
         self.posts: list[tuple[str, dict]] = []
         self.reject = reject
 
@@ -791,9 +791,9 @@ class _TraceSession(Session):
 
 
 def test_series_travel_on_the_trace_and_not_inside_figures():
-    """A 600-point series is a series. Figures still refuse that. The trace does not."""
+    """With opt-in, a 600-point series travels on the trace; figures still cap at 512."""
     returns = np.random.default_rng(2).normal(0.0004, 0.01, 600).tolist()
-    session = _TraceSession()
+    session = _TraceSession(share_series=True)
     run = session.open("measure", data=returns)
     run.drive()
 
@@ -811,6 +811,95 @@ def test_series_travel_on_the_trace_and_not_inside_figures():
     assert traces[0]["step_id"] == "s1"
     assert run.trace_rejected is None
     assert run.traces[0]["lines"][0]["id"]
+
+
+def test_trace_sends_only_scalars_by_default_while_keeping_local_series(monkeypatch):
+    """By default (share_series=False), no series leave on /traces; local run.traces keeps them."""
+    monkeypatch.delenv("ALPHAENGINE_SHARE_SERIES", raising=False)
+    returns = np.random.default_rng(2).normal(0.0004, 0.01, 600).tolist()
+    session = _TraceSession()
+    run = session.open("measure", data=returns)
+    run.drive()
+
+    traces = [body for path, body in session.posts if path.endswith("/traces")]
+    assert len(traces) == 1
+    assert _longest_list(traces[0]) <= MAX_FIGURE_LIST
+    for line in traces[0]["lines"]:
+        assert line["series"] == {}
+        assert "result" in line
+    local_line = next(item for item in run.traces[0]["lines"] if item["id"] == "sharpe_annualized")
+    assert len(local_line["series"]["returns"]) == 600
+
+
+def test_no_list_longer_than_512_leaves_machine_without_opt_in_http_mock(monkeypatch):
+    """Inspect actual HTTP payloads via mocked urlopen: nothing > 512 elements leaves without opt-in."""
+    import io
+    import json
+    import urllib.request
+
+    from alphaengine.client.session import _cap_series
+
+    monkeypatch.delenv("ALPHAENGINE_SHARE_SERIES", raising=False)
+    captured_bodies: list[tuple[str, dict]] = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url
+        body = json.loads(req.data.decode("utf-8")) if req.data else {}
+        captured_bodies.append((url, body))
+        if url.endswith("/runs"):
+            resp_payload = {
+                "run_id": "r-http",
+                "status": "open",
+                "selection": "any",
+                "permitted": [{"step_id": "s1", "op": "compute.performance_report", "params": {}}],
+            }
+        elif url.endswith("/steps"):
+            resp_payload = {
+                "run_id": "r-http",
+                "status": "closed",
+                "permitted": [],
+                "artifact": {"workflow": "measure"},
+            }
+        else:
+            resp_payload = {"ok": True}
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp(json.dumps(resp_payload).encode("utf-8"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    returns = np.random.default_rng(7).normal(0.0005, 0.01, 900).tolist()
+    session = connect("https://api.example.invalid", api_key="ae_live_test")
+    run = session.open("measure", data=returns)
+    run.drive()
+
+    assert len(captured_bodies) >= 3  # /runs, /steps, /traces
+    for url, payload in captured_bodies:
+        assert _longest_list(payload) <= MAX_FIGURE_LIST, f"{url} sent a list > {MAX_FIGURE_LIST}"
+
+    # Direct transport guard refuses any > 512 list when share_series is off
+    with pytest.raises(ValueError, match="stays on your machine"):
+        session._post("/api/harness/runs/r-http/traces", {"lines": list(range(513))})
+
+    # Downsampling helper caps at 512
+    assert len(_cap_series(list(range(900)))) == MAX_FIGURE_LIST
+
+
+def test_share_series_env_var_enables_trace_series_upload(monkeypatch):
+    monkeypatch.setenv("ALPHAENGINE_SHARE_SERIES", "1")
+    returns = np.random.default_rng(2).normal(0.0004, 0.01, 600).tolist()
+    session = _TraceSession()
+    run = session.open("measure", data=returns)
+    run.drive()
+    traces = [body for path, body in session.posts if path.endswith("/traces")]
+    line = next(item for item in traces[0]["lines"] if item["id"] == "sharpe_annualized")
+    assert len(line["series"]["returns"]) == 600
 
 
 def test_a_rejected_trace_does_not_fail_the_run():

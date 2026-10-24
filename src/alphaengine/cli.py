@@ -471,7 +471,7 @@ def _height_at(x: float, z: float, t: float) -> float:
 
 
 def _teal(text: str) -> str:
-    """The banner's secondary colour: subtitle and 'your data never leaves.'"""
+    """The banner's secondary colour: subtitle and data-boundary line."""
     return _rgb(64, 200, 210, text)
 
 
@@ -858,7 +858,12 @@ def load_project(spec: str | None) -> tuple[Any, Any]:
 # ── session ────────────────────────────────────────────────────────────────
 
 
-def _session(base_url: str | None, api_key: str | None) -> tuple[Any, str]:
+def _session(
+    base_url: str | None,
+    api_key: str | None,
+    *,
+    share_series: bool = False,
+) -> tuple[Any, str]:
     """Imported lazily so `import alphaengine` still touches no networking code.
 
     `test_smoke.py` asserts that property, and it is worth more than the two
@@ -869,7 +874,7 @@ def _session(base_url: str | None, api_key: str | None) -> tuple[Any, str]:
 
     url = base_url or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL
     key = api_key or os.environ.get(_ENV_KEY) or ""
-    return connect(url, api_key=key or None), url
+    return connect(url, api_key=key or None, share_series=bool(share_series)), url
 
 
 def _explain_offline(url: str) -> None:
@@ -1772,7 +1777,11 @@ def cmd_run(args: argparse.Namespace) -> int:
     from .client import Offline, ServerError
     from .core.relations import KINDS
 
-    session, url = _session(args.url, args.key)
+    session, url = _session(
+        args.url,
+        args.key,
+        share_series=bool(getattr(args, "share_series", False)),
+    )
     kind = KINDS.get(str(args.workflow).lower().replace("-", "_"))
     if kind:
         try:
@@ -2626,6 +2635,11 @@ def _apply_flags(flags: list[str], session: Any, data: Any, backtest_fn: Any) ->
     while i < len(flags):
         f = flags[i]
         value = flags[i + 1] if i + 1 < len(flags) else None
+        if f == "--share-series":
+            if session is not None:
+                session.share_series = True
+            i += 1
+            continue
         if f in ("--data", "--universe", "--project", "--symbol") and value:
             setattr(ns, f[2:], value)
             i += 2
@@ -2635,7 +2649,7 @@ def _apply_flags(flags: list[str], session: Any, data: Any, backtest_fn: Any) ->
     if unknown:
         raise ValueError(
             f"I do not know {' '.join(unknown)} in a session. "
-            "Here `run` takes --data, --universe, --project and --symbol."
+            "Here `run` takes --data, --universe, --project, --symbol and --share-series."
         )
     # `--symbol` narrows whatever the SESSION holds, so it is applied after the
     # merge below — inside `resolve_data` it saw only this line's own loads,
@@ -3193,7 +3207,13 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
         say("  " + line)
     say("")
     _play_canvas()
-    say("  " + _teal("your data never leaves."))
+    say(
+        "  "
+        + _teal(
+            "computation runs locally; when you are signed in to quantOS, summary figures are reported "
+            "to your account; full series are shared only if you opt in."
+        )
+    )
     say("")
 
     # Data is described by SHAPE, never printed. A boot screen that echoes the
@@ -3789,11 +3809,20 @@ def build_parser() -> argparse.ArgumentParser:
         "--symbol",
         help="one name out of a loaded universe; its closes become the return series sizing runs on",
     )
+    common.add_argument(
+        "--share-series",
+        action="store_true",
+        help="opt in to uploading full series on run traces (or set ALPHAENGINE_SHARE_SERIES=1)",
+    )
 
     p = argparse.ArgumentParser(
         prog="alphaengine",
         parents=[common],
-        description="Run validated research workflows. Your data stays on this machine.",
+        description=(
+            "Run validated research workflows. Computation runs locally; when you are signed in to "
+            "quantOS, summary figures are reported to your account; full series are shared only if "
+            "you opt in."
+        ),
     )
     sub = p.add_subparsers(dest="command")
     sub.add_parser("version", parents=[common], help="print the version")
@@ -3917,7 +3946,13 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
         say("")
         say("    " + dim("sharpe hist") + "  " + sparkline([float(c) for c in counts], width=36))
     say("")
-    say("  " + _teal("your data never leaves."))
+    say(
+        "  "
+        + _teal(
+            "computation runs locally; when you are signed in to quantOS, summary figures are reported "
+            "to your account; full series are shared only if you opt in."
+        )
+    )
     return 0
 
 
