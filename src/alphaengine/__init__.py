@@ -50,11 +50,12 @@ __all__ = [
     "report",
     "ReportError",
     "SCHEMA_VERSION",
+    "io",
 ]
 
 
 def __getattr__(name: str) -> Any:  # PEP 562
-    """`report` and `ReportError` load on first use.
+    """`report`, `ReportError`, and `io` load on first use.
 
     Everything else in this package is offline by construction and imports
     eagerly. Reporting is the one thing that touches a network, so it is the one
@@ -66,4 +67,8 @@ def __getattr__(name: str) -> Any:  # PEP 562
 
         mod = importlib.import_module(".study.report", __name__)
         return getattr(mod, name)
+    if name == "io":
+        import importlib
+
+        return importlib.import_module(".io", __name__)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
