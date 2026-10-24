@@ -46,7 +46,7 @@ def _cell(text: str) -> str:
     otherwise, which is the sort of thing a generator is supposed to make
     impossible rather than reproduce faithfully.
     """
-    return text.replace("|", "\|")
+    return text.replace("|", r"\|")
 
 
 def render() -> str:

@@ -28,6 +28,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
 
 import itertools
 import math
+import warnings
 from typing import Any
 
 import numpy as np
@@ -223,7 +224,9 @@ def engle_granger_test(spread: np.ndarray) -> dict:
             "error": "insufficient_data",
         }
     try:
-        result = adfuller(spread_clean, regression="c", autolag="AIC")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", FutureWarning)
+            result = adfuller(spread_clean, regression="c", autolag="AIC")
         return {
             "p_value": float(result[1]),
             "test_statistic": float(result[0]),
