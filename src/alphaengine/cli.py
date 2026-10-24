@@ -4341,20 +4341,40 @@ def build_parser() -> argparse.ArgumentParser:
     sl = sub.add_parser(
         "seal",
         parents=[common],
-        help="write canonical content_sha256 into a study and verify on re-run",
+        help="write canonical content_sha256 into a study (or seal a project run/idea)",
     )
-    sl.add_argument("study_path", metavar="study.json", help="path to study.json")
+    sl.add_argument(
+        "study_path",
+        nargs="?",
+        default="HEAD",
+        metavar="study.json",
+        help="path to study.json, run id, or idea id",
+    )
+
+    vf = sub.add_parser(
+        "verify",
+        parents=[common],
+        help="verify a study.json content_sha256 seal and optionally re-check figures",
+    )
+    vf.add_argument("study_path", metavar="study.json", help="path to study.json")
 
     rp = sub.add_parser(
         "report",
         parents=[common],
-        help="send a saved study to quantOS (/api/me/runs/ingest or --retail) or export a PDF report",
+        help="send a saved study to quantOS (/api/me/runs/ingest or --retail) or export a memo/PDF",
     )
-    rp.add_argument("study_path", nargs="?", metavar="study.json", help="path to study.json")
+    rp.add_argument("study_path", nargs="?", metavar="study.json", help="path to study.json or 'memo'")
+    rp.add_argument("memo_target", nargs="?", default=None, help="idea id or run id for 'report memo'")
     rp.add_argument(
         "--retail",
         action="store_true",
         help="post to /api/retail/ledger/import instead of /api/me/runs/ingest",
+    )
+    rp.add_argument(
+        "--format",
+        dest="fmt",
+        default="md",
+        help="output format for report memo: md or pdf (default md)",
     )
 
     r = sub.add_parser("run", parents=[common], help="run one workflow to completion")
@@ -4682,44 +4702,136 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 def cmd_seal(args: argparse.Namespace) -> int:
-    """Write canonical content_sha256 to a study, or verify if already sealed."""
+    """Write canonical content_sha256 to a study file, or seal a project `<run|idea>`."""
     import json
 
+    from .project import find_project
     from .study import compute_content_sha256, load, save
 
-    path = pathlib.Path(str(getattr(args, "study_path", "")))
+    target = str(getattr(args, "study_path", "") or "HEAD")
+    path = pathlib.Path(target)
+    if path.is_file():
+        try:
+            raw_disk = json.loads(path.read_text(encoding="utf-8"))
+            study = load(path)
+        except Exception as exc:  # noqa: BLE001
+            say(red(f"Could not read {path}: {exc}"))
+            return 2
+
+        existing = raw_disk.get("content_sha256")
+        computed = compute_content_sha256(study)
+        if existing:
+            if existing == computed:
+                say(green("Verified.") + f"  {computed}  " + dim(str(path)))
+                return 0
+            say(
+                red("Seal mismatch.")
+                + f"  stored {existing[:16]}... != computed {computed[:16]}...  "
+                + dim(str(path))
+            )
+            return 1
+
+        study.content_sha256 = computed
+        save(study, path)
+        say(green("Sealed.") + f"  {computed}  " + dim(str(path)))
+        return 0
+
+    # If `target` is not an existing file, check if we are inside a project and sealing a `<run|idea>`
+    proj = find_project()
+    if proj is not None and not target.endswith(".json"):
+        from .envelope import emit_json
+        from .memo import seal_from_project
+
+        try:
+            study, out_path = seal_from_project(proj, target)
+        except Exception as exc:  # noqa: BLE001
+            say(red(str(exc)))
+            return 2
+        if getattr(args, "json_out", False):
+            emit_json(
+                {"path": str(out_path), "content_sha256": study.content_sha256, "study": study.to_dict()}
+            )
+            return 0
+        say(green("Sealed.") + f"  {study.content_sha256}  " + dim(str(out_path)))
+        return 0
+
+    say(red(f"No study file at {path}."))
+    return 2
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Verify a `study.json` hash and optionally re-check figures against `--data` or the project ledger."""
+    from .envelope import emit_json
+    from .memo import verify_study_file
+    from .project import find_project
+
+    target = str(getattr(args, "study_path", "") or "")
+    path = pathlib.Path(target)
+    proj = find_project()
+    if not path.is_file() and proj is not None:
+        cand = proj.studies_dir / (target if target.endswith(".json") else f"{target}.json")
+        if cand.is_file():
+            path = cand
     if not path.is_file():
         say(red(f"No study file at {path}."))
         return 2
+
     try:
-        raw_disk = json.loads(path.read_text(encoding="utf-8"))
-        study = load(path)
+        ok, info = verify_study_file(
+            path,
+            data_path=getattr(args, "data", None),
+            proj=proj,
+        )
     except Exception as exc:  # noqa: BLE001
-        say(red(f"Could not read {path}: {exc}"))
+        say(red(f"Could not verify {path}: {exc}"))
         return 2
 
-    existing = raw_disk.get("content_sha256")
-    computed = compute_content_sha256(study)
-    if existing:
-        if existing == computed:
-            say(green("Verified.") + f"  {computed}  " + dim(str(path)))
-            return 0
+    if getattr(args, "json_out", False):
+        emit_json(info)
+        return 0 if ok else 1
+
+    if not info.get("hash_verified"):
         say(
             red("Seal mismatch.")
-            + f"  stored {existing[:16]}... != computed {computed[:16]}...  "
+            + f"  stored {str(info.get('stored_sha256'))[:16]}... != "
+            + f"computed {str(info.get('computed_sha256'))[:16]}...  "
             + dim(str(path))
         )
         return 1
 
-    study.content_sha256 = computed
-    save(study, path)
-    say(green("Sealed.") + f"  {computed}  " + dim(str(path)))
+    if not ok:
+        say(red("Verification failed (figure/data mismatch).") + f"  {path}")
+        for k, m in sorted((info.get("mismatches") or {}).items()):
+            say(f"    {k}: recorded {m['recorded']} != reproduced {m['reproduced']}")
+        return 1
+
+    extra = " + figures reproduced" if info.get("data_verified") is True else ""
+    say(green("Verified.") + f"  {info['computed_sha256']}  {dim(str(path) + extra)}")
     return 0
 
 
 def cmd_report_study(args: argparse.Namespace) -> int:
-    """Report a saved study.json to quantOS, or generate a local PDF report to Downloads when omitted."""
+    """Report a saved study.json to quantOS, export a cited memo (`report memo`), or generate a local PDF."""
     raw_study_path = getattr(args, "study_path", None)
+    if str(raw_study_path or "").lower() == "memo":
+        from .memo import generate_memo
+        from .project import find_project
+
+        proj = find_project()
+        if proj is None:
+            say(red("Not inside a local project. Run `alphaengine init` first."))
+            return 2
+        target_ref = str(getattr(args, "memo_target", None) or "HEAD")
+        fmt = str(getattr(args, "fmt", "md") or "md").lower()
+        try:
+            md_text, out_path = generate_memo(proj, target_ref, fmt=fmt)
+        except Exception as exc:  # noqa: BLE001
+            say(red(str(exc)))
+            return 2
+        if fmt == "md":
+            say(md_text.rstrip())
+        say(green("Memo written.") + f"  {out_path}")
+        return 0
     if not raw_study_path:
         from .agent.brief import study_for
         from .agent.sim import Trace
@@ -5227,6 +5339,7 @@ def main(argv: list[str] | None = None) -> int:
         "models": cmd_models,
         "trace": cmd_trace,
         "seal": cmd_seal,
+        "verify": cmd_verify,
         "report": cmd_report_study,
         "run": cmd_run,
         None: cmd_session,  # bare `alphaengine` opens the full-screen session

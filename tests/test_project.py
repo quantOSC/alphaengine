@@ -376,3 +376,76 @@ def test_hypotheses_as_objects_kill_rules_and_prior_work_warning(
     list_out = capsys.readouterr().out
     assert idea_id in list_out
     assert "killed" in list_out
+
+
+def test_seal_run_or_idea_verify_study_with_data_and_export_memo_md_and_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    assert cli.main(["init", "--name", "seal-memo-test"]) == 0
+    capsys.readouterr()
+
+    # Create idea and run `validate`
+    assert cli.main(["idea", "new", "Demo MA crossover check", "--kill-if", "DSR < 0.9", "--json"]) == 0
+    idea_id = json.loads(capsys.readouterr().out)["idea_id"]
+
+    assert cli.main(["validate", "--project", "alphaengine.demo", "--idea", idea_id, "--json"]) == 0
+    run_env = json.loads(capsys.readouterr().out)
+    run_id = run_env["run_id"]
+
+    # 1. `ae seal <idea>` writes `.alphaengine/studies/<idea_id>.json` with schema 1.2 & trial ledger
+    assert cli.main(["seal", idea_id, "--json"]) == 0
+    sealed_idea = json.loads(capsys.readouterr().out)
+    study_path = Path(sealed_idea["path"])
+    assert study_path.is_file()
+    assert len(sealed_idea["content_sha256"]) == 64
+    assert sealed_idea["study"]["schema_version"] == "1.2"
+    assert len(sealed_idea["study"]["trial_ledger"]) == 9
+    assert sealed_idea["study"]["psr_vs_zero"] is not None
+    assert sealed_idea["study"]["sr0_expected_max"] is not None
+    assert sealed_idea["study"]["min_track_record_length"] is not None
+    assert sealed_idea["study"]["selection"] is not None
+
+    # 2. `ae verify <study.json>` verifies the hash and re-runs the project run to confirm figures
+    assert cli.main(["verify", str(study_path)]) == 0
+    ver_out = capsys.readouterr().out
+    assert "Verified." in ver_out
+    assert "figures reproduced" in ver_out
+
+    # 3. Also test `ae verify <study.json> --data <file>` on a returns CSV study
+    rets_csv = tmp_path / "returns.csv"
+    from alphaengine.demo_returns import data as demo_rets
+
+    rets_csv.write_text("returns\n" + "\n".join(str(x) for x in demo_rets) + "\n", encoding="utf-8")
+    assert cli.main(["size", "--data", str(rets_csv), "--json"]) == 0
+    size_env = json.loads(capsys.readouterr().out)
+    assert cli.main(["seal", size_env["run_id"], "--json"]) == 0
+    size_study_path = Path(json.loads(capsys.readouterr().out)["path"])
+
+    assert cli.main(["verify", str(size_study_path), "--data", str(rets_csv)]) == 0
+    ver_data_out = capsys.readouterr().out
+    assert "Verified." in ver_data_out
+
+    # Wrong data file fails verification
+    wrong_csv = tmp_path / "wrong.csv"
+    wrong_csv.write_text("returns\n" + "\n".join(str(x * -2.0) for x in demo_rets) + "\n", encoding="utf-8")
+    assert cli.main(["verify", str(size_study_path), "--data", str(wrong_csv)]) == 1
+    capsys.readouterr()
+
+    # 4. `ae report memo <idea> --format md` cites `[run_id]` on every figure
+    assert cli.main(["report", "memo", idea_id, "--format", "md"]) == 0
+    memo_out = capsys.readouterr().out
+    assert f"[{run_id}]" in memo_out
+    assert "Research tool, not investment advice." in memo_out
+    assert (tmp_path / ".alphaengine" / "studies" / f"memo_{idea_id}.md").is_file()
+
+    # 5. `ae report memo <run> --format pdf` writes a PDF memo when matplotlib is installed
+    pytest.importorskip("matplotlib")
+    assert cli.main(["report", "memo", run_id, "--format", "pdf"]) == 0
+    capsys.readouterr()
+    pdf_memo = tmp_path / ".alphaengine" / "studies" / f"memo_{run_id}.pdf"
+    assert pdf_memo.is_file()
+    assert pdf_memo.read_bytes().startswith(b"%PDF")

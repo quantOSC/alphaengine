@@ -323,8 +323,9 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `monitor` | still inside the lines? | shell + session |
 | `run <workflow>` | run one workflow exactly as written | shell + session |
 | `rerun <run>` | reproduce a recorded project run from its inputs and check figures | shell + session |
-| `seal <study.json>` | write canonical content_sha256 into a study and verify on re-run | shell |
-| `report <study.json> [--retail]` | send a saved study to quantOS (/api/me/runs/ingest or --retail ledger) | shell |
+| `seal <study.json \| run \| idea>` | write canonical content_sha256 into a study (or seal a project run/idea) | shell + session |
+| `verify <study.json> [--data FILE]` | verify a study.json content_sha256 seal and optionally re-check figures | shell + session |
+| `report <study.json> [--retail] \| memo <idea \| run> [--format md \| pdf]` | send a study to quantOS, or export a cited committee memo (md/pdf) | shell + session |
 | `<anything else>` | ask in plain English; your model picks a workflow and drives it | session |
 | `status` | the current run, and what is loaded | session |
 
@@ -390,6 +391,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--json` | emit a versioned v1.0 JSON result envelope to stdout |
 | `--stdin` | read an upstream JSON result envelope from standard input |
 | `--kill-if RULE` | kill rule for a hypothesis, e.g. 'DSR < 0.9' |
+| `--format FMT` | output format for report memo: md or pdf (default md) |
 
 ### Examples
 
@@ -425,8 +427,12 @@ alphaengine run validate_study --project research.momentum
 alphaengine run examples/screen_validate_size.yaml
 alphaengine rerun HEAD
 alphaengine seal study.json
+alphaengine seal HEAD
+alphaengine verify study.json
+alphaengine verify study.json --data prices.csv
 alphaengine report study.json
 alphaengine report study.json --retail
+alphaengine report memo HEAD --format md
 alphaengine models
 alphaengine trace
 alphaengine idea new "Cross-sectional momentum holds" --kill-if "DSR < 0.9" --family momentum

@@ -291,6 +291,18 @@ def submit(desk: Desk, line: str) -> bool:
     if verb in ("report", "save", "pdf", "export"):
         _report_cmd(desk, rest)
         return False
+    if verb == "seal":
+        from ..cli import cmd_seal
+
+        cmd_seal(_ns(desk, study_path=rest or "HEAD"))
+        return False
+    if verb == "verify":
+        from ..cli import cmd_verify
+
+        data_arg, toks = pop_flag(rest.split(), "--data")
+        target_arg = toks[0] if toks else "HEAD"
+        cmd_verify(_ns(desk, study_path=target_arg, data=data_arg))
+        return False
     if verb == "view":
         _view(desk)
         return False
@@ -313,8 +325,8 @@ def submit(desk: Desk, line: str) -> bool:
 
             name_arg, toks = pop_flag(parts[1:], "--name")
             asof_arg, toks = pop_flag(toks, "--asof-col")
-            target_arg = toks[0] if toks else None
-            cmd_data(_ns(desk, action=parts[0].lower(), target=target_arg, name=name_arg, asof_col=asof_arg))
+            ds_target = toks[0] if toks else None
+            cmd_data(_ns(desk, action=parts[0].lower(), target=ds_target, name=name_arg, asof_col=asof_arg))
             return False
         _load_named(desk, verb, rest)
         return False
@@ -491,8 +503,15 @@ def _key(desk: Desk, rest: str, *, verb: str = "key") -> None:
 
 
 def _report_cmd(desk: Desk, rest: str) -> None:
-    """Save a PDF report to Downloads, or upload a study.json when one is named."""
+    """Save a PDF report to Downloads, export a memo, or upload a study.json when one is named."""
     tokens = rest.split()
+    if tokens and tokens[0].lower() == "memo":
+        from ..cli import cmd_report_study
+
+        fmt_arg, rem = pop_flag(tokens[1:], "--format")
+        target_arg = rem[0] if rem else "HEAD"
+        cmd_report_study(_ns(desk, study_path="memo", memo_target=target_arg, fmt=fmt_arg or "md"))
+        return
     if tokens and (tokens[0].endswith(".json") or "--retail" in tokens):
         from ..cli import cmd_report_study
 

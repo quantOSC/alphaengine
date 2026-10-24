@@ -154,6 +154,11 @@ FLAGS: dict[str, Flag] = {
         "RULE",
         "kill rule for a hypothesis, e.g. 'DSR < 0.9'",
     ),
+    "format": Flag(
+        "--format",
+        "FMT",
+        "output format for report memo: md or pdf (default md)",
+    ),
 }
 
 
@@ -508,37 +513,53 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="seal",
         group="run",
-        args="<study.json>",
-        scope="cli",
-        purpose="write canonical content_sha256 into a study and verify on re-run",
+        args="<study.json | run | idea>",
+        scope="both",
+        purpose="write canonical content_sha256 into a study (or seal a project run/idea)",
         body=(
             "Computes the canonical-JSON SHA-256 over the study (sorted keys, fixed "
             "8-decimal float formatting) and writes `content_sha256` into the file.\n\n"
-            "On re-run against a study that already carries `content_sha256`, verifies "
-            "that the content still matches the stored seal and exits non-zero if the "
-            "file was modified."
+            "Inside a `.alphaengine/` project, `seal <run|idea>` assembles a Schema 1.2 "
+            "study with trial ledger, dataset hashes, and PBO/PSR/SR0/MinTRL figures "
+            "and writes `.alphaengine/studies/<id>.json`."
         ),
-        examples=("alphaengine seal study.json",),
+        examples=("alphaengine seal study.json", "alphaengine seal HEAD"),
+    ),
+    Command(
+        verb="verify",
+        group="run",
+        args="<study.json> [--data FILE]",
+        scope="both",
+        purpose="verify a study.json content_sha256 seal and optionally re-check figures",
+        body=(
+            "Checks that `content_sha256` in `<study.json>` matches its canonical JSON "
+            "content, and when `--data <file>` (or a local project run record) is "
+            "available, re-runs the calculation and confirms the figures within tolerance."
+        ),
+        examples=(
+            "alphaengine verify study.json",
+            "alphaengine verify study.json --data prices.csv",
+        ),
+        flags=("data",),
     ),
     Command(
         verb="report",
         group="run",
-        args="<study.json> [--retail]",
-        scope="cli",
-        purpose="send a saved study to quantOS (/api/me/runs/ingest or --retail ledger)",
+        args="<study.json> [--retail] | memo <idea | run> [--format md | pdf]",
+        scope="both",
+        purpose="send a study to quantOS, or export a cited committee memo (md/pdf)",
         body=(
-            "Sends a saved `study.json` to your quantOS workspace. Default posts the "
-            "allowlisted study payload to `POST /api/me/runs/ingest`.\n\n"
-            "Pass `--retail` to import into the retail experiment ledger at "
-            "`POST /api/retail/ledger/import` with `source`, `title`, `sharpe`, "
-            "`total_return_pct`, `max_drawdown_pct`, `n_trials_in_import`, `family`, "
-            "and `notes`."
+            "Sends a saved `study.json` to your quantOS workspace (`POST /api/me/runs/ingest` "
+            "or `--retail` `/api/retail/ledger/import`).\n\n"
+            "`report memo <idea|run> --format md|pdf` exports a committee-style research "
+            "memo where every figure cites its `[run_id]`."
         ),
         examples=(
             "alphaengine report study.json",
             "alphaengine report study.json --retail",
+            "alphaengine report memo HEAD --format md",
         ),
-        flags=("retail", "url", "key"),
+        flags=("retail", "format", "url", "key"),
     ),
     Command(
         verb="<anything else>",
