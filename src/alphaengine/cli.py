@@ -902,6 +902,21 @@ def _explain_offline(url: str) -> None:
 # ── commands ───────────────────────────────────────────────────────────────
 
 
+def cmd_init(args: argparse.Namespace) -> int:
+    """Create `.alphaengine/` in the target directory (or current directory)."""
+    from .project import PROJECT_FORMAT_VERSION, init_project
+
+    target = getattr(args, "directory", None) or "."
+    name = getattr(args, "name", None)
+    proj = init_project(target, name=name)
+    say(
+        green("Initialized.")
+        + f"  {proj.dot_dir}  "
+        + dim(f"({proj.name} {DOT} schema {PROJECT_FORMAT_VERSION})")
+    )
+    return 0
+
+
 def cmd_version(_args: argparse.Namespace) -> int:
     from ._version import __version__
 
@@ -3868,6 +3883,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     sub = p.add_subparsers(dest="command")
+    ini = sub.add_parser(
+        "init",
+        parents=[common],
+        help="initialize a local .alphaengine/ research project in this directory",
+    )
+    ini.add_argument("directory", nargs="?", default=None, help="directory to initialize (default .)")
+    ini.add_argument("--name", help="project name (defaults to directory name)")
     sub.add_parser("version", parents=[common], help="print the version")
     sub.add_parser("workflows", parents=[common], help="list what the server offers")
     sub.add_parser("demo", parents=[common], help="run the built-in example, offline")
@@ -4238,6 +4260,7 @@ def main(argv: list[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     handlers: dict[str | None, Callable[[argparse.Namespace], int]] = {
+        "init": cmd_init,
         "version": cmd_version,
         "workflows": cmd_workflows,
         "runs": cmd_runs,

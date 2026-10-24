@@ -292,6 +292,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 
 | Command | Does | Where |
 |---|---|---|
+| `init [--name NAME]` | initialize a local .alphaengine/ research project in this directory | shell + session |
 | `demo` | run the built-in example offline, with no account and no data | shell + session |
 | `process [ou \| gbm \| jump \| garch]` | fit a named process to a series and stress it, offline | shell + session |
 | `runs [--limit N]` | your own week: what ran, what it decided, what it filed | shell + session |
@@ -375,6 +376,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--budget N` | how many runs a night is worth (default 3) |
 | `--purge` | remove ~/.config/alphaengine/credentials.json and clean up its config directory |
 | `--retail` | send the study to the retail experiment ledger (/api/retail/ledger/import) |
+| `--name NAME` | name for the initialized project or registered dataset |
 
 ### Examples
 
@@ -387,6 +389,8 @@ alphaengine stress
 alphaengine overlap
 alphaengine size
 alphaengine monitor
+alphaengine init
+alphaengine init --name momentum
 alphaengine demo
 alphaengine process
 alphaengine process ou

@@ -54,6 +54,7 @@ dependencies = [
 # access, and the data not moving is the whole point.
 [project.scripts]
 alphaengine = "alphaengine.cli:main"
+ae = "alphaengine.cli:main"
 
 [project.optional-dependencies]
 # Factor decomposition (OLS with HAC errors) and cointegration (ADF) need

@@ -109,6 +109,11 @@ FLAGS: dict[str, Flag] = {
         "",
         "send the study to the retail experiment ledger (/api/retail/ledger/import)",
     ),
+    "name": Flag(
+        "--name",
+        "NAME",
+        "name for the initialized project or registered dataset",
+    ),
 }
 
 
@@ -192,6 +197,22 @@ def _question_commands() -> tuple[Command, ...]:
 
 COMMANDS: tuple[Command, ...] = _question_commands() + (
     # ── get started ────────────────────────────────────────────────────────
+    Command(
+        verb="init",
+        group="start",
+        args="[--name NAME]",
+        scope="both",
+        purpose="initialize a local .alphaengine/ research project in this directory",
+        body=(
+            "Creates `.alphaengine/` in the current directory with `project.toml`, "
+            "`ledger/`, `data/`, `studies/`, `ideas/`, `universes/`, and content-addressed "
+            "`objects/`.\n\n"
+            "Commands find the project by walking up from the current directory, the way "
+            "git does. Outside a project, every command behaves as a standalone call."
+        ),
+        examples=("alphaengine init", "alphaengine init --name momentum"),
+        flags=("name",),
+    ),
     Command(
         verb="demo",
         group="start",

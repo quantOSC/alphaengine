@@ -142,7 +142,7 @@ def submit(desk: Desk, line: str) -> bool:
     if not line.strip():
         return False
 
-    if line.split()[:1] == ["alphaengine"]:
+    if line.split()[:1] in (["alphaengine"], ["ae"]):
         line = line.partition(" ")[2].strip()
         if not line:
             return False
@@ -163,6 +163,13 @@ def submit(desk: Desk, line: str) -> bool:
         return True
     if verb == "help":
         say(_help_text())
+        return False
+    if verb == "init":
+        from ..cli import cmd_init
+
+        name_arg, rest_tokens = pop_flag(rest.split(), "--name")
+        dir_arg = rest_tokens[0] if rest_tokens else None
+        cmd_init(_ns(desk, directory=dir_arg, name=name_arg))
         return False
     if verb == "demo":
         from ..cli import cmd_demo
