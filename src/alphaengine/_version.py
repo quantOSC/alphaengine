@@ -151,3 +151,9 @@ is what a changed figure costs. The API may still move underneath it.
 # attacks) under a hard twelve-call, sixty-second ceiling, feeding the referee's
 # post-attack standing back to the board after every pass.
 __version__ = "1.0.2"
+
+#: Default workflow/ingest API host until a dedicated qosai.app API host exists.
+#: Overridable via ``ALPHAENGINE_API_URL`` (or ``QUANTOS_API_URL``).
+DEFAULT_API_URL = "https://alpha-backend-production-51df.up.railway.app"
+API_URL_ENV = "ALPHAENGINE_API_URL"
+LEGACY_API_URL_ENV = "QUANTOS_API_URL"

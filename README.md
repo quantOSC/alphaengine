@@ -64,6 +64,16 @@ summary figures are reported to your account; full series are shared on
 
 ---
 
+## Where this sits
+
+AlphaEngine computes locally on your machine against your own data.
+[quantOS](https://qosai.app) is the hosted research workspace that keeps the
+record and writes committee reports. Everything in AlphaEngine's math and sweep
+layer runs offline with no account; signing in connects local runs and sealed
+studies to your quantOS workspace.
+
+---
+
 ## What it answers
 
 Eight questions, in the order a research week actually asks them. The command
@@ -519,15 +529,16 @@ makes no network call.
 
 ## Where this sits in QuantOS
 
-AlphaEngine is the open research layer of the [QuantOS](https://github.com/quantOSC)
-platform. It is the piece that runs on your machine, against your data, and it
-is complete on its own: everything above works offline and forever, at no cost.
+AlphaEngine is the open research layer of [quantOS](https://qosai.app)
+([GitHub](https://github.com/quantOSC)). AlphaEngine computes locally on your
+machine, against your data, and is complete on its own: everything above works
+offline and forever, at no cost.
 
-The QuantOS platform builds on it. Studies produced here can be persisted to a
-firm's record, referenced when an idea becomes a position, and assembled into
-the reports that go to an investment committee or an allocator. The library
-computes; the platform remembers and reports. The two halves are separated so
-that the part touching your data has no reason to phone home.
+quantOS ([https://qosai.app](https://qosai.app)) is the hosted research workspace
+that keeps the record and writes committee reports. Studies produced here can be
+persisted to a firm's record, referenced when an idea becomes a position, and
+assembled into the reports that go to an investment committee or an allocator.
+The library computes; the platform remembers and reports.
 
 ## The methods
 

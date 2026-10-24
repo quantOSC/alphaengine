@@ -1594,7 +1594,21 @@ def test_the_portal_follows_the_api_to_localhost(monkeypatch):
     missing. Sending somebody to the hosted portal to read a run that exists
     only on their machine is that failure exactly."""
     monkeypatch.delenv("QUANTOS_PORTAL_URL", raising=False)
+    monkeypatch.delenv("ALPHAENGINE_API_URL", raising=False)
     monkeypatch.setenv("QUANTOS_API_URL", "http://localhost:8000")
+    assert cli.portal_url() == "http://localhost:3000"
+
+
+def test_alphaengine_api_url_overrides_default_in_cli_and_report(monkeypatch):
+    from alphaengine._version import DEFAULT_API_URL
+    from alphaengine.study import report as study_report
+
+    assert cli.DEFAULT_BASE_URL is DEFAULT_API_URL
+    assert study_report.DEFAULT_BASE_URL is DEFAULT_API_URL
+    monkeypatch.delenv("QUANTOS_PORTAL_URL", raising=False)
+    monkeypatch.delenv("QUANTOS_API_URL", raising=False)
+    monkeypatch.setenv("ALPHAENGINE_API_URL", "http://localhost:9000")
+    assert cli.resolve_api_url() == "http://localhost:9000"
     assert cli.portal_url() == "http://localhost:3000"
 
 

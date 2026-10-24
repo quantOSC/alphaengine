@@ -101,7 +101,7 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/quantOSC/alphaengine"
+Homepage = "https://qosai.app"
 Documentation = "https://github.com/quantOSC/alphaengine#readme"
 Source = "https://github.com/quantOSC/alphaengine"
 Issues = "https://github.com/quantOSC/alphaengine/issues"

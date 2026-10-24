@@ -107,14 +107,23 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from ._version import API_URL_ENV, DEFAULT_API_URL, LEGACY_API_URL_ENV
+
 if TYPE_CHECKING:  # pragma: no cover - annotations only
     from .commands import Command
 
 __all__ = ["main"]
 
 _ENV_KEY = "QUANTOS_API_KEY"
-_ENV_URL = "QUANTOS_API_URL"
-DEFAULT_BASE_URL = "https://alpha-backend-production-51df.up.railway.app"
+_ENV_URL = LEGACY_API_URL_ENV
+_ENV_API_URL = API_URL_ENV
+DEFAULT_BASE_URL = DEFAULT_API_URL
+
+
+def resolve_api_url(explicit: str | None = None) -> str:
+    """Resolve the API URL: explicit argument, ``ALPHAENGINE_API_URL``, ``QUANTOS_API_URL``, then default."""
+    return explicit or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL
+
 
 #: WHERE A RUN IS READ. The CLI printed a bare run id and left the reader to
 #: work out that `/portal/runs/<id>` exists — and named four screens that had
@@ -139,7 +148,7 @@ def portal_url(api_url: str | None = None) -> str:
     override = os.environ.get("QUANTOS_PORTAL_URL")
     if override:
         return override.rstrip("/")
-    host = (api_url or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).lower()
+    host = resolve_api_url(api_url).lower()
     if "localhost" in host or "127.0.0.1" in host:
         return "http://localhost:3000"
     return DEFAULT_PORTAL_URL
@@ -872,7 +881,7 @@ def _session(
     """
     from .client import connect
 
-    url = base_url or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL
+    url = resolve_api_url(base_url)
     key = api_key or os.environ.get(_ENV_KEY) or ""
     return connect(url, api_key=key or None, share_series=bool(share_series)), url
 

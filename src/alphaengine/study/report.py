@@ -34,14 +34,17 @@ import json
 import os
 from typing import TYPE_CHECKING, Any
 
+from .._version import API_URL_ENV, DEFAULT_API_URL, LEGACY_API_URL_ENV
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .schema import Study
 
 __all__ = ["report", "ReportError"]
 
-DEFAULT_BASE_URL = "https://alpha-backend-production-51df.up.railway.app"
+DEFAULT_BASE_URL = DEFAULT_API_URL
 _ENV_KEY = "QUANTOS_API_KEY"
-_ENV_URL = "QUANTOS_API_URL"
+_ENV_API_URL = API_URL_ENV
+_ENV_URL = LEGACY_API_URL_ENV
 _PATH = "/api/me/runs/ingest"
 _TIMEOUT = 30
 
@@ -153,7 +156,9 @@ def report(
             f"No API key. Pass api_key=..., or set {_ENV_KEY}. Create one in the portal under Settings."
         )
 
-    root = (base_url or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip("/")
+    root = (base_url or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip(
+        "/"
+    )
     body = _guard(_payload(study))
 
     req = urllib.request.Request(
