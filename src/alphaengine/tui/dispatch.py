@@ -287,7 +287,19 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "load":
         _load_spec(desk, rest)
         return False
-    if verb in ("universe", "data"):
+    if verb == "universe":
+        _load_named(desk, verb, rest)
+        return False
+    if verb == "data":
+        parts = rest.split()
+        if parts and parts[0].lower() in ("add", "list", "show", "lineage"):
+            from ..cli import cmd_data
+
+            name_arg, toks = pop_flag(parts[1:], "--name")
+            asof_arg, toks = pop_flag(toks, "--asof-col")
+            target_arg = toks[0] if toks else None
+            cmd_data(_ns(desk, action=parts[0].lower(), target=target_arg, name=name_arg, asof_col=asof_arg))
+            return False
         _load_named(desk, verb, rest)
         return False
     if verb == "project":

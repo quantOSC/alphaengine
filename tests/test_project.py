@@ -188,3 +188,67 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
     assert cli.main(["rerun", str(r_py.run_id)]) == 0
     rerun_py = capsys.readouterr().out
     assert "Reproduced." in rerun_py
+
+
+def test_dataset_registry_hygiene_checks_and_lineage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    assert cli.main(["init", "--name", "data-test"]) == 0
+    capsys.readouterr()
+
+    # Create a CSV with:
+    # - duplicate timestamp on 2025-01-02
+    # - missing cell (gap) on 2025-01-03 for MSFT
+    # - survivorship hint (LEAVER ends early on 2025-01-02 while AAPL/MSFT continue to 2025-01-15)
+    # - look-ahead hint (row dated 2025-01-15 with asof=2025-01-10)
+    dirty_csv = tmp_path / "dirty_prices.csv"
+    dirty_csv.write_text(
+        "\n".join(
+            [
+                "date,asof,AAPL,MSFT,LEAVER",
+                "2025-01-01,2025-01-01,100.0,200.0,50.0",
+                "2025-01-02,2025-01-02,101.0,201.0,49.0",
+                "2025-01-02,2025-01-02,101.5,201.5,48.5",
+                "2025-01-03,2025-01-03,102.0,,",
+                "2025-01-15,2025-01-10,105.0,205.0,",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert cli.main(["data", "add", str(dirty_csv), "--name", "dirty_eq", "--asof-col", "asof"]) == 0
+    add_out = capsys.readouterr().out
+    assert "Registered." in add_out
+    assert "dirty_eq" in add_out
+    assert "duplicates=1" in add_out
+    assert "lookahead_rows=1" in add_out
+    assert "early_ending_series=1" in add_out
+
+    assert cli.main(["data", "list"]) == 0
+    list_out = capsys.readouterr().out
+    assert "dirty_eq" in list_out
+
+    assert cli.main(["data", "show", "dirty_eq"]) == 0
+    show_out = capsys.readouterr().out
+    assert "LEAVER" in show_out
+    assert "lookahead_hints" in show_out
+
+    # Now register a clean panel and run `diagnose --data clean_panel` (by registered name!)
+    clean_csv = tmp_path / "clean.csv"
+    rows = ["date,AAPL,MSFT"] + [
+        f"2025-01-{i + 1:02d},{100.0 + i * 0.5:.2f},{200.0 + i * 0.8:.2f}" for i in range(25)
+    ]
+    clean_csv.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert cli.main(["data", "add", str(clean_csv), "--name", "clean_panel"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["diagnose", "--data", "clean_panel"]) == 0
+    capsys.readouterr()
+
+    assert cli.main(["data", "lineage", "HEAD"]) == 0
+    lin_out = capsys.readouterr().out
+    assert "clean_panel" in lin_out
+    assert "diagnose_data" in lin_out

@@ -340,7 +340,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `cointegration` | which loaded names are cointegrated | session |
 | `portfolio` | weights for the names already loaded | session |
 | `universe <name>` | same as load: a universe registered in the portal | session |
-| `data <file>` | same as load: a local CSV or parquet | session |
+| `data add <file> [--name NAME] [--asof-col COL] \| list \| show <name> \| lineage <run>` | register, inspect, and trace local CSV/Parquet datasets | shell + session |
 | `project <module>` | same as load: a module with data and backtest_fn | session |
 
 ### Session
@@ -385,6 +385,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--family FAMILY` | strategy or experiment family for cumulative trial counting |
 | `--since DATE` | filter project log to runs on or after YYYY-MM-DD |
 | `--verdict VERDICT` | filter project log by verdict (e.g. robust, marginal, likely_noise) |
+| `--asof-col COL` | as-of column name or cutoff date for look-ahead checks in data add |
 
 ### Examples
 
@@ -424,6 +425,10 @@ alphaengine report study.json --retail
 alphaengine models
 alphaengine trace
 alphaengine run screen_universe --thesis momentum
+alphaengine data add prices.csv --name equities
+alphaengine data list
+alphaengine data show equities
+alphaengine data lineage HEAD
 alphaengine logout
 alphaengine logout --purge
 alphaengine version

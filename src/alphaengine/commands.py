@@ -134,6 +134,11 @@ FLAGS: dict[str, Flag] = {
         "VERDICT",
         "filter project log by verdict (e.g. robust, marginal, likely_noise)",
     ),
+    "asof_col": Flag(
+        "--asof-col",
+        "COL",
+        "as-of column name or cutoff date for look-ahead checks in data add",
+    ),
 }
 
 
@@ -718,15 +723,23 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="data",
         group="data",
-        args="<file>",
-        scope="repl",
-        purpose="same as load: a local CSV or parquet",
+        args="add <file> [--name NAME] [--asof-col COL] | list | show <name> | lineage <run>",
+        scope="both",
+        purpose="register, inspect, and trace local CSV/Parquet datasets",
         body=(
-            "Wide (date,AAPL,MSFT), long (date,symbol,close), or a single series. "
-            "The shape is decided by the header and nothing else; a file it cannot "
-            "place says so and names all three rather than guessing."
+            "Manages the local `.alphaengine/data/` dataset registry, storing the "
+            "full SHA-256, row count, date range, column schema, and hygiene checks "
+            "(duplicate timestamps, gaps, look-ahead hints, and survivorship hints).\n\n"
+            "Inside the interactive session, `data <file>` also loads a local CSV or "
+            "Parquet file directly onto the desk."
         ),
-        examples=("data prices.csv", "run size_position --data returns.csv"),
+        examples=(
+            "alphaengine data add prices.csv --name equities",
+            "alphaengine data list",
+            "alphaengine data show equities",
+            "alphaengine data lineage HEAD",
+        ),
+        flags=("name", "asof_col"),
     ),
     Command(
         verb="project",

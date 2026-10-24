@@ -1344,7 +1344,21 @@ def resolve_data(args: argparse.Namespace, session: Any = None) -> tuple[Any, An
     if getattr(args, "data", None):
         from .connectors import load_panel
 
-        loaded = load_panel(args.data)
+        raw_data_arg = str(args.data)
+        target_path = pathlib.Path(raw_data_arg).expanduser()
+        if not target_path.exists():
+            from .project import find_project
+
+            proj = find_project()
+            if proj is not None:
+                with contextlib_suppress():
+                    from .datasets import get_dataset
+
+                    ds = get_dataset(proj, raw_data_arg)
+                    cand = pathlib.Path(str(ds.get("abs_path") or (proj.root / str(ds.get("path") or ""))))
+                    if cand.exists():
+                        raw_data_arg = str(cand)
+        loaded = load_panel(raw_data_arg)
         # A project module that also defined `data` keeps it: the explicit module
         # is the more specific statement, and silently replacing it would make
         # two flags fight where the user can see neither winning.
@@ -2015,11 +2029,28 @@ def _run_local_in_project(
         "grid": inputs.get("grid"),
         "inputs": inputs,
     }
+    ds_hashes = hash_dataset_any(data)
+    raw_data_flag = getattr(args, "data", None)
+    if raw_data_flag:
+        with contextlib_suppress():
+            from .datasets import get_dataset
+
+            ds_rec = get_dataset(proj, str(raw_data_flag))
+            if ds_rec.get("sha256") and ds_rec["sha256"] not in ds_hashes:
+                ds_hashes.insert(0, str(ds_rec["sha256"]))
+        p_flag = pathlib.Path(str(raw_data_flag)).expanduser()
+        if p_flag.is_file():
+            import hashlib as _hl
+
+            f_sha = _hl.sha256(p_flag.read_bytes()).hexdigest()
+            if f_sha not in ds_hashes:
+                ds_hashes.insert(0, f_sha)
+
     rec = record_run(
         proj,
         command=wf,
         params={"workflow": wf, **inputs},
-        dataset_hashes=hash_dataset_any(data),
+        dataset_hashes=ds_hashes,
         n_trials=n_trials,
         n_trials_source=source,
         figures=figures,
@@ -4086,6 +4117,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="reproduce a recorded project run from its inputs and check figures",
     )
     rr_cmd.add_argument("run_ref", metavar="run", nargs="?", default="HEAD", help="run id, prefix, or HEAD")
+    dt_cmd = sub.add_parser(
+        "data",
+        parents=[common],
+        help="register, inspect, and trace local CSV/Parquet datasets",
+    )
+    dt_cmd.add_argument("action", nargs="?", default="list", help="add, list, show, or lineage")
+    dt_cmd.add_argument("target", nargs="?", default=None, help="file path, dataset name, or run id")
+    dt_cmd.add_argument("--name", help="name for the registered dataset")
+    dt_cmd.add_argument(
+        "--asof-col",
+        dest="asof_col",
+        help="as-of column name or cutoff date for look-ahead checks",
+    )
     sub.add_parser("gaps", parents=[common], help="what your record says is unanswered")
     tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
@@ -4678,6 +4722,123 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     return 1
 
 
+def cmd_data(args: argparse.Namespace) -> int:
+    """Register, list, inspect, or trace local datasets in `.alphaengine/data/`."""
+    from .datasets import add_dataset, dataset_lineage, get_dataset, list_datasets
+    from .project import find_project
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+
+    action = str(getattr(args, "action", None) or "list").lower().strip()
+    target = getattr(args, "target", None)
+
+    if action == "add":
+        if not target:
+            say(red("data add requires a file path: alphaengine data add <file> [--name NAME]"))
+            return 2
+        try:
+            rec = add_dataset(
+                proj,
+                target,
+                name=getattr(args, "name", None),
+                asof_col=getattr(args, "asof_col", None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            say(red(str(exc)))
+            return 2
+        checks = rec.get("checks") or {}
+        dups = (checks.get("duplicate_timestamps") or {}).get("count", 0)
+        gaps = (checks.get("gaps") or {}).get("missing_cells", 0) + (checks.get("gaps") or {}).get(
+            "calendar_gaps_gt_5d", 0
+        )
+        la = (checks.get("lookahead_hints") or {}).get("n_future_rows", 0)
+        surv = (checks.get("survivorship_hints") or {}).get("n_ends_early", 0)
+        say(
+            green("Registered.")
+            + f"  {bold(str(rec['name']))}  {dim(DOT)}  {rec['n_rows']} rows  {dim(DOT)}  "
+            + f"{rec.get('start_date') or 'undated'}..{rec.get('end_date') or 'undated'}  "
+            + dim(f"sha256:{str(rec['sha256'])[:16]}...")
+        )
+        say(
+            f"  {dim('checks')}  duplicates={dups}  gaps={gaps}  "
+            f"lookahead_rows={la}  early_ending_series={surv}"
+        )
+        return 0
+
+    if action == "list":
+        rows = list_datasets(proj)
+        if not rows:
+            say(dim("  no datasets registered yet"))
+            return 0
+        say("")
+        for r in rows:
+            span = f"{r.get('start_date') or '-'}..{r.get('end_date') or '-'}"
+            say(
+                f"  {bold(str(r.get('name')).ljust(18))}  {str(r.get('format')).ljust(8)}  "
+                f"{str(r.get('n_rows')) + ' rows':<12}  {dim(span.ljust(24))}  "
+                f"{dim(str(r.get('sha256'))[:16])}"
+            )
+        say("")
+        return 0
+
+    if action == "show":
+        if not target:
+            say(red("data show requires a dataset name: alphaengine data show <name>"))
+            return 2
+        try:
+            r = get_dataset(proj, str(target))
+        except KeyError as exc:
+            say(red(str(exc)))
+            return 2
+        say("")
+        say(f"  {bold(str(r.get('name')))}  {dim(DOT)}  {r.get('path')}  ({r.get('format')})")
+        say(f"    {dim('sha256')}         {r.get('sha256')}")
+        say(f"    {dim('n_rows')}         {r.get('n_rows')}")
+        say(f"    {dim('date_range')}     {r.get('start_date')} .. {r.get('end_date')}")
+        cols = r.get("columns") or []
+        if cols:
+            say("    " + dim("columns"))
+            for c in cols:
+                say(
+                    f"      {str(c.get('name')).ljust(18)}  {c.get('dtype')}  (missing: {c.get('n_missing')})"
+                )
+        checks = r.get("checks") or {}
+        say("    " + dim("hygiene checks"))
+        for ck, cv in sorted(checks.items()):
+            say(f"      {ck.ljust(22)}  {cv}")
+        say("")
+        return 0
+
+    if action == "lineage":
+        ref = str(target or "HEAD")
+        try:
+            lin = dataset_lineage(proj, ref)
+        except KeyError as exc:
+            say(red(str(exc)))
+            return 2
+        say("")
+        say(f"  {bold('lineage')}  {lin['run_id']} ({lin['command']})")
+        say(f"    {dim('dataset_hashes')}  {', '.join(lin['dataset_hashes']) or 'none'}")
+        ds_list = lin.get("datasets") or []
+        if ds_list:
+            say("    " + dim("registered datasets"))
+            for d in ds_list:
+                say(f"      {bold(str(d.get('name')))}  {d.get('path')}  ({str(d.get('sha256'))[:16]}...)")
+        rel = lin.get("related_runs") or []
+        if rel:
+            say("    " + dim("runs sharing dataset"))
+            for rr in rel:
+                say(f"      {rr.get('run_id')}  {rr.get('command')}  {rr.get('verdict')}")
+        say("")
+        return 0
+
+    say(red(f"Unknown data action {action!r}. Use add, list, show, or lineage."))
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -4701,6 +4862,7 @@ def main(argv: list[str] | None = None) -> int:
         "show": cmd_show,
         "diff": cmd_diff,
         "rerun": cmd_rerun,
+        "data": cmd_data,
         "gaps": cmd_gaps,
         "tonight": cmd_tonight,
         "demo": cmd_demo,
