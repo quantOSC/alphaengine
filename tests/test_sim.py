@@ -17,7 +17,7 @@ from alphaengine.tui.stage import stage_lines
 
 
 def test_this_is_version_one() -> None:
-    assert __version__.startswith("1.0.")
+    assert __version__.startswith("1.")
 
 
 def test_an_atm_call_matches_the_normal_cdf() -> None:

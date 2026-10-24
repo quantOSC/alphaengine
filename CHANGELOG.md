@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.0] - 2026-10-24
+
+### Added
+- **Project workspace (`ae init` and `ae` alias):** Initializes `.alphaengine/` (`project.toml`, `ledger/`, `data/`, `studies/`, `ideas/`, `universes/`, and SHA-256 content-addressed `objects/`). Commands walk up from the current directory to locate the project; documented in `docs/project-format.md`.
+- **Project-wide ledger (`ae log`, `ae show`, `ae diff`, `ae rerun`):** Every run and `sweep()` inside a project writes an append-only run record and accumulates trial counts across runs on the same `idea_id` or `family`.
+- **Dataset registry (`ae data add`, `ae data list`, `ae data show`, `ae data lineage`):** Registers CSV and Parquet datasets locally with full 64-hex SHA-256 hashes, row counts, date ranges, column schemas, and checks for duplicate timestamps, gaps, look-ahead rows (`--asof-col`), and survivorship hints.
+- **Standard result envelope (`v1.0`), pipes, and declarative YAML pipelines:** Added `--json` and `--stdin` support across commands (`ae screen --json | ae validate --stdin | ae size --stdin`), `ae run <pipeline.yaml>`, two example pipelines in `examples/`, and `docs/result-format.md`.
+- **Hypotheses as objects (`ae idea new`, `ae idea list`, `ae idea status`, `ae idea show`):** First-class hypothesis tracking with `--kill-if` rule evaluation, `--idea <id>` run linking, and pre-run prior-work checks.
+- **Extended seal, verify, and committee memos:** `ae seal <run|idea>`, `ae verify <study.json> [--data <file>]`, and `ae report memo <idea|run> --format md|pdf` where every figure cites its `[run_id]`.
+- **Research shell (`ae shell`):** Interactive shell with tab completion over verbs, run IDs, dataset names, and idea IDs, a project status line with cumulative trial count, inline ledger/idea commands, and automatic ledger recording of agent proposals.
+- **Entry-point plugin system (`alphaengine.plugins`, `ae plugin list`):** Supports `loader`, `method`, and `template` plugins, with `quantconnect`, `vectorbt`, `csv`, `deflated_sharpe`, `combinatorial_oos_stability`, and `committee_memo` registered as built-ins (`docs/plugins.md`).
+- **Local file watcher & live drift monitor:** `ae watch <pipeline.yaml>` re-runs pipelines when watched datasets change on disk; `ae monitor <run> --live <file>` compares live returns against the backtest's bootstrapped 95% intervals.
+- **Opt-in workspace sync (`ae remote`, `ae push [--dry-run]`, `ae pull`):** Syncs sealed studies, allowlisted ledger runs, and ideas to `POST /api/workspace/sync` (with 404 fallback to `POST /api/me/runs/ingest`), enforcing the 512-element series cap and never uploading dataset rows.
+
 ## [1.0.3] - 2026-10-24
 
 ### Added

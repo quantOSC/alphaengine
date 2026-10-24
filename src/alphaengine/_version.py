@@ -149,7 +149,17 @@ is what a changed figure costs. The API may still move underneath it.
 # data hashes, `alphaengine seal`, `alphaengine report [--retail]`, and
 # `alphaengine.io` loaders (`from_quantconnect`, `from_vectorbt`). Series upload
 # on `/traces` is opt-in via `--share-series` or `ALPHAENGINE_SHARE_SERIES=1`.
-__version__ = "1.0.3"
+# 1.1.0 IS THE LOCAL-FIRST RESEARCH OS. No golden in tests/test_goldens.py
+# moves. `ae init` creates `.alphaengine/` (`project.toml`, append-only JSONL
+# ledgers, dataset registry, ideas, studies, and SHA-256 content-addressed
+# objects). Commands walk up from the working directory to find the project,
+# accumulate trial counts across runs on the same idea or family, emit and
+# consume versioned `v1.0` JSON result envelopes (`--json` / `--stdin`), run
+# declarative YAML pipelines, track hypotheses with `--kill-if` rules and
+# prior-work warnings, export `[run_id]`-cited committee memos, discover
+# `alphaengine.plugins` entry points, watch datasets, monitor live drift, and
+# sync with quantOS on opt-in (`ae push` / `ae pull`).
+__version__ = "1.1.0"
 
 #: Default workflow/ingest API host until a dedicated qosai.app API host exists.
 #: Overridable via ``ALPHAENGINE_API_URL`` (or ``QUANTOS_API_URL``).

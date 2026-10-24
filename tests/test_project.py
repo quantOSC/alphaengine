@@ -727,6 +727,17 @@ def test_research_shell_tab_completion_status_line_inline_commands_and_agent_rec
     assert len(after_runs) == before_count + 1
     assert after_runs[-1]["command"] == "agent_tools"
     assert after_runs[-1]["n_trials_source"] == "agent_proposal"
+
+    # Exercise inline dispatch branches in `tui/dispatch.py`
+    assert submit(desk, f"rerun {r_a}") is False
+    assert submit(desk, "data list") is False
+    assert submit(desk, "data show eq_panel") is False
+    assert submit(desk, f"data lineage {r_a}") is False
+    assert submit(desk, "idea list") is False
+    assert submit(desk, f"idea status {idea_id} promoted") is False
+    assert submit(desk, f"report memo {r_a} --format md") is False
+    assert submit(desk, "plugin list") is False
+    assert submit(desk, "diff only_one_arg") is False
     capsys.readouterr()
 
 

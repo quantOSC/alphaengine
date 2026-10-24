@@ -202,6 +202,49 @@ distinction is the whole of the data boundary below.
 
 ---
 
+## Research OS quickstart
+
+AlphaEngine works like `git` for quantitative research: initialize a local `.alphaengine/` project once, and every dataset registration, hypothesis, workflow run, parameter sweep, and sealed study is recorded in an append-only content-addressed ledger on your disk (see [project format](docs/project-format.md), [result envelope](docs/result-format.md), and [plugins](docs/plugins.md)). Both `alphaengine` and the short alias `ae` run the same entry point.
+
+```bash
+# 1. Initialize a local .alphaengine/ workspace
+ae init --name equity-momentum
+
+# 2. Register a local CSV (or Parquet) dataset and run hygiene checks
+ae data add prices.csv --name equities --asof-col date
+ae data show equities
+
+# 3. Record a falsifiable hypothesis with an explicit kill rule
+ae idea new "Cross-sectional 20d momentum holds net of costs" --kill-if "DSR < 0.9" --family mom_20d
+
+# 4. Run a validation, declarative YAML pipeline, or Unix JSON pipe
+ae validate --project alphaengine.demo --idea idea_1
+ae run examples/screen_validate_size.yaml
+ae screen --data equities --json | ae validate --stdin --json | ae size --stdin
+
+# 5. Inspect the append-only project ledger, cumulative trials, and diffs
+ae log --family mom_20d
+ae show HEAD
+ae rerun HEAD
+
+# 6. Seal into a Schema 1.2 Study, verify against data, and export a committee memo
+ae seal HEAD
+ae verify .alphaengine/studies/HEAD.json
+ae report memo HEAD --format md
+```
+
+---
+
+## What's new in 1.1.0
+
+- **Local-first project workspace (`ae init`):** Creates `.alphaengine/` (`project.toml`, `ledger/`, `data/`, `studies/`, `ideas/`, `universes/`, and SHA-256 content-addressed `objects/`). Commands walk up from the current directory to find the project; outside a project, every command behaves as a standalone call.
+- **Project-wide ledger & cumulative trial counting (`ae log`, `ae show`, `ae diff`, `ae rerun`):** Runs and sweeps inside a project automatically record parameter hashes, dataset hashes, and figures, accumulating trial counts across runs on the same `idea_id` or `family`.
+- **Dataset registry (`ae data add|list|show|lineage`):** Tracks local CSV and Parquet datasets by full SHA-256, row count, date range, column schema, and hygiene diagnostics (duplicate timestamps, missing/calendar gaps, `--asof-col` look-ahead hints, and survivorship hints).
+- **Versioned `v1.0` JSON result envelope, `--stdin` pipes, & YAML pipelines:** Every command supports `--json` and `--stdin` (`ae screen --json | ae validate --stdin | ae size --stdin`), plus declarative multi-step recipes (`ae run pipeline.yaml`).
+- **Hypotheses as objects (`ae idea new|list|status|show`):** Link runs with `--idea <id>`, evaluate `--kill-if` rules against cumulative figures, and receive automatic prior-work warnings before running overlapping parameter sets.
+- **Seal, verify, & cited committee memos:** `ae seal <run|idea>`, `ae verify <study.json> [--data <file>]`, and `ae report memo <idea|run> --format md|pdf` (where every figure cites `[run_id]`).
+- **Research shell (`ae shell`), plugins (`ae plugin list`), watcher (`ae watch`), live drift monitor (`ae monitor <run> --live <file>`), & opt-in sync (`ae remote`, `ae push [--dry-run]`, `ae pull`).**
+
 ## What's new in 1.0.3
 
 - **Opt-in series sharing & 512-element wire guard:** By default, workflow step traces (`/api/harness/runs/{id}/traces`) report scalar figures only; full series are shared only when you pass `--share-series` or set `ALPHAENGINE_SHARE_SERIES=1`.
