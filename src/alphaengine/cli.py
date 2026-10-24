@@ -3280,12 +3280,32 @@ def refused(exc: Any) -> None:
         return
 
     say("")
-    say(yellow("  Not authenticated.") + dim("  Your portal login does not reach this process."))
+    say(
+        yellow("  Not authenticated.")
+        + dim(
+            "  This command requires a portal-issued ae_live_ key; "
+            "your browser login does not reach this process."
+        )
+    )
     say(dim("  A browser session is a cookie; this needs a key. They are different"))
     say(dim("  credentials on purpose."))
     say("")
+    say(
+        "  " + dim("Need one:") + " a portal-issued ae_live_ key (request access at https://qosai.app/access)"
+    )
     say("  " + dim("Get one:") + f"  the portal {ARROW} Data {ARROW} API keys {ARROW} New key")
-    say("  " + dim("Then:") + "     " + bold("login") + dim(f"   (or export {_ENV_KEY})"))
+    say("  " + dim("Then:") + "     " + bold("login") + dim(f"   (or export {_ENV_KEY}=ae_live_...)"))
+    say(
+        "  "
+        + dim("Offline:")
+        + "  "
+        + bold("alphaengine demo")
+        + dim(", ")
+        + bold("alphaengine process")
+        + dim(", and the Python API (")
+        + bold("import alphaengine")
+        + dim(") work without an account.")
+    )
     say("")
 
 

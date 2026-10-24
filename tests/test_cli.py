@@ -584,9 +584,12 @@ def test_a_401_explains_that_a_browser_login_is_not_a_cli_credential(capsys, mon
     monkeypatch.setattr(cli, "_tty", lambda: True)
     cli.refused(_Refusal(401, "Authentication required"))
     out = capsys.readouterr().out
-    assert "portal login does not reach this process" in out
+    assert "browser login does not reach this process" in out
+    assert "ae_live_" in out
+    assert "https://qosai.app/access" in out
     assert "Data" in out and "API keys" in out, "it must say where the key comes from"
     assert "Then:" in out and "QUANTOS_API_KEY" in out, "and how to enter one"
+    assert "alphaengine demo" in out and "alphaengine process" in out and "import alphaengine" in out
 
 
 def test_a_403_is_treated_the_same_way(capsys, monkeypatch):

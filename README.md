@@ -113,9 +113,16 @@ Each is useful without the one above it. `login` lights the next one.
 
 | Rung | What you need | What you get |
 |---|---|---|
-| **The maths** | nothing | Every statistic, offline, forever. No account. |
-| **Workflows** | a QuantOS `ae_live_` key (`login`) | The loop end to end, with the record. |
+| **The maths** | nothing | `alphaengine demo`, `alphaengine process`, and the full Python API (`import alphaengine`, `sweep`, `core`), offline, forever. No account. |
+| **Workflows** | a portal-issued `ae_live_` key (`login` or `QUANTOS_API_KEY`; request access at [https://qosai.app/access](https://qosai.app/access)) | The eight workflow commands (`diagnose`, `screen`, `signal`, `validate`, `stress`, `overlap`, `size`, `monitor`) plus `workflows`, `runs`, `gaps`, `tonight`, and `run <workflow>`. |
 | **Ask anything** | your OWN model key (`login anthropic`) | Plain English in. Runs under your account, not ours. |
+
+The eight workflow commands (`diagnose`, `screen`, `signal`, `validate`,
+`stress`, `overlap`, `size`, `monitor`) and `workflows` / `runs` require a
+portal-issued `ae_live_` key because the workflow graph and account record live
+on the server (request access at [https://qosai.app/access](https://qosai.app/access)).
+`alphaengine demo`, `alphaengine process`, and the Python library (`import alphaengine`)
+work completely offline without an account or key.
 
 **How credentials are handled.** QuantOS never receives your LLM provider key:
 it goes directly from this process to your chosen provider. By default, keys can
