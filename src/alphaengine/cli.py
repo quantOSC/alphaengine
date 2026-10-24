@@ -1862,6 +1862,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.label:
         inputs["label"] = args.label
 
+    from .project import find_project
+
+    proj = find_project()
+    # Inside a local `.alphaengine/` project, if the caller did not specify a remote
+    # `--url` or `--key` and no portal key is set, execute the workflow locally and
+    # record it in `.alphaengine/ledger/`.
+    if (
+        proj is not None
+        and getattr(args, "url", None) is None
+        and getattr(args, "key", None) is None
+        and not os.environ.get(_ENV_KEY)
+    ):
+        return _run_local_in_project(args, proj, data=data, backtest_fn=backtest_fn, inputs=inputs)
+
     try:
         say(f"{bold(args.workflow)} {dim(DOT + ' ' + url)}")
         catalogue = session.workflows()
@@ -1928,7 +1942,151 @@ def cmd_run(args: argparse.Namespace) -> int:
     code = _report(run)
     if run.status == "closed":
         _publish_signals(session, run, workspace_id=workspace_id, label=args.label)
+    if proj is not None:
+        _record_remote_run_in_project(args, proj, run, data=data, inputs=inputs)
     return code
+
+
+_LOCAL_CATALOGUE: list[dict[str, Any]] = [
+    {"name": "diagnose_data", "version": "1.0.0", "requires": ["universe"], "reproducible": True},
+    {"name": "screen_universe", "version": "1.0.0", "requires": ["universe"], "reproducible": True},
+    {"name": "evaluate_signal", "version": "1.0.0", "requires": ["signal"], "reproducible": True},
+    {"name": "validate_study", "version": "1.0.0", "requires": ["data", "backtest_fn"], "reproducible": True},
+    {"name": "stress_study", "version": "1.0.0", "requires": ["returns"], "reproducible": True},
+    {
+        "name": "check_overlap",
+        "version": "1.0.0",
+        "requires": ["returns", "book_returns"],
+        "reproducible": True,
+    },
+    {"name": "size_position", "version": "1.0.0", "requires": ["returns"], "reproducible": True},
+    {"name": "monitor_sleeve", "version": "1.0.0", "requires": ["returns"], "reproducible": True},
+]
+
+
+def _run_local_in_project(
+    args: argparse.Namespace,
+    proj: Any,
+    *,
+    data: Any,
+    backtest_fn: Any,
+    inputs: dict[str, Any],
+) -> int:
+    from .ledger import execute_local_workflow, hash_dataset_any, record_run, record_trials
+
+    wf = str(args.workflow)
+    if "grid" not in inputs and project_grid():
+        inputs["grid"] = project_grid()
+
+    gap = preflight(_LOCAL_CATALOGUE, wf, data=data, backtest_fn=backtest_fn)
+    if gap:
+        say("")
+        say(yellow(gap))
+        return 2
+
+    try:
+        figures, verdict, n_trials, source, returns_col, trial_rows = execute_local_workflow(
+            wf,
+            data=data,
+            backtest_fn=backtest_fn,
+            grid=inputs.get("grid"),
+            inputs=inputs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        say(red(str(exc)))
+        return 2
+
+    data_obj_sha: str | None = None
+    if data is not None:
+        try:
+            data_obj_sha = proj.put_object(data)
+        except Exception:  # noqa: BLE001
+            data_obj_sha = None
+
+    idea_id = getattr(args, "idea", None)
+    family = getattr(args, "family", None) or getattr(args, "project", None) or wf
+    repro_spec: dict[str, Any] = {
+        "kind": "workflow",
+        "workflow": wf,
+        "project_module": getattr(args, "project", None),
+        "data_path": getattr(args, "data", None),
+        "data_object_sha256": data_obj_sha,
+        "symbol": getattr(args, "symbol", None),
+        "grid": inputs.get("grid"),
+        "inputs": inputs,
+    }
+    rec = record_run(
+        proj,
+        command=wf,
+        params={"workflow": wf, **inputs},
+        dataset_hashes=hash_dataset_any(data),
+        n_trials=n_trials,
+        n_trials_source=source,
+        figures=figures,
+        verdict=verdict,
+        idea_id=idea_id,
+        family=str(family),
+        repro_spec=repro_spec,
+        returns_for_deflation=returns_col,
+    )
+    if trial_rows:
+        record_trials(
+            proj,
+            run_id=str(rec["run_id"]),
+            trials=trial_rows,
+            idea_id=idea_id,
+            family=str(family),
+            timestamp=str(rec["timestamp"]),
+        )
+
+    if not getattr(args, "quiet", False):
+        say(f"  {green(ON)}  {bold(wf)}  {dim(DOT)}  {rec['run_id']}")
+        _render_artifact({"figures": {"local": rec["figures"]}})
+        say("")
+        src_note = dim(f"({rec['n_trials_source']})")
+        say(f"  {dim('trials (this run)')}     {rec['n_trials']}  {src_note}")
+        say(
+            f"  {dim('trials (cumulative)')}   {rec['cumulative_trials']}  "
+            f"{dim('(family ' + str(rec['family']) + ', project total ' + str(rec['project_trials']) + ')')}"
+        )
+        if rec["figures"].get("cumulative_deflated_sharpe") is not None:
+            say(
+                f"  {dim('cumulative DSR')}        {rec['figures']['cumulative_deflated_sharpe']}  "
+                f"{dim('(' + str(rec['figures'].get('cumulative_verdict') or '') + ')')}"
+            )
+    return 0
+
+
+def _record_remote_run_in_project(
+    args: argparse.Namespace,
+    proj: Any,
+    run: Any,
+    *,
+    data: Any,
+    inputs: dict[str, Any],
+) -> None:
+    from .ledger import hash_dataset_any, record_run
+
+    flat: dict[str, Any] = {}
+    for blob in (getattr(run, "figures", {}) or {}).values():
+        if isinstance(blob, dict):
+            flat.update(blob)
+    n_trials = flat.get("n_trials")
+    source = str(flat.get("n_trials_source") or ("derived_from_grid" if n_trials else "not_recorded"))
+    verdict = str(flat.get("verdict") or getattr(run, "status", "") or "") or None
+    record_run(
+        proj,
+        command=str(args.workflow),
+        params={"workflow": str(args.workflow), **inputs},
+        dataset_hashes=hash_dataset_any(data),
+        n_trials=int(n_trials) if isinstance(n_trials, int) else None,
+        n_trials_source=source,
+        figures=flat,
+        verdict=verdict,
+        idea_id=getattr(args, "idea", None),
+        family=getattr(args, "family", None) or str(args.workflow),
+        run_id=str(getattr(run, "run_id", None) or ""),
+    )
 
 
 def _report(run: Any) -> int:
@@ -3872,6 +4030,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="opt in to uploading full series on run traces (or set ALPHAENGINE_SHARE_SERIES=1)",
     )
+    common.add_argument("--idea", help="attach the run or filter the log to a local hypothesis id")
+    common.add_argument("--family", help="strategy or experiment family for cumulative trial counting")
 
     p = argparse.ArgumentParser(
         prog="alphaengine",
@@ -3899,6 +4059,33 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("dgp", nargs="?", default="gbm", help="ou, gbm, jump, or garch (default gbm)")
     rl = sub.add_parser("runs", parents=[common], help="your own week: what ran, and what it decided")
     rl.add_argument("--limit", type=int, default=25, help="how many to show (default 25)")
+    lg_cmd = sub.add_parser(
+        "log",
+        parents=[common],
+        help="list local project ledger runs, trial counts, and verdicts",
+    )
+    lg_cmd.add_argument("--since", help="filter to runs on or after YYYY-MM-DD")
+    lg_cmd.add_argument("--verdict", help="filter by verdict")
+    lg_cmd.add_argument("--limit", type=int, default=25, help="how many rows to show (default 25)")
+    sh_cmd = sub.add_parser(
+        "show",
+        parents=[common],
+        help="inspect one recorded project run, its hashes, trials, and figures",
+    )
+    sh_cmd.add_argument("run_ref", metavar="run", nargs="?", default="HEAD", help="run id, prefix, or HEAD")
+    df_cmd = sub.add_parser(
+        "diff",
+        parents=[common],
+        help="compare data, parameter, trial, and figure changes between two runs",
+    )
+    df_cmd.add_argument("run_a", metavar="run-a", help="first run id or prefix")
+    df_cmd.add_argument("run_b", metavar="run-b", help="second run id or prefix")
+    rr_cmd = sub.add_parser(
+        "rerun",
+        parents=[common],
+        help="reproduce a recorded project run from its inputs and check figures",
+    )
+    rr_cmd.add_argument("run_ref", metavar="run", nargs="?", default="HEAD", help="run id, prefix, or HEAD")
     sub.add_parser("gaps", parents=[common], help="what your record says is unanswered")
     tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
@@ -4034,6 +4221,39 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
     if counts:
         say("")
         say("    " + dim("sharpe hist") + "  " + sparkline([float(c) for c in counts], width=36))
+    from .project import find_project
+
+    proj = find_project()
+    if proj is not None:
+        from .ledger import hash_dataset_any, record_run
+
+        data_sha = None
+        with contextlib_suppress():
+            data_sha = proj.put_object(series.tolist())
+        rec = record_run(
+            proj,
+            command="process",
+            params={"dgp": dgp, "n_paths": 80, "seed": 7},
+            dataset_hashes=hash_dataset_any(series),
+            n_trials=int(figures.get("n_trials") or 80),
+            n_trials_source=str(figures.get("n_trials_source") or "monte_carlo"),
+            figures={k: figures[k] for k in present},
+            verdict="positive" if float(figures.get("sharpe_q50") or 0.0) > 0 else "likely_noise",
+            idea_id=getattr(args, "idea", None),
+            family=getattr(args, "family", None) or f"process:{dgp}",
+            repro_spec={
+                "kind": "process",
+                "dgp": dgp,
+                "n_paths": 80,
+                "seed": 7,
+                "data_object_sha256": data_sha,
+            },
+        )
+        say("")
+        say(
+            f"    {dim('recorded')}  {rec['run_id']}  {dim(DOT)}  "
+            f"run trials {rec['n_trials']}  {dim(DOT)}  cumulative trials {rec['cumulative_trials']}"
+        )
     say("")
     say(
         "  "
@@ -4045,7 +4265,13 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
     return 0
 
 
-def cmd_demo(_args: argparse.Namespace) -> int:
+def contextlib_suppress() -> Any:
+    import contextlib
+
+    return contextlib.suppress(Exception)
+
+
+def cmd_demo(args: argparse.Namespace) -> int:
     """The built-in example. No server, no account, no network, no repo.
 
     This exists because `pip install alphaengine` used to leave you with a CLI
@@ -4055,8 +4281,53 @@ def cmd_demo(_args: argparse.Namespace) -> int:
     most people do not finish.
     """
     from . import demo
+    from .ledger import hash_dataset_any, record_run, record_trials, suppress_auto_sweep_record
+    from .project import find_project
+    from .sweep import sweep
 
-    return demo.run()
+    proj = find_project()
+    if proj is None:
+        return demo.run()
+
+    with suppress_auto_sweep_record():
+        rc = demo.run()
+        res = sweep(demo.backtest_fn, demo.GRID, data=demo.data)
+        v = res.verdict()
+        rec = record_run(
+            proj,
+            command="demo",
+            params={"grid": demo.GRID},
+            dataset_hashes=hash_dataset_any(demo.data),
+            n_trials=res.n_trials,
+            n_trials_source="derived_from_grid",
+            figures={
+                "n_trials": v["n_trials"],
+                "n_trials_source": v["n_trials_source"],
+                "deflated_sharpe": v.get("deflated_sharpe"),
+                "psr_vs_zero": v.get("psr_vs_zero"),
+                "sr0_expected_max": v.get("sr0_expected_max"),
+                "performance": v.get("performance", {}),
+                "surface": res.surface(),
+            },
+            verdict=v.get("verdict"),
+            idea_id=getattr(args, "idea", None),
+            family=getattr(args, "family", None) or "demo",
+            repro_spec={"kind": "demo"},
+            returns_for_deflation=res.matrix[:, res.best.index].tolist(),
+        )
+        record_trials(
+            proj,
+            run_id=str(rec["run_id"]),
+            trials=res.ledger(),
+            idea_id=getattr(args, "idea", None),
+            family=str(rec["family"]),
+            timestamp=str(rec["timestamp"]),
+        )
+        say(
+            f"  {dim('recorded')}  {rec['run_id']}  {dim(DOT)}  "
+            f"run trials {rec['n_trials']}  {dim(DOT)}  cumulative trials {rec['cumulative_trials']}"
+        )
+    return rc
 
 
 def cmd_models(_args: argparse.Namespace) -> int:
@@ -4245,6 +4516,168 @@ def cmd_report_study(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_log(args: argparse.Namespace) -> int:
+    """List runs recorded in the local `.alphaengine/` project ledger."""
+    from .ledger import list_runs
+    from .project import find_project
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+    rows = list_runs(
+        proj,
+        idea_id=getattr(args, "idea", None),
+        family=getattr(args, "family", None),
+        since=getattr(args, "since", None),
+        verdict=getattr(args, "verdict", None),
+        limit=int(getattr(args, "limit", 25) or 25),
+    )
+    if not rows:
+        say(dim("  no matching runs in the project ledger"))
+        return 0
+    say("")
+    for r in rows:
+        ts = str(r.get("timestamp") or "")[:19].replace("T", " ")
+        rid = str(r.get("run_id") or "")
+        cmd = str(r.get("command") or "")
+        fam = str(r.get("family") or "")
+        verd = str(r.get("verdict") or "unscored")
+        nt = r.get("n_trials")
+        ct = r.get("cumulative_trials")
+        src = str(r.get("n_trials_source") or "")
+        trials_txt = f"n={nt} ({src}) {DOT} cum={ct}" if nt is not None else f"n=not_recorded {DOT} cum={ct}"
+        idea_tag = f" {DOT} idea:{r['idea_id']}" if r.get("idea_id") else ""
+        say(
+            f"  {bold(rid)}  {dim(ts)}  {cmd.ljust(16)}  {verd.ljust(12)}  "
+            f"{dim(trials_txt)}  {dim('[' + fam + idea_tag + ']')}"
+        )
+    say("")
+    return 0
+
+
+def cmd_show(args: argparse.Namespace) -> int:
+    """Inspect one recorded run from `.alphaengine/ledger/runs.jsonl`."""
+    from .ledger import resolve_run
+    from .project import find_project
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+    ref = str(getattr(args, "run_ref", None) or "HEAD")
+    try:
+        r = resolve_run(proj, ref)
+    except KeyError as exc:
+        say(red(str(exc)))
+        return 2
+
+    say("")
+    say(f"  {bold(str(r.get('run_id')))}  {dim(DOT)}  {r.get('command')}  {dim(DOT)}  {r.get('timestamp')}")
+    say(f"    {dim('family')}             {r.get('family')}")
+    if r.get("idea_id"):
+        say(f"    {dim('idea_id')}            {r.get('idea_id')}")
+    say(f"    {dim('params_hash')}        {r.get('params_hash')}")
+    ds_hashes = ", ".join(str(h) for h in (r.get("dataset_hashes") or [])) or "none"
+    say(f"    {dim('dataset_hashes')}     {ds_hashes}")
+    say(f"    {dim('trials (run)')}       {r.get('n_trials')} ({r.get('n_trials_source')})")
+    cum_t = r.get("cumulative_trials")
+    proj_t = r.get("project_trials")
+    say(f"    {dim('trials (cumulative)')} {cum_t} (project total: {proj_t})")
+    say(f"    {dim('verdict')}            {r.get('verdict')}")
+    say(f"    {dim('engine_version')}     {r.get('engine_version')}")
+    figs = r.get("figures") or {}
+    if isinstance(figs, dict) and figs:
+        say("")
+        say("  " + bold("figures"))
+        for k, v in sorted(figs.items()):
+            if isinstance(v, (int, float, str, bool)) or v is None:
+                say(f"    {dim(str(k).ljust(28))}  {v}")
+    say("")
+    return 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    """Compare two runs from the project ledger."""
+    from .ledger import diff_runs, resolve_run
+    from .project import find_project
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+    try:
+        ra = resolve_run(proj, str(getattr(args, "run_a", "")))
+        rb = resolve_run(proj, str(getattr(args, "run_b", "")))
+    except KeyError as exc:
+        say(red(str(exc)))
+        return 2
+
+    d = diff_runs(ra, rb)
+    say("")
+    say(f"  {bold('diff')}  {d['run_a']}  {ARROW}  {d['run_b']}")
+    say(
+        f"    {dim('data')}        "
+        + (
+            "changed " + f"{d['dataset_hashes_a']} {ARROW} {d['dataset_hashes_b']}"
+            if d["data_changed"]
+            else "unchanged"
+        )
+    )
+    say(
+        f"    {dim('parameters')}  "
+        + ("changed" if d["params_changed"] else "unchanged")
+        + f"  ({str(d['params_hash_a'])[:12]} {ARROW} {str(d['params_hash_b'])[:12]})"
+    )
+    for pk, pv in sorted((d.get("param_changes") or {}).items()):
+        say(f"      {pk}: {pv['a']} {ARROW} {pv['b']}")
+    say(
+        f"    {dim('trials')}      run {d['n_trials_a']} {ARROW} {d['n_trials_b']}  {DOT}  "
+        f"cumulative {d['cumulative_trials_a']} {ARROW} {d['cumulative_trials_b']}"
+    )
+    say(f"    {dim('verdict')}     {d['verdict_a']} {ARROW} {d['verdict_b']}")
+    fchanges = d.get("figure_changes") or {}
+    if fchanges:
+        say("")
+        say("  " + bold("figure changes"))
+        for fk, fv in sorted(fchanges.items()):
+            delta_str = f"  ({fv['delta']:+g})" if isinstance(fv.get("delta"), (int, float)) else ""
+            say(f"    {dim(fk.ljust(28))}  {fv['a']} {ARROW} {fv['b']}{delta_str}")
+    say("")
+    return 0
+
+
+def cmd_rerun(args: argparse.Namespace) -> int:
+    """Re-execute a recorded project run from its stored inputs and check figures."""
+    from .ledger import rerun_record, resolve_run
+    from .project import find_project
+
+    proj = find_project()
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+    ref = str(getattr(args, "run_ref", None) or "HEAD")
+    try:
+        r = resolve_run(proj, ref)
+    except KeyError as exc:
+        say(red(str(exc)))
+        return 2
+    try:
+        matched, _repro_figs, mismatches = rerun_record(proj, r)
+    except Exception as exc:  # noqa: BLE001
+        say(red(f"Could not rerun {r.get('run_id')}: {exc}"))
+        return 2
+
+    if matched:
+        say(green("Reproduced.") + f"  {r.get('run_id')} ({r.get('command')}) — all recorded figures match.")
+        return 0
+
+    say(red("Figure drift detected.") + f"  {r.get('run_id')} ({r.get('command')})")
+    for k, m in sorted(mismatches.items()):
+        say(f"    {k}: recorded {m['recorded']} != reproduced {m['reproduced']}")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -4264,6 +4697,10 @@ def main(argv: list[str] | None = None) -> int:
         "version": cmd_version,
         "workflows": cmd_workflows,
         "runs": cmd_runs,
+        "log": cmd_log,
+        "show": cmd_show,
+        "diff": cmd_diff,
+        "rerun": cmd_rerun,
         "gaps": cmd_gaps,
         "tonight": cmd_tonight,
         "demo": cmd_demo,

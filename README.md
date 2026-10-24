@@ -296,6 +296,9 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `demo` | run the built-in example offline, with no account and no data | shell + session |
 | `process [ou \| gbm \| jump \| garch]` | fit a named process to a series and stress it, offline | shell + session |
 | `runs [--limit N]` | your own week: what ran, what it decided, what it filed | shell + session |
+| `log [--idea ID] [--family FAMILY] [--since DATE] [--verdict VERDICT]` | list local project ledger runs, trial counts, and verdicts | shell + session |
+| `show <run>` | inspect one recorded project run, its hashes, trials, and figures | shell + session |
+| `diff <run-a> <run-b>` | compare data, parameter, trial, and figure changes between two runs | shell + session |
 | `gaps` | what your record says is UNANSWERED, and what closes each one | shell + session |
 | `tonight [--budget N]` | what would run unattended tonight, without running any of it | shell + session |
 | `workflows` | what the server offers, what each needs, and which reproduce | shell + session |
@@ -319,6 +322,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `size` | what sizing does the risk model imply? | shell + session |
 | `monitor` | still inside the lines? | shell + session |
 | `run <workflow>` | run one workflow exactly as written | shell + session |
+| `rerun <run>` | reproduce a recorded project run from its inputs and check figures | shell + session |
 | `seal <study.json>` | write canonical content_sha256 into a study and verify on re-run | shell |
 | `report <study.json> [--retail]` | send a saved study to quantOS (/api/me/runs/ingest or --retail ledger) | shell |
 | `<anything else>` | ask in plain English; your model picks a workflow and drives it | session |
@@ -377,6 +381,10 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--purge` | remove ~/.config/alphaengine/credentials.json and clean up its config directory |
 | `--retail` | send the study to the retail experiment ledger (/api/retail/ledger/import) |
 | `--name NAME` | name for the initialized project or registered dataset |
+| `--idea ID` | attach the run or filter the log to a local hypothesis id |
+| `--family FAMILY` | strategy or experiment family for cumulative trial counting |
+| `--since DATE` | filter project log to runs on or after YYYY-MM-DD |
+| `--verdict VERDICT` | filter project log by verdict (e.g. robust, marginal, likely_noise) |
 
 ### Examples
 
@@ -396,6 +404,10 @@ alphaengine process
 alphaengine process ou
 alphaengine runs
 alphaengine runs --limit 50
+alphaengine log
+alphaengine log --family momentum --verdict likely_noise
+alphaengine show HEAD
+alphaengine diff run_a run_b
 alphaengine gaps
 alphaengine tonight
 alphaengine tonight --budget 5
@@ -405,6 +417,7 @@ alphaengine commands
 alphaengine run screen_universe --universe sp500
 alphaengine run size_position --data returns.csv
 alphaengine run validate_study --project research.momentum
+alphaengine rerun HEAD
 alphaengine seal study.json
 alphaengine report study.json
 alphaengine report study.json --retail

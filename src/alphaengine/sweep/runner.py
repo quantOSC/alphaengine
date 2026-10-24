@@ -110,6 +110,9 @@ class SweepResult:
     data_hash: str = ""
     grid_keys: list[str] = field(default_factory=list)
     store_params: bool = False
+    run_id: str | None = None
+    cumulative_trials: int | None = None
+    project_trials: int | None = None
 
     @property
     def n_trials(self) -> int:
@@ -161,6 +164,19 @@ class SweepResult:
         }
         if self.store_params:
             out["best_params"] = best.params
+        if self.run_id is not None:
+            out["run_id"] = self.run_id
+        if self.cumulative_trials is not None:
+            out["cumulative_trials"] = self.cumulative_trials
+            out["project_trials"] = self.project_trials
+            cum_dsr = deflated_sharpe(
+                col.tolist(),
+                n_trials=max(self.n_trials, self.cumulative_trials),
+                trials_sharpe_std=trials_sharpe_std,
+                risk_free_rate=risk_free_rate,
+            )
+            out["cumulative_deflated_sharpe"] = cum_dsr.get("deflated_sharpe")
+            out["cumulative_verdict"] = cum_dsr.get("verdict")
 
         # Minimum track record length: how long this record must be before the
         # result is distinguishable from luck. Bites universally, and converts
@@ -372,10 +388,78 @@ def sweep(
         n = min(lengths)
         columns = [c[-n:] for c in columns]
 
-    return SweepResult(
+    result = SweepResult(
         trials=trials,
         matrix=np.column_stack(columns),
         data_hash=data_hash,
         grid_keys=sorted(grid),
         store_params=store_params,
     )
+    _maybe_record_project_sweep(result, grid)
+    return result
+
+
+def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable[Any]]) -> None:
+    """When `sweep()` runs inside a `.alphaengine/` project, record the run and trials."""
+    from ..ledger import is_auto_sweep_suppressed, record_run, record_trials
+    from ..project import find_project
+
+    if is_auto_sweep_suppressed():
+        return
+    proj = find_project()
+    if proj is None:
+        return
+    try:
+        from dataclasses import asdict
+
+        grid_serializable = {str(k): list(v) for k, v in grid.items()}
+        family = f"sweep:{','.join(result.grid_keys)}" if result.grid_keys else "sweep"
+        best = result.best
+        best_col = result.matrix[:, best.index].tolist()
+        ok = [t for t in result.trials if t.failed is None]
+        disp = float(np.std([t.sharpe for t in ok], ddof=1)) if len(ok) >= 2 else None
+        trials_std = disp if (disp is not None and math.isfinite(disp) and disp > 0) else None
+        v = result.verdict()
+        matrix_sha = proj.put_object(
+            {
+                "trials": [asdict(t) for t in result.trials],
+                "matrix": result.matrix.tolist(),
+                "data_hash": result.data_hash,
+                "grid_keys": result.grid_keys,
+                "store_params": result.store_params,
+            }
+        )
+        rec = record_run(
+            proj,
+            command="sweep",
+            params={"grid": grid_serializable, "grid_keys": result.grid_keys},
+            dataset_hashes=[result.data_hash] if result.data_hash else [],
+            n_trials=result.n_trials,
+            n_trials_source="derived_from_grid",
+            figures={
+                "n_trials": v["n_trials"],
+                "n_trials_source": v["n_trials_source"],
+                "deflated_sharpe": v.get("deflated_sharpe"),
+                "psr_vs_zero": v.get("psr_vs_zero"),
+                "sr0_expected_max": v.get("sr0_expected_max"),
+                "performance": v.get("performance", {}),
+                "surface": result.surface(),
+            },
+            verdict=v.get("verdict"),
+            family=family,
+            repro_spec={"kind": "sweep", "matrix_object_sha256": matrix_sha},
+            returns_for_deflation=best_col,
+            trials_sharpe_std=trials_std,
+        )
+        record_trials(
+            proj,
+            run_id=str(rec["run_id"]),
+            trials=result.ledger(),
+            family=family,
+            timestamp=str(rec["timestamp"]),
+        )
+        result.run_id = str(rec["run_id"])
+        result.cumulative_trials = int(rec["cumulative_trials"])
+        result.project_trials = int(rec["project_trials"])
+    except Exception:  # noqa: BLE001 - never break an in-memory sweep on filesystem issues
+        pass

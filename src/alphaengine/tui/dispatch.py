@@ -218,6 +218,44 @@ def submit(desk: Desk, line: str) -> bool:
 
         cmd_runs(_ns(desk, limit=25))
         return False
+    if verb == "log":
+        from ..cli import cmd_log
+
+        idea_arg, toks = pop_flag(rest.split(), "--idea")
+        fam_arg, toks = pop_flag(toks, "--family")
+        since_arg, toks = pop_flag(toks, "--since")
+        verd_arg, toks = pop_flag(toks, "--verdict")
+        lim_arg, _ = pop_flag(toks, "--limit")
+        cmd_log(
+            _ns(
+                desk,
+                idea=idea_arg,
+                family=fam_arg,
+                since=since_arg,
+                verdict=verd_arg,
+                limit=int(lim_arg) if lim_arg and lim_arg.isdigit() else 25,
+            )
+        )
+        return False
+    if verb == "show":
+        from ..cli import cmd_show
+
+        cmd_show(_ns(desk, run_ref=rest or "HEAD"))
+        return False
+    if verb == "diff":
+        from ..cli import cmd_diff
+
+        parts = rest.split()
+        if len(parts) < 2:
+            say(red("diff needs two run ids: diff <run-a> <run-b>"))
+            return False
+        cmd_diff(_ns(desk, run_a=parts[0], run_b=parts[1]))
+        return False
+    if verb == "rerun":
+        from ..cli import cmd_rerun
+
+        cmd_rerun(_ns(desk, run_ref=rest or "HEAD"))
+        return False
     if verb == "gaps":
         from ..cli import cmd_gaps
 

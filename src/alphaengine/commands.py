@@ -114,6 +114,26 @@ FLAGS: dict[str, Flag] = {
         "NAME",
         "name for the initialized project or registered dataset",
     ),
+    "idea": Flag(
+        "--idea",
+        "ID",
+        "attach the run or filter the log to a local hypothesis id",
+    ),
+    "family": Flag(
+        "--family",
+        "FAMILY",
+        "strategy or experiment family for cumulative trial counting",
+    ),
+    "since": Flag(
+        "--since",
+        "DATE",
+        "filter project log to runs on or after YYYY-MM-DD",
+    ),
+    "verdict": Flag(
+        "--verdict",
+        "VERDICT",
+        "filter project log by verdict (e.g. robust, marginal, likely_noise)",
+    ),
 }
 
 
@@ -273,6 +293,49 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         examples=("alphaengine runs", "alphaengine runs --limit 50"),
     ),
     Command(
+        verb="log",
+        group="start",
+        args="[--idea ID] [--family FAMILY] [--since DATE] [--verdict VERDICT]",
+        scope="both",
+        purpose="list local project ledger runs, trial counts, and verdicts",
+        body=(
+            "Reads `.alphaengine/ledger/runs.jsonl` and prints recorded runs newest "
+            "first, showing both the single-run trial count and the cumulative trial "
+            "count accumulated across the idea or family."
+        ),
+        examples=(
+            "alphaengine log",
+            "alphaengine log --family momentum --verdict likely_noise",
+        ),
+        flags=("idea", "family", "since", "verdict", "limit"),
+    ),
+    Command(
+        verb="show",
+        group="start",
+        args="<run>",
+        scope="both",
+        purpose="inspect one recorded project run, its hashes, trials, and figures",
+        body=(
+            "Prints the full ledger record for `<run>` (exact run id, prefix, or "
+            "`HEAD`), including parameter hash, dataset hashes, single-run and "
+            "cumulative trial counts, figures, and verdict."
+        ),
+        examples=("alphaengine show HEAD",),
+    ),
+    Command(
+        verb="diff",
+        group="start",
+        args="<run-a> <run-b>",
+        scope="both",
+        purpose="compare data, parameter, trial, and figure changes between two runs",
+        body=(
+            "Compares two runs from the project ledger side by side: dataset hash "
+            "changes, parameter changes, trial count changes, and numeric figure "
+            "deltas."
+        ),
+        examples=("alphaengine diff run_a run_b",),
+    ),
+    Command(
         verb="gaps",
         group="start",
         args="",
@@ -403,6 +466,19 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "url",
             "key",
         ),
+    ),
+    Command(
+        verb="rerun",
+        group="run",
+        args="<run>",
+        scope="both",
+        purpose="reproduce a recorded project run from its inputs and check figures",
+        body=(
+            "Re-executes `<run>` from its recorded inputs and parameters, compares "
+            "every scalar figure against the original ledger record, and reports "
+            "whether the figures match."
+        ),
+        examples=("alphaengine rerun HEAD",),
     ),
     Command(
         verb="seal",
