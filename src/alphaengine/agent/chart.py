@@ -133,7 +133,7 @@ def _prose(plt: Any, pdf: Any, trace: Any, study: dict[str, Any], stamp: str, st
         fig = plt.figure(figsize=(8.5, 11))
         sub = "Executive Summary & Portfolio Brief" if first else "Portfolio Brief (continued)"
         _chrome(fig, sub, stamp, stem, "")
-        y = 0.895
+        y = 0.885
         if first and books:
             y = _scorecard_strip(fig, books, y)
 
@@ -599,8 +599,8 @@ def _scenes(
         stem,
         _question(trace),
     )
-    ax1 = fig.add_axes((0.26, 0.50, 0.29, 0.38))
-    ax2 = fig.add_axes((0.61, 0.50, 0.29, 0.38))
+    ax1 = fig.add_axes((0.24, 0.50, 0.30, 0.37))
+    ax2 = fig.add_axes((0.60, 0.50, 0.30, 0.37))
 
     labels = [str(row["name"]) for row in rows][::-1]
     dds = [float(row.get("max_drawdown_pct") or 0.0) for row in rows][::-1]
@@ -707,7 +707,7 @@ def _monte(
         (monte.get("sharpe_q90"), "q90", "#009E73"),
     ):
         if isinstance(mark, (int, float)):
-            ax_sh.axvline(float(mark), color=col, lw=1.4, ls="--", label=f"{label}: {mark}")
+            ax_sh.axvline(float(mark), color=col, lw=1.4, ls="--", label=f"{label}: {float(mark):.2f}")
     ax_sh.set_title("Simulated Sharpe Distribution", loc="left", fontsize=9.5)
     ax_sh.set_xlabel("annualized Sharpe")
     ax_sh.set_ylabel("paths")
@@ -738,12 +738,12 @@ def _monte(
         ax_tr.set_ylabel("paths")
         ax_tr.legend(loc="upper left", fontsize=7.0)
 
-    ax_tbl = fig.add_axes((0.075, 0.07, 0.85, 0.10))
+    ax_tbl = fig.add_axes((0.075, 0.07, 0.85, 0.11))
     ax_tbl.axis("off")
     sh_band = (
-        f"{_shown(monte.get('sharpe_q10'))} / "
-        f"{_shown(monte.get('sharpe_q50'))} / "
-        f"{_shown(monte.get('sharpe_q90'))}"
+        f"{_fmt_num(monte.get('sharpe_q10'), 2)} / "
+        f"{_fmt_num(monte.get('sharpe_q50'), 2)} / "
+        f"{_fmt_num(monte.get('sharpe_q90'), 2)}"
     )
     summary_rows = [
         [
@@ -812,11 +812,11 @@ def _bakeoff(
         f"Candidates: {bakeoff.get('n_trials')}  |  "
         f"Adversarial Attacks: {', '.join(bakeoff.get('attacks') or []) or 'none'}"
     )
-    fig.text(0.075, 0.895, banner, fontsize=8.0, fontweight="bold", color="#0F172A", va="top")
+    fig.text(0.075, 0.885, banner, fontsize=8.0, fontweight="bold", color="#0F172A", va="top")
 
     curves = list(bakeoff.get("curves") or [])
     if curves:
-        ax1 = fig.add_axes((0.09, 0.48, 0.44, 0.34))
+        ax1 = fig.add_axes((0.085, 0.48, 0.39, 0.33))
         ax1.set_title("Cumulative Wealth Across Passes", loc="left", fontsize=9.5)
         survivor = str(top_cfg or "")
         for index, curve in enumerate(curves):
@@ -832,9 +832,9 @@ def _bakeoff(
         ax1.axhline(1.0, color="#64748B", lw=0.7, ls="--")
         ax1.set_xlabel("trading observation")
         ax1.set_ylabel("growth of 1")
-        ax1.legend(loc="upper left", ncol=2, fontsize=6.8)
+        ax1.legend(loc="upper left", ncol=2, fontsize=6.6)
 
-        ax2 = fig.add_axes((0.62, 0.48, 0.30, 0.34))
+        ax2 = fig.add_axes((0.635, 0.48, 0.29, 0.33))
         labels = [str(c.get("label") or "") for c in curves][::-1]
         in_sh = [float(c.get("sharpe") or 0.0) for c in curves][::-1]
         st_sh = [
@@ -967,7 +967,14 @@ def _styled_table(
     )
     table.auto_set_font_size(False)
     table.set_fontsize(fontsize)
-    base_h = 0.042
+    try:
+        ax_h = max(float(ax.get_position().height), 0.08)
+    except Exception:  # noqa: BLE001
+        ax_h = 0.34
+    row_lines = [max(str(val).count("\n") + 1 for val in r) for r in rows]
+    total_units = 1.15 + sum(0.75 + 0.42 * lc for lc in row_lines)
+    max_base_h = 0.94 / max(total_units, 1.0)
+    base_h = min(max_base_h, max(0.036, 0.025 / ax_h))
     for (row_i, _col_j), cell in table.get_celld().items():
         cell.set_edgecolor("#CBD5E1")
         cell.set_linewidth(0.6)
@@ -986,16 +993,24 @@ def _styled_table(
 
 
 def _chrome(fig: Any, subtitle: str, stamp: str, stem: str, note: str) -> None:
-    fig.text(0.075, 0.955, subtitle, fontsize=11, fontweight="bold", color="#0F172A")
+    fig.text(
+        0.075,
+        0.966,
+        "ALPHAENGINE QUANTITATIVE RESEARCH REPORT   ·   NOT INVESTMENT ADVICE",
+        fontsize=7.2,
+        fontweight="bold",
+        color="#64748B",
+    )
     fig.text(
         0.925,
-        0.955,
+        0.966,
         f"Report {stem}   |   {stamp}",
-        fontsize=8,
+        fontsize=7.6,
         color="#475569",
         ha="right",
     )
-    line_top = fig.add_axes((0.075, 0.942, 0.85, 0.0015))
+    fig.text(0.075, 0.943, subtitle, fontsize=10.8, fontweight="bold", color="#0F172A")
+    line_top = fig.add_axes((0.075, 0.931, 0.85, 0.0015))
     line_top.axhspan(0, 1, color="#CBD5E1")
     line_top.axis("off")
 
@@ -1005,13 +1020,22 @@ def _chrome(fig: Any, subtitle: str, stamp: str, stem: str, note: str) -> None:
 
     fig.text(0.075, 0.022, f"alphaengine {__version__}", fontsize=7.8, color="#64748B")
     if note:
-        fig.text(0.925, 0.022, _clip_words(note, 78), fontsize=7.8, color="#64748B", ha="right")
+        fig.text(0.925, 0.022, _clip_words(note, 62), fontsize=7.8, color="#64748B", ha="right")
 
 
 def _fmt_pct(value: Any) -> str:
     if value is None or isinstance(value, bool):
         return "n/a"
     return f"{value}%"
+
+
+def _fmt_num(value: Any, places: int = 2) -> str:
+    if value is None or isinstance(value, bool):
+        return "n/a"
+    try:
+        return f"{float(value):.{places}f}"
+    except (TypeError, ValueError):
+        return str(value)
 
 
 def _shown(value: Any) -> str:

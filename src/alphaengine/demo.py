@@ -88,14 +88,28 @@ GRID = {"fast": [5, 10, 20], "slow": [50, 100, 200]}
 # them honestly, which is the example working rather than failing.
 def _universe(n_names: int = 60, n_obs: int = 400) -> dict[str, list[float]]:
     out: dict[str, list[float]] = {}
+    market_rng = random.Random(42)
+    raw_m = [market_rng.gauss(0.0, 0.0085) for _ in range(n_obs)]
+    m_mean = sum(raw_m) / max(n_obs, 1)
+    market_shocks = [x - m_mean + 0.00032 for x in raw_m]
+    sector_shocks = []
+    for s in range(6):
+        srng = random.Random(920 + s)
+        raw_s = [srng.gauss(0.0, 0.0065) for _ in range(n_obs)]
+        s_mean = sum(raw_s) / max(n_obs, 1)
+        sector_shocks.append([x - s_mean + (s - 2.5) * 0.00008 for x in raw_s])
     for i in range(n_names):
-        rng = random.Random(1000 + i)
+        rng = random.Random(2000 + i * 7)
+        raw_i = [rng.gauss(0.0, 0.0055 + (i % 10) * 0.0018) for _ in range(n_obs)]
+        i_mean = sum(raw_i) / max(n_obs, 1)
         px, series = 100.0, []
-        # A spread of drifts so the ranking has something to rank. Still noise:
-        # the spread is inside what the volatility produces by itself.
-        drift = 0.0002 + (i - n_names / 2) * 8e-6
-        for _ in range(n_obs):
-            px *= 1.0 + rng.gauss(drift, 0.011)
+        sector = i % 6
+        beta = 0.45 + (i % 6) * 0.16
+        sec_load = 0.40 + (i % 3) * 0.18
+        drift = 0.00032 - (i % 10) * 0.000028 + ((i % 7) - 3) * 0.000045
+        for t in range(n_obs):
+            ret = drift + beta * market_shocks[t] + sec_load * sector_shocks[sector][t] + (raw_i[t] - i_mean)
+            px *= max(0.2, 1.0 + ret)
             series.append(round(px, 4))
         out[f"SYM{i:02d}"] = series
     return out

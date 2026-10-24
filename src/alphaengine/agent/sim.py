@@ -103,6 +103,7 @@ class Trace:
     study: dict[str, Any] | None = None
     findings: str = ""
     reading: str = ""
+    auth_error: str | None = None
 
     def render(self) -> str:
         lines = ["alphaengine 1.0", f"question  {self.question}", ""]
@@ -219,7 +220,22 @@ def run_tools(
     trace = Trace(question=question)
     known: dict[str, float] = {}
     for _ in range(max_calls):
-        raw = think(_fill(question, context, trace))
+        try:
+            raw = think(_fill(question, context, trace))
+        except Exception as exc:  # noqa: BLE001
+            from ..model import is_model_auth_error
+
+            if is_model_auth_error(exc):
+                trace.auth_error = str(exc)
+                trace.refused = True
+                trace.answer = (
+                    "Model key was rejected (401). Paste a valid model key "
+                    "(type `enter model key` or `login openai` / `login anthropic`)."
+                )
+                return trace
+            trace.answer = f"The model call failed: {exc}"
+            trace.refused = True
+            return trace
         parsed = parse_call(raw)
         if parsed is None:
             trace.answer = "The model did not return a tool call."
@@ -353,6 +369,8 @@ def narrate(trace: Trace, think: Think, extra: dict[str, float] | None = None) -
     for call in trace.calls:
         lines.append(call.line())
         for key, value in call.figures.items():
+            if key in {"pass", "seat"} and call.tool in {"submit", "attack"}:
+                continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue
             if isinstance(value, float) and not math.isfinite(value):

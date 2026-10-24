@@ -27,7 +27,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ..core.bakeoff import ATTACKS, RULES, referee, trial_paths
+from ..core.bakeoff import ATTACKS, RULES, _panel, referee, trial_paths
 from .sim import Call, Think, Trace
 
 DEFAULT_SECONDS = 45.0
@@ -90,6 +90,10 @@ def run_bakeoff(
     on_call: Callable[[Call], None] | None = None,
 ) -> Bakeoff:
     """Run one bakeoff. Returns when the rounds end or the clock does, whichever is first."""
+    if _panel(data) is None:
+        from ..demo_universe import data as demo_data
+
+        data = demo_data
     budget = _budget(seconds)
     deadline = time.monotonic() + budget
     n_rounds = min(max(int(rounds), 1), MAX_ROUNDS)
@@ -99,6 +103,7 @@ def run_bakeoff(
     passes: list[dict[str, Any]] = []
     trace = Trace(question=question)
     stopped = "complete"
+    auth_error: str | None = None
     names = _universe_names(data)
 
     def board() -> str:
@@ -134,7 +139,11 @@ def run_bakeoff(
                 attacks=attacks,
                 names=names,
             )
-            text, in_time = _ask(think, prompt, deadline)
+            text, in_time, err = _ask(think, prompt, deadline)
+            if err is not None:
+                auth_error = err
+                stopped = "auth_error"
+                break
             if not in_time:
                 stopped = "clock"
                 break
@@ -143,7 +152,7 @@ def run_bakeoff(
             submission["_seat"] = seat_idx
             submissions.append(submission)
             emit(_submit_call(data, submissions, attacks, submission, why, round_idx, seat_idx))
-        if stopped == "clock":
+        if stopped in ("clock", "auth_error"):
             break
         prompt = _fill(
             _ADVERSARY,
@@ -156,7 +165,11 @@ def run_bakeoff(
             attacks=attacks,
             names=names,
         )
-        text, in_time = _ask(think, prompt, deadline)
+        text, in_time, err = _ask(think, prompt, deadline)
+        if err is not None:
+            auth_error = err
+            stopped = "auth_error"
+            break
         if not in_time:
             stopped = "clock"
             break
@@ -199,6 +212,15 @@ def run_bakeoff(
     )
     figures["top_ranked_config"] = top_cfg
     figures["top_ranked_sharpe"] = top_sh
+    if auth_error is not None:
+        figures["error"] = "model_auth_error"
+        trace.refused = True
+        trace.auth_error = auth_error
+        trace.answer = (
+            "Model key was rejected (401). Paste a valid model key "
+            "(type `enter model key` or `login openai` / `login anthropic`)."
+        )
+        return Bakeoff(trace=trace, figures=figures)
     trace.answer = _verdict(figures)
     curves = trial_paths(data, submissions, attacks)
     top_label = str(top_cfg or "")
@@ -304,7 +326,7 @@ def _budget(seconds: float) -> float:
     return min(HARD_CEILING, number)
 
 
-def _ask(think: Think, prompt: str, deadline: float) -> tuple[str, bool]:
+def _ask(think: Think, prompt: str, deadline: float) -> tuple[str, bool, str | None]:
     """One model call. The second value is false when the clock won and the loop must stop.
 
     The worker is a daemon so a model that keeps talking after the deadline
@@ -312,13 +334,18 @@ def _ask(think: Think, prompt: str, deadline: float) -> tuple[str, bool]:
     """
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        return "", False
+        return "", False, None
     box: list[str] = []
+    auth_err: list[str] = []
 
     def run() -> None:
         try:
             text = think(prompt)
-        except Exception:  # noqa: BLE001 — a broken call is a refused turn, not a crash
+        except Exception as exc:  # noqa: BLE001 — a broken call is a refused turn, not a crash
+            from ..model import is_model_auth_error
+
+            if is_model_auth_error(exc):
+                auth_err.append(str(exc))
             return
         if isinstance(text, str):
             box.append(text)
@@ -327,8 +354,10 @@ def _ask(think: Think, prompt: str, deadline: float) -> tuple[str, bool]:
     worker.start()
     worker.join(remaining)
     if worker.is_alive():
-        return "", False
-    return (box[0] if box else ""), True
+        return "", False, None
+    if auth_err:
+        return "", True, auth_err[0]
+    return (box[0] if box else ""), True, None
 
 
 def _fill(

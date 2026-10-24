@@ -285,7 +285,7 @@ class QuantOSApp(App[None]):
         from ..model import available_models
 
         keyed = self.desk.keyed
-        models = available_models() if keyed else []
+        models = available_models()
         parts: list[tuple[str, str]] = [
             ("quantOS", "bold #9ecbff"),
             (__version__, "#6b7380"),
@@ -447,13 +447,17 @@ class QuantOSApp(App[None]):
         self._store_credential(_KEY_PROMPTS[which][0], value, log, prompt)
 
     def _store_credential(self, env: str, value: str, log: RichLog, prompt: Input) -> None:
-        from ..model import _clean_key
+        from ..model import _clean_key, provider_for_env
 
         value = _clean_key(value)
         if not value:
             log.write("nothing entered.")
             return
         os.environ[env] = value
+        prov = provider_for_env(env)
+        if prov:
+            os.environ["ALPHAENGINE_PROVIDER"] = prov
+            os.environ.pop("ALPHAENGINE_MODEL", None)
         if self.desk.think_from_key:
             self.desk.think = None
             self.desk.think_from_key = False
@@ -469,6 +473,8 @@ class QuantOSApp(App[None]):
             from ..auth import save_key
 
             path = save_key(env, value)
+            if prov:
+                save_key("ALPHAENGINE_PROVIDER", prov)
             log.write(f"{env} accepted.  stored at {path}")
         except (OSError, ValueError) as exc:
             log.write(f"{env} accepted for this process.  ({exc})")
@@ -544,7 +550,7 @@ class QuantOSApp(App[None]):
         self.run_worker(self._load_account, thread=True, group="boot", exclusive=False)
 
     def _load_account(self) -> None:
-        from ..cli import _narrow_to_universe
+        from ..cli import _narrow_to_universe, is_auth_error
         from ..client.session import request_timeout
 
         books: list[dict[str, Any]] = []
@@ -552,16 +558,19 @@ class QuantOSApp(App[None]):
         loaded: str | None = None
         thesis: dict[str, Any] | None = None
         notes: list[str] = []
+        auth_failed = False
         session = self.desk.session
         try:
             with request_timeout(10):
                 try:
                     rows = session.universes()
-                except Exception:  # noqa: BLE001 — offline or unsigned still boots
+                except Exception as exc:  # noqa: BLE001 — offline or unsigned still boots
+                    if is_auth_error(exc):
+                        auth_failed = True
                     rows = []
                 books = _books_from(rows)
                 self.call_from_thread(self._set_load, 0.45, "account")
-                if self.desk.data is None and self.desk.keyed:
+                if not auth_failed and self.desk.data is None and self.desk.keyed:
                     wanted = _only_stored(rows)
                     if wanted:
                         self.call_from_thread(self._set_load, 0.72, wanted)
@@ -575,7 +584,12 @@ class QuantOSApp(App[None]):
                                 loaded = f"universe:{wanted}"
                             except Exception as exc:  # noqa: BLE001
                                 notes.append(str(exc))
-                if self.desk.keyed and self.desk.thesis is None and not self.desk.thesis_declined:
+                if (
+                    not auth_failed
+                    and self.desk.keyed
+                    and self.desk.thesis is None
+                    and not self.desk.thesis_declined
+                ):
                     self.call_from_thread(self._set_load, 0.9, "account")
                     try:
                         theses = [r for r in session.theses() if isinstance(r, dict) and thesis_id_of(r)]
@@ -586,7 +600,7 @@ class QuantOSApp(App[None]):
         except Exception as exc:  # noqa: BLE001 — the session still opens
             notes.append(str(exc))
         finally:
-            self.call_from_thread(self._apply_account, books, data, loaded, thesis, notes)
+            self.call_from_thread(self._apply_account, books, data, loaded, thesis, notes, auth_failed)
 
     def _set_load(self, frac: float, label: str) -> None:
         self.load_frac = frac
@@ -600,7 +614,14 @@ class QuantOSApp(App[None]):
         loaded: str | None,
         thesis: dict[str, Any] | None,
         notes: list[str],
+        auth_failed: bool = False,
     ) -> None:
+        if auth_failed:
+            from ..auth import remove_key
+
+            self.desk.keyed = False
+            os.environ.pop("QUANTOS_API_KEY", None)
+            remove_key("QUANTOS_API_KEY")
         self._books = books
         if data is not None and self.desk.data is None:
             self.desk.data = data

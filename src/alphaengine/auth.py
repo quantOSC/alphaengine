@@ -50,7 +50,15 @@ import stat
 from pathlib import Path
 from typing import Any
 
-__all__ = ["config_path", "load_stored", "save_key", "clear_stored", "purge_stored", "apply_stored"]
+__all__ = [
+    "config_path",
+    "load_stored",
+    "save_key",
+    "remove_key",
+    "clear_stored",
+    "purge_stored",
+    "apply_stored",
+]
 
 #: Which environment variables this file is allowed to hold.
 #: `QUANTOS_API_KEY` is ours. The provider keys are here because a user who has
@@ -126,6 +134,27 @@ def save_key(name: str, value: str) -> Path:
     # Atomic: a half-written credentials file is a login that half works.
     os.replace(tmp, path)
     return path
+
+
+def remove_key(name: str) -> bool:
+    """Remove a single credential from ``credentials.json`` (e.g. when rejected as 401)."""
+    path = config_path()
+    data = load_stored()
+    if name not in data:
+        return False
+    data.pop(name, None)
+    if not data:
+        return clear_stored()
+    tmp = path.with_suffix(".tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def clear_stored(*, purge: bool = False) -> bool:

@@ -225,7 +225,10 @@ def submit(desk: Desk, line: str) -> bool:
         _logout(desk, rest)
         return False
     if verb in ("key", "keys", "login"):
-        _key(desk, rest)
+        _key(desk, rest, verb=verb)
+        return False
+    if verb in ("report", "save", "pdf", "export"):
+        _report_cmd(desk, rest)
         return False
     if verb == "view":
         _view(desk)
@@ -391,15 +394,20 @@ def _view(desk: Desk) -> None:
         say(dim(f"loaded  {desk.loaded}"))
 
 
-def _key(desk: Desk, rest: str) -> None:
+def _key(desk: Desk, rest: str, *, verb: str = "key") -> None:
     from ..cli import _KEY_PROMPTS
 
     which = (rest.split() or [""])[0].lower()
     if not which:
-        if not desk.keyed:
+        if not desk.keyed or verb == "login":
             which = "quantos"
         else:
-            say(dim("Already signed in. Type `enter model key` and paste it."))
+            say(
+                dim(
+                    "Already signed in. Type `enter model key` and paste it, "
+                    "or `login quantos` to replace the portal key."
+                )
+            )
             return
     if which not in _KEY_PROMPTS:
         say(dim(f"Unknown {which!r}. Try: {', '.join(_KEY_PROMPTS)}"))
@@ -407,6 +415,35 @@ def _key(desk: Desk, rest: str) -> None:
     env, what = _KEY_PROMPTS[which]
     desk.pending_secret = env
     say(dim(f"Paste the {which} key. {what} It stays hidden, then this machine keeps it."))
+
+
+def _report_cmd(desk: Desk, rest: str) -> None:
+    """Save a PDF report to Downloads, or upload a study.json when one is named."""
+    tokens = rest.split()
+    if tokens and (tokens[0].endswith(".json") or "--retail" in tokens):
+        from ..cli import cmd_report_study
+
+        study_path = next((t for t in tokens if not t.startswith("--")), "")
+        retail = "--retail" in tokens
+        cmd_report_study(_ns(desk, study_path=study_path, retail=retail))
+        return
+    if desk.pending_report is not None:
+        path = desk.pending_report.save()
+        desk.pending_report = None
+        say(f"  report  {path}")
+        if str(path).endswith(".txt"):
+            say(dim("  the charted pdf needs matplotlib. pip install matplotlib"))
+        return
+    from ..agent.sim import Trace
+
+    _ensure_universe(desk, desk.question or "portfolio and bakeoff report")
+    trace = Trace(question=desk.question or "portfolio, scenario, Monte Carlo, and bakeoff report")
+    _attach_local_charts(desk, trace)
+    _read(desk, trace)
+    path = trace.save()
+    say(f"  report  {path}")
+    if str(path).endswith(".txt"):
+        say(dim("  the charted pdf needs matplotlib. pip install matplotlib"))
 
 
 def env_for_model_key(value: str) -> str | None:
@@ -715,6 +752,32 @@ def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
         say(red(str(exc)))
 
 
+def _ensure_universe(desk: Desk, question: str = "", *, need_multi: bool = False) -> None:
+    """Ensure `desk.data` holds a usable universe before running local tools or a bakeoff."""
+    if desk.data is not None and not need_multi:
+        return
+    if need_multi and isinstance(desk.data, dict) and len(desk.data) >= 2:
+        return
+    if desk.keyed and desk.session is not None:
+        from ..cli import _narrow_to_universe, _stored_universes
+
+        wanted, _ready = _stored_universes(desk.session, question)
+        if wanted:
+            try:
+                desk.data = _narrow_to_universe(desk.session, wanted, None)
+                desk.loaded = f"universe:{wanted}"
+                return
+            except Exception:  # noqa: BLE001
+                pass
+    if desk.data is None or (need_multi and (not isinstance(desk.data, dict) or len(desk.data) < 2)):
+        from ..demo_universe import data as demo_data
+
+        desk.data = demo_data
+        if not desk.loaded:
+            desk.loaded = "demo_universe"
+        say(dim("  loaded demo_universe · 60 series"))
+
+
 def _sentence(desk: Desk, line: str) -> None:
     """A sentence is a stack of tool calls. A bakeoff is that stack's closed room."""
     think = _thinker(desk)
@@ -728,6 +791,7 @@ def _sentence(desk: Desk, line: str) -> None:
         _offer(desk, _begin_bakeoff(desk, think).trace)
         return
 
+    _ensure_universe(desk, line, need_multi=False)
     from ..agent.sim import run_tools
 
     def on_call(call: Any) -> None:
@@ -781,6 +845,16 @@ def _as_float(value: Any, default: float) -> float:
 
 
 def _offer(desk: Desk, trace: Any) -> None:
+    if getattr(trace, "auth_error", None):
+        say("\x1f")
+        if desk.think_from_key:
+            desk.think = None
+            desk.think_from_key = False
+        desk.pending_report = None
+        desk.pending_secret = "MODEL_KEY"
+        say(yellow(str(getattr(trace, "answer", "") or "Model key was rejected (401).")))
+        say(dim("  Paste a valid model key now (it stays hidden)."))
+        return
     _attach_local_charts(desk, trace)
     _read(desk, trace)
     say("\x1f")
@@ -821,9 +895,9 @@ def _read(desk: Desk, trace: Any) -> None:
         or answer.startswith("The model did not")
     )
     if reading:
-        trace.answer = reading if thin else f"{answer}\n\n{reading}"
-    elif thin and findings:
-        trace.answer = findings
+        trace.answer = reading if (thin or reading == answer) else f"{answer}\n\n{reading}"
+    elif findings:
+        trace.answer = findings if (thin or findings in answer) else f"{answer}\n\n{findings}"
 
 
 def _stash(desk: Desk, result: dict[str, Any]) -> None:
@@ -908,6 +982,7 @@ def _begin_bakeoff(desk: Desk, think: Callable[[str], str], *, seconds: float | 
         trace = Trace(question=desk.question, answer="Referee. This sentence already ran a bakeoff.")
         return Bakeoff(trace=trace, figures={"mode": "bakeoff", "stopped": "already_ran", "n_trials": 0})
     desk.bakeoff_done = True
+    _ensure_universe(desk, desk.question, need_multi=True)
 
     def on_call(call: Call) -> None:
         desk.trace_stack.append(call.line())

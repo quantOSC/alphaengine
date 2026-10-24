@@ -45,6 +45,9 @@ __all__ = [
     "pin_model",
     "parse_model_spec",
     "provider_labels",
+    "provider_for_env",
+    "env_keys_for_provider",
+    "is_model_auth_error",
     "NoModelConfigured",
     "ThinkEvent",
 ]
@@ -135,6 +138,44 @@ def provider_labels() -> tuple[str, ...]:
     return tuple(s.label for s in _SPECS)
 
 
+def provider_for_env(env_name: str) -> str | None:
+    """Return the provider label that reads ``env_name``, or None."""
+    target = env_name.strip().upper()
+    for spec in _SPECS:
+        if target in spec.env_keys:
+            return spec.label
+    return None
+
+
+def env_keys_for_provider(label: str) -> tuple[str, ...]:
+    """Return the environment variable names for ``label``."""
+    spec = _spec_by_label(label)
+    return spec.env_keys if spec is not None else ()
+
+
+def is_model_auth_error(exc: BaseException) -> bool:
+    """True when an LLM SDK call failed due to an invalid, expired, or outdated API key."""
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status in (401, 403):
+        return True
+    cls_name = type(exc).__name__.lower()
+    if "authentication" in cls_name or "permissiondenied" in cls_name:
+        return True
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "invalid_api_key",
+            "incorrect api key",
+            "invalid x-api-key",
+            "authentication_error",
+            "error code: 401",
+            "status code: 401",
+            "401 unauthorized",
+        )
+    )
+
+
 def _spec_by_label(label: str) -> _Spec | None:
     wanted = label.strip().lower()
     for spec in _SPECS:
@@ -213,13 +254,15 @@ def available_models() -> list[tuple[str, str]]:
     them; `build_think` still defaults to the first unless a pin is set.
     """
     out: list[tuple[str, str]] = []
+    pinned = (os.environ.get("ALPHAENGINE_PROVIDER") or "").strip().lower() or None
     for spec in _SPECS:
         if _key_for(spec) and _sdk_present(spec.label):
-            pinned = os.environ.get("ALPHAENGINE_PROVIDER")
             model = spec.default_model
             if pinned == spec.label:
                 model = os.environ.get("ALPHAENGINE_MODEL") or spec.default_model
             out.append((spec.label, model))
+    if pinned:
+        out.sort(key=lambda pair: 0 if pair[0] == pinned else 1)
     return out
 
 

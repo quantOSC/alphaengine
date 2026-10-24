@@ -17,6 +17,13 @@ def study_for(trace: Any, *, deep: bool = False) -> dict[str, Any]:
     """Paths, books, scenarios, Monte Carlo fan, and bakeoff tournament for the report."""
     question = str(getattr(trace, "question", "") or "")
     data = _panel(getattr(trace, "panel", None))
+    if deep and len(data) < 2:
+        try:
+            from ..demo_universe import data as demo_data
+
+            data = _panel(demo_data)
+        except Exception:  # noqa: BLE001
+            pass
     focus_names = _focus_names(question, trace, data)
     paths = _paths(data, focus_names)
     books = _books(data, question)
@@ -558,34 +565,15 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
         raw = _default_bakeoff(data)
     if not isinstance(raw, dict):
         return None
-    curves = []
-    for idx, row in enumerate(raw.get("curves") or []):
-        if not isinstance(row, dict):
-            continue
-        growth = row.get("growth")
-        if not isinstance(growth, list) or len(growth) < 8:
-            continue
-        arr = np.asarray(growth, dtype=float)
-        rets = np.diff(np.concatenate((np.array([1.0]), arr))) / np.concatenate((np.array([1.0]), arr[:-1]))
-        stats = _stats([float(x) for x in rets])
-        curves.append(
-            {
-                "round": int(row.get("round") or (idx // 2 + 1)),
-                "seat": int(row.get("seat") or (idx % 2 + 1)),
-                "label": str(row.get("label") or ""),
-                "growth": growth,
-                "sharpe": row.get("sharpe"),
-                "standing": row.get("standing"),
-                "worst_attack": row.get("worst_attack") or "in_sample",
-                "attack_scores": row.get("attack_scores") or {},
-                "annualized_sharpe": stats.get("sharpe_annualized"),
-                "total_return_pct": stats.get("total_return_pct"),
-                "max_drawdown_pct": stats.get("max_drawdown_pct"),
-                "volatility_annualized_pct": stats.get("volatility_annualized_pct"),
-            }
-        )
-    trials = [str(line) for line in (raw.get("trials") or [])]
+    curves = _build_bakeoff_curves(raw)
     top_cfg = raw.get("top_ranked_config") or raw.get("survivor")
+    if (not curves or not top_cfg) and len(data) >= 2:
+        fallback = _default_bakeoff(data)
+        if isinstance(fallback, dict):
+            raw = fallback
+            curves = _build_bakeoff_curves(raw)
+            top_cfg = raw.get("top_ranked_config") or raw.get("survivor")
+    trials = [str(line) for line in (raw.get("trials") or [])]
     top_sh = (
         raw.get("top_ranked_sharpe")
         if raw.get("top_ranked_sharpe") is not None
@@ -613,6 +601,36 @@ def _bakeoff(raw: Any, data: dict[str, list[float]]) -> dict[str, Any] | None:
         "passes": passes,
         "curves": curves[:8],
     }
+
+
+def _build_bakeoff_curves(raw: dict[str, Any]) -> list[dict[str, Any]]:
+    curves = []
+    for idx, row in enumerate(raw.get("curves") or []):
+        if not isinstance(row, dict):
+            continue
+        growth = row.get("growth")
+        if not isinstance(growth, list) or len(growth) < 8:
+            continue
+        arr = np.asarray(growth, dtype=float)
+        rets = np.diff(np.concatenate((np.array([1.0]), arr))) / np.concatenate((np.array([1.0]), arr[:-1]))
+        stats = _stats([float(x) for x in rets])
+        curves.append(
+            {
+                "round": int(row.get("round") or (idx // 2 + 1)),
+                "seat": int(row.get("seat") or (idx % 2 + 1)),
+                "label": str(row.get("label") or ""),
+                "growth": growth,
+                "sharpe": row.get("sharpe"),
+                "standing": row.get("standing"),
+                "worst_attack": row.get("worst_attack") or "in_sample",
+                "attack_scores": row.get("attack_scores") or {},
+                "annualized_sharpe": stats.get("sharpe_annualized"),
+                "total_return_pct": stats.get("total_return_pct"),
+                "max_drawdown_pct": stats.get("max_drawdown_pct"),
+                "volatility_annualized_pct": stats.get("volatility_annualized_pct"),
+            }
+        )
+    return curves
 
 
 def _default_bakeoff(data: dict[str, list[float]]) -> dict[str, Any] | None:
@@ -916,6 +934,7 @@ def _narrate_figures(
     if bakeoff is not None:
         for key in (
             "n_trials",
+            "n_passes",
             "top_ranked_sharpe",
             "survivor_sharpe",
             "attacked_sharpe",
@@ -924,4 +943,12 @@ def _narrate_figures(
             val = bakeoff.get(key)
             if isinstance(val, (int, float)):
                 out[f"bakeoff.{key}"] = float(val)
+        for curve in (bakeoff.get("curves") or [])[:8]:
+            if not isinstance(curve, dict):
+                continue
+            lbl = str(curve.get("label") or "").split("#")[0]
+            for key in ("sharpe", "standing", "annualized_sharpe", "total_return_pct", "max_drawdown_pct"):
+                val = curve.get(key)
+                if isinstance(val, (int, float)):
+                    out[f"bakeoff.{lbl}.{key}"] = float(val)
     return out

@@ -3377,6 +3377,13 @@ def enter_key(which: str) -> bool:
         return False
 
     os.environ[env] = value
+    if which != "quantos":
+        from .model import provider_for_env
+
+        prov = provider_for_env(env)
+        if prov:
+            os.environ["ALPHAENGINE_PROVIDER"] = prov
+            os.environ.pop("ALPHAENGINE_MODEL", None)
     say(green(f"  {env} accepted."))
 
     # STAY SIGNED IN. Re-pasting a key into every new terminal is not security,
@@ -3403,6 +3410,12 @@ def enter_key(which: str) -> bool:
 
     try:
         path = save_key(env, value)
+        if which != "quantos":
+            from .model import provider_for_env
+
+            prov = provider_for_env(env)
+            if prov:
+                save_key("ALPHAENGINE_PROVIDER", prov)
     except OSError as exc:
         say(yellow(f"  Could not write the credentials file ({exc}). Session only."))
         return True
@@ -3891,9 +3904,9 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser(
         "report",
         parents=[common],
-        help="send a saved study to quantOS (/api/me/runs/ingest or --retail ledger)",
+        help="send a saved study to quantOS (/api/me/runs/ingest or --retail) or export a PDF report",
     )
-    rp.add_argument("study_path", metavar="study.json", help="path to study.json")
+    rp.add_argument("study_path", nargs="?", metavar="study.json", help="path to study.json")
     rp.add_argument(
         "--retail",
         action="store_true",
@@ -4134,11 +4147,38 @@ def cmd_seal(args: argparse.Namespace) -> int:
 
 
 def cmd_report_study(args: argparse.Namespace) -> int:
-    """Report a saved study.json to /api/me/runs/ingest or --retail /api/retail/ledger/import."""
+    """Report a saved study.json to quantOS, or generate a local PDF report to Downloads when omitted."""
+    raw_study_path = getattr(args, "study_path", None)
+    if not raw_study_path:
+        from .agent.brief import study_for
+        from .agent.sim import Trace
+
+        session, _url = _session(getattr(args, "url", None), getattr(args, "key", None))
+        data: Any = None
+        try:
+            data, _bt = resolve_data(args, session)
+        except Exception:  # noqa: BLE001
+            data = None
+        if not isinstance(data, dict) or len(data) < 2:
+            from .demo_universe import data as demo_data
+
+            data = demo_data
+        trace = Trace(
+            question="portfolio construction, scenario stress, Monte Carlo simulation, and bakeoff report",
+            panel=data,
+        )
+        study_dict = study_for(trace, deep=True)
+        trace.study = study_dict
+        trace.findings = str(study_dict.get("findings") or "")
+        trace.answer = trace.findings
+        out_path = trace.save()
+        say(green("Reported.") + f"  {out_path}")
+        return 0
+
     from .study import ReportError, load
     from .study.report import report as send_report
 
-    path = pathlib.Path(str(getattr(args, "study_path", "")))
+    path = pathlib.Path(str(raw_study_path))
     if not path.is_file():
         say(red(f"No study file at {path}."))
         return 2
@@ -4165,7 +4205,15 @@ def cmd_report_study(args: argparse.Namespace) -> int:
             family=family,
         )
     except ReportError as exc:
-        say(red(str(exc)))
+        msg = str(exc)
+        say(red(msg))
+        if "The key was rejected" in msg:
+            from .auth import remove_key
+
+            remove_key("QUANTOS_API_KEY")
+            os.environ.pop("QUANTOS_API_KEY", None)
+            if offer_key("quantos"):
+                say(dim("  Key set. Run that again."))
         return 2
 
     target = "/api/retail/ledger/import" if retail else "/api/me/runs/ingest"

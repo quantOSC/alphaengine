@@ -35,18 +35,7 @@ jobs:
           python-version: "3.12"
       - name: Verify git tag matches __version__
         run: |
-          python - <<'PY'
-          import os, sys
-          sys.path.insert(0, "src")
-          from alphaengine._version import __version__
-          ref = os.environ.get("GITHUB_REF_NAME", "")
-          expected = f"v{__version__}"
-          if ref and ref.startswith("v") and ref != expected:
-              raise SystemExit(f"Tag {ref!r} does not match __version__ {__version__!r} (expected {expected!r})")
-          if not ref.startswith("v"):
-              raise SystemExit(f"Publish requires a version tag matching {expected!r}, got {ref!r}")
-          print(f"Verified tag {ref} == v{__version__}")
-          PY
+          python -c "import os, runpy, sys; v = runpy.run_path('src/alphaengine/_version.py')['__version__']; ref = os.environ.get('GITHUB_REF_NAME') or os.environ.get('GITHUB_REF', '').removeprefix('refs/tags/'); exp = f'v{v}'; sys.exit(f'Tag {ref!r} != {exp!r}' if ref != exp else 0)"
       - run: python -m pip install --upgrade build
       - run: python -m build
       - uses: actions/upload-artifact@v4

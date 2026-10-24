@@ -504,3 +504,97 @@ def test_tui_dispatch_commands_and_tools(
     assert desk.keyed is False
     assert submit(desk, "quit") is True
     capsys.readouterr()
+
+
+def test_bakeoff_without_loaded_data_uses_demo_universe_and_exports_full_pdf(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pytest.importorskip("matplotlib")
+    monkeypatch.setattr("alphaengine.agent.sim.downloads_dir", lambda: tmp_path)
+
+    rules = iter(
+        ["momentum", "risk_parity", "hrp", "inverse_vol", "var_sorted", "low_vol", "equal", "reversion"]
+    )
+    atks = iter(["tail_stress", "last_half", "high_vol", "rate_shock"])
+
+    def fake_think(prompt: str) -> str:
+        if "ADVERSARY" in prompt:
+            return json.dumps({"attack": next(atks, "tail_stress"), "why": "stress regime and tail"})
+        if "BAKEOFF GENERATOR" in prompt:
+            return json.dumps({"rule": next(rules, "hrp"), "lookback": 20, "why": "diversified sleeve"})
+        return ""
+
+    desk = Desk(
+        session=_FakeSession(fail=ServerError(401, "Sign in")),
+        url="https://api.example.invalid",
+        args=argparse.Namespace(url=None, key=None),
+        data=None,
+        keyed=False,
+        think=fake_think,
+    )
+    assert submit(desk, "run a bakeoff given strategies and the dataset and hypotheses") is False
+    assert desk.data is not None and len(desk.data) >= 20
+    assert desk.pending_report is not None
+    assert desk.bakeoff is not None
+    assert desk.bakeoff["top_ranked_config"] is not None
+    assert len(desk.bakeoff["curves"]) == 8
+
+    # Accept and save the PDF report
+    assert submit(desk, "yes") is False
+    pdfs = list(tmp_path.glob("report-*.pdf"))
+    assert len(pdfs) == 1
+    raw_pdf = pdfs[0].read_bytes()
+    assert raw_pdf.startswith(b"%PDF")
+    assert len(raw_pdf) > 70_000
+    txt = pdfs[0].with_suffix(".txt").read_text(encoding="utf-8")
+    assert "need at least two named series" not in txt
+    assert "Top-ranked config" in txt
+    capsys.readouterr()
+
+
+def test_model_401_auth_error_prompts_for_new_key_and_pins_provider(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from alphaengine.auth import remove_key, save_key
+    from alphaengine.model import available_models, is_model_auth_error, pin_model
+
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
+
+    class AuthenticationError(Exception):
+        status_code = 401
+
+    assert is_model_auth_error(AuthenticationError("Error code: 401 - invalid_api_key"))
+
+    def bad_think(_prompt: str) -> str:
+        raise AuthenticationError("Error code: 401 - Incorrect API key provided")
+
+    desk = Desk(
+        session=_FakeSession(),
+        url="https://api.example.invalid",
+        args=argparse.Namespace(url=None, key=None),
+        data=None,
+        keyed=False,
+        think=bad_think,
+    )
+    assert submit(desk, "run a bakeoff") is False
+    assert desk.pending_secret == "MODEL_KEY"
+    assert desk.pending_report is None
+    out = capsys.readouterr().out
+    assert "401" in out
+
+    # Verify remove_key removes only the targeted key
+    save_key("QUANTOS_API_KEY", "ae_live_stale")
+    save_key("OPENAI_API_KEY", "sk-valid")
+    assert remove_key("QUANTOS_API_KEY") is True
+    assert remove_key("QUANTOS_API_KEY") is False
+
+    # Verify available_models puts pinned provider first
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-stale")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-good")
+    monkeypatch.setattr("alphaengine.model._sdk_present", lambda _lbl: True)
+    monkeypatch.setenv("ALPHAENGINE_PROVIDER", "openai")
+    assert available_models()[0][0] == "openai"
+    pin_model("openai")
+    monkeypatch.delenv("ALPHAENGINE_PROVIDER", raising=False)
+    monkeypatch.delenv("ALPHAENGINE_MODEL", raising=False)
