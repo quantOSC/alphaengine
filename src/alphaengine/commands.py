@@ -164,6 +164,21 @@ FLAGS: dict[str, Flag] = {
         "",
         "print the exact sync payload without making a network call",
     ),
+    "live": Flag(
+        "--live",
+        "FILE",
+        "live return series CSV to compare against a recorded backtest run",
+    ),
+    "interval": Flag(
+        "--interval",
+        "SECONDS",
+        "polling interval in seconds for watch (default 1.0)",
+    ),
+    "cycles": Flag(
+        "--cycles",
+        "N",
+        "number of polling cycles for watch before exiting (0 means continuous)",
+    ),
 }
 
 
@@ -514,6 +529,20 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "whether the figures match."
         ),
         examples=("alphaengine rerun HEAD",),
+    ),
+    Command(
+        verb="watch",
+        group="run",
+        args="<pipeline.yaml> [--interval SECONDS]",
+        scope="both",
+        purpose="re-run a declarative pipeline whenever a registered dataset file changes",
+        body=(
+            "Polls the pipeline file and every registered dataset in `.alphaengine/data/` "
+            "using SHA-256 content fingerprints, re-executing the pipeline whenever a "
+            "watched file changes on disk."
+        ),
+        examples=("alphaengine watch examples/screen_validate_size.yaml",),
+        flags=("interval", "cycles"),
     ),
     Command(
         verb="seal",

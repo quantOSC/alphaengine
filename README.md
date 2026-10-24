@@ -323,6 +323,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `monitor` | still inside the lines? | shell + session |
 | `run <workflow>` | run one workflow exactly as written | shell + session |
 | `rerun <run>` | reproduce a recorded project run from its inputs and check figures | shell + session |
+| `watch <pipeline.yaml> [--interval SECONDS]` | re-run a declarative pipeline whenever a registered dataset file changes | shell + session |
 | `seal <study.json \| run \| idea>` | write canonical content_sha256 into a study (or seal a project run/idea) | shell + session |
 | `verify <study.json> [--data FILE]` | verify a study.json content_sha256 seal and optionally re-check figures | shell + session |
 | `report <study.json> [--retail] \| memo <idea \| run> [--format md \| pdf]` | send a study to quantOS, or export a cited committee memo (md/pdf) | shell + session |
@@ -398,6 +399,9 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--kill-if RULE` | kill rule for a hypothesis, e.g. 'DSR < 0.9' |
 | `--format FMT` | output format for report memo: md or pdf (default md) |
 | `--dry-run` | print the exact sync payload without making a network call |
+| `--live FILE` | live return series CSV to compare against a recorded backtest run |
+| `--interval SECONDS` | polling interval in seconds for watch (default 1.0) |
+| `--cycles N` | number of polling cycles for watch before exiting (0 means continuous) |
 
 ### Examples
 
@@ -432,6 +436,7 @@ alphaengine run size_position --data returns.csv
 alphaengine run validate_study --project research.momentum
 alphaengine run examples/screen_validate_size.yaml
 alphaengine rerun HEAD
+alphaengine watch examples/screen_validate_size.yaml
 alphaengine seal study.json
 alphaengine seal HEAD
 alphaengine verify study.json

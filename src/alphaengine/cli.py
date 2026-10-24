@@ -1821,6 +1821,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     wf_str = str(getattr(args, "workflow", "") or "")
     if wf_str.lower().endswith((".yaml", ".yml")):
         return _cmd_run_pipeline(args, wf_str, proj)
+    if wf_str == "monitor_sleeve" and getattr(args, "live", None):
+        return _cmd_monitor_live(args, proj)
 
     session, url = _session(
         args.url,
@@ -2072,7 +2074,7 @@ def _run_local_in_project(
         inputs["grid"] = project_grid()
 
     local_cat = list(_LOCAL_CATALOGUE)
-    if wf == "validate_study" and stdin_in and backtest_fn is None:
+    if wf == "validate_study" and (stdin_in or _looks_like_returns(data)) and backtest_fn is None:
         local_cat = [
             {"name": "validate_study", "version": "1.0.0", "requires": ["returns"], "reproducible": True}
             if r.get("name") == "validate_study"
@@ -4308,6 +4310,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="reproduce a recorded project run from its inputs and check figures",
     )
     rr_cmd.add_argument("run_ref", metavar="run", nargs="?", default="HEAD", help="run id, prefix, or HEAD")
+    wt_cmd = sub.add_parser(
+        "watch",
+        parents=[common],
+        help="re-run a declarative pipeline whenever a registered dataset file changes",
+    )
+    wt_cmd.add_argument("pipeline_path", metavar="pipeline.yaml", help="path to pipeline.yaml")
+    wt_cmd.add_argument(
+        "--interval",
+        type=float,
+        default=1.0,
+        help="polling interval in seconds (default 1.0)",
+    )
+    wt_cmd.add_argument(
+        "--cycles",
+        type=int,
+        default=0,
+        help="number of polling cycles before exiting (0 means continuous)",
+    )
     dt_cmd = sub.add_parser(
         "data",
         parents=[common],
@@ -4443,6 +4463,9 @@ def build_parser() -> argparse.ArgumentParser:
         q.add_argument("--input", action="append", help="workflow input as key=value (repeatable)")
         q.add_argument("--quiet", action="store_true", help="only the result")
         q.add_argument("--stream", action="store_true", help="print the answer after the citation guard")
+        if verb == "monitor":
+            q.add_argument("run_ref", nargs="?", default=None, help="recorded run id when used with --live")
+            q.add_argument("--live", help="live return series CSV to compare against the recorded run")
         q.set_defaults(workflow=workflow)
     return p
 
@@ -5484,6 +5507,79 @@ def cmd_plugin(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Poll registered datasets and re-run `<pipeline.yaml>` on file changes."""
+    from .project import find_project
+    from .watch import watch_pipeline
+
+    p_path = str(getattr(args, "pipeline_path", "") or "")
+    if not p_path:
+        say(red("watch requires a pipeline path: alphaengine watch <pipeline.yaml>"))
+        return 2
+    proj = find_project()
+    interval = float(getattr(args, "interval", 1.0) or 1.0)
+    cycles = int(getattr(args, "cycles", 0) or 0)
+
+    def _on_run(run_num: int, envs: list[dict[str, Any]]) -> None:
+        say(f"  {green(ON)}  {bold('watch')} pass {run_num}  {dim(DOT)}  {len(envs)} steps completed")
+        for e in envs:
+            say(f"    {e.get('run_id')}  {str(e.get('command')).ljust(18)}  {e.get('verdict')}")
+
+    try:
+        watch_pipeline(p_path, proj=proj, interval=interval, max_cycles=cycles, on_run=_on_run)
+    except KeyboardInterrupt:
+        say("")
+        return 0
+    except Exception as exc:  # noqa: BLE001
+        say(red(str(exc)))
+        return 2
+    return 0
+
+
+def _cmd_monitor_live(args: argparse.Namespace, proj: Any) -> int:
+    """Compare `--live <file>` against a recorded backtest `<run>`."""
+    from .envelope import emit_json
+    from .watch import monitor_live_drift
+
+    if proj is None:
+        say(red("Not inside a local project. Run `alphaengine init` first."))
+        return 2
+    run_ref = str(getattr(args, "run_ref", None) or "HEAD")
+    live_file = str(getattr(args, "live", "") or "")
+    try:
+        env = monitor_live_drift(proj, run_ref, live_file)
+    except Exception as exc:  # noqa: BLE001
+        say(red(str(exc)))
+        return 2
+
+    if getattr(args, "json_out", False):
+        emit_json(env)
+        return 0
+
+    figs = env["figures"]
+    status = str(figs.get("status") or "")
+    mark = yellow(status) if status == "drift_flagged" else green(status)
+    say("")
+    say(f"  {bold('monitor --live')}  {figs.get('reference_run_id')}  {dim(DOT)}  {mark}")
+    say(
+        f"    {dim('live Sharpe (ann.)')}      {figs.get('live_sharpe_annualized')}  "
+        f"{dim('expected 95% ' + str(figs.get('expected_sharpe_95_interval')))}"
+    )
+    say(
+        f"    {dim('live max drawdown (%)')}   {figs.get('live_max_drawdown_pct')}%  "
+        f"{dim('expected 95% ' + str(figs.get('expected_max_drawdown_95_interval_pct')))}"
+    )
+    say(
+        f"    {dim('live volatility (ann.)')}  {figs.get('live_volatility_annualized_pct')}%  "
+        f"{dim('expected 95% ' + str(figs.get('expected_volatility_95_interval_pct')))}"
+    )
+    for flag in figs.get("drift_flags") or []:
+        say(f"    {yellow('drift')}  {flag}")
+    say(f"    {dim('Research tool, not investment advice.')}")
+    say("")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -5507,6 +5603,7 @@ def main(argv: list[str] | None = None) -> int:
         "show": cmd_show,
         "diff": cmd_diff,
         "rerun": cmd_rerun,
+        "watch": cmd_watch,
         "data": cmd_data,
         "idea": cmd_idea,
         "gaps": cmd_gaps,

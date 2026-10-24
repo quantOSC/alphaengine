@@ -814,3 +814,96 @@ def test_plugin_system_loaders_methods_templates_and_entrypoint_discovery(
     all_found = {p.name: p for p in discover_plugins()}
     assert "ep_diagnostic" in all_found
     assert all_found["ep_diagnostic"].source == "ext-pkg"
+
+
+def test_watch_pipeline_reruns_on_dataset_change_and_monitor_live_detects_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import json
+
+    from alphaengine.watch import watch_pipeline
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    assert cli.main(["init", "--name", "watch-monitor"]) == 0
+    capsys.readouterr()
+
+    # Create a registered dataset and a 1-step pipeline
+    ds_csv = tmp_path / "prices.csv"
+    ds_csv.write_text(
+        "\n".join(
+            ["date,AAPL,MSFT"]
+            + [f"2025-01-{i + 1:02d},{100.0 + i * 0.5:.2f},{200.0 + i * 0.5:.2f}" for i in range(30)]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["data", "add", str(ds_csv), "--name", "watch_ds"]) == 0
+    capsys.readouterr()
+
+    pipe_yaml = tmp_path / "watch_pipe.yaml"
+    pipe_yaml.write_text(
+        "name: watch-test\nfamily: watch_fam\ndata: prices.csv\nsteps:\n  - command: diagnose\n",
+        encoding="utf-8",
+    )
+
+    # 1. `watch_pipeline` runs once initially, then during poll cycle 1 we mutate `prices.csv`
+    # and verify it automatically triggers a second pipeline run!
+    proj = find_project(tmp_path)
+    assert proj is not None
+    poll_count = 0
+
+    def mutate_on_first_sleep(_sec: float) -> None:
+        nonlocal poll_count
+        poll_count += 1
+        if poll_count == 1:
+            ds_csv.write_text(
+                ds_csv.read_text(encoding="utf-8") + "2025-02-01,120.00,220.00\n",
+                encoding="utf-8",
+            )
+
+    n_exec = watch_pipeline(
+        pipe_yaml,
+        proj=proj,
+        interval=0.01,
+        max_cycles=2,
+        sleep_fn=mutate_on_first_sleep,
+    )
+    assert n_exec == 2
+
+    # Also test CLI `ae watch <pipeline.yaml> --cycles 1 --interval 0.01`
+    assert cli.main(["watch", str(pipe_yaml), "--cycles", "1", "--interval", "0.01"]) == 0
+    watch_out = capsys.readouterr().out
+    assert "watch" in watch_out
+
+    # 2. Record a backtest run with calm positive returns, then run `ae monitor <run> --live <file>`
+    bt_csv = tmp_path / "bt_returns.csv"
+    bt_csv.write_text(
+        "returns\n" + "\n".join(f"{0.002 + (i % 5) * 0.0005:.6f}" for i in range(80)) + "\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["validate", "--data", str(bt_csv), "--input", "n_trials=3", "--json"]) == 0
+    bt_env = json.loads(capsys.readouterr().out)
+    bt_run_id = bt_env["run_id"]
+
+    # Calm live returns within the expected range -> `within_expected_range`
+    calm_live = tmp_path / "live_calm.csv"
+    calm_live.write_text(
+        "returns\n" + "\n".join(f"{0.002 + (i % 5) * 0.0005:.6f}" for i in range(40)) + "\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["monitor", bt_run_id, "--live", str(calm_live), "--json"]) == 0
+    calm_env = json.loads(capsys.readouterr().out)
+    assert calm_env["verdict"] == "within_expected_range"
+    assert calm_env["figures"]["drift_flags"] == []
+
+    # Severe drawdown live returns outside the backtest's bootstrapped interval -> `drift_flagged`
+    crash_live = tmp_path / "live_crash.csv"
+    crash_live.write_text(
+        "returns\n" + "\n".join("-0.045" for _ in range(30)) + "\n",
+        encoding="utf-8",
+    )
+    assert cli.main(["monitor", bt_run_id, "--live", str(crash_live)]) == 0
+    crash_out = capsys.readouterr().out
+    assert "drift_flagged" in crash_out
+    assert "Research tool, not investment advice." in crash_out

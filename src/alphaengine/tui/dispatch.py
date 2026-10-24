@@ -272,6 +272,29 @@ def submit(desk: Desk, line: str) -> bool:
 
         cmd_rerun(_ns(desk, run_ref=rest or "HEAD"))
         return False
+    if verb == "watch":
+        from ..cli import cmd_watch
+
+        int_arg, toks = pop_flag(rest.split(), "--interval")
+        cyc_arg, toks = pop_flag(toks, "--cycles")
+        p_arg = toks[0] if toks else ""
+        cmd_watch(
+            _ns(
+                desk,
+                pipeline_path=p_arg,
+                interval=float(int_arg) if int_arg else 1.0,
+                cycles=int(cyc_arg) if cyc_arg and cyc_arg.isdigit() else 1,
+            )
+        )
+        return False
+    if verb == "monitor" and "--live" in rest.split():
+        from ..cli import _cmd_monitor_live
+        from ..project import find_project
+
+        live_arg, toks = pop_flag(rest.split(), "--live")
+        ref_arg = toks[0] if toks else "HEAD"
+        _cmd_monitor_live(_ns(desk, run_ref=ref_arg, live=live_arg), find_project())
+        return False
     if verb == "gaps":
         from ..cli import cmd_gaps
 
