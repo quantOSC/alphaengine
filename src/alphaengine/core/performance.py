@@ -15,11 +15,15 @@ both decimal and percent; the sign convention is documented per field.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike
 
 from .rates import cash_rate, rate_fields
 from .trace import record
+from .validation import _as_1d_float
 
 _PPY = 252  # trading periods per year
 
@@ -45,20 +49,20 @@ def wealth_from_returns(returns: np.ndarray) -> np.ndarray:
 
 
 def performance_report(
-    returns: list[float],
+    returns: ArrayLike | Sequence[float],
     *,
-    equity_curve: list[float] | None = None,
-    benchmark_returns: list[float] | None = None,
+    equity_curve: ArrayLike | Sequence[float] | None = None,
+    benchmark_returns: ArrayLike | Sequence[float] | None = None,
     risk_free_rate: float | None = None,
     periods_per_year: int = _PPY,
-) -> dict:
+) -> dict[str, Any]:
     """Risk-adjusted performance metrics for a daily return series (decimals).
 
     `risk_free_rate` is ANNUAL. Omitted, it is the pinned H.15 3-month
     Treasury (see ``core.rates``). The engine does not fetch a rate. Loss
     metrics are positive magnitudes.
     """
-    arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
+    arr = _as_1d_float(returns)
     n = arr.size
     if n < 30:
         return {"error": "need >= 30 observations", "n_obs": int(n)}
@@ -83,7 +87,8 @@ def performance_report(
     # Drawdown reads a marked account when one was supplied. Otherwise the
     # path is built from unit capital. Total return always comes from the
     # return product: a dollar curve's last mark minus one is not a return.
-    eq = np.asarray(equity_curve, dtype=float) if equity_curve else wealth_from_returns(arr)
+    eq_arr = _as_1d_float(equity_curve)
+    eq = eq_arr if eq_arr.size > 0 else wealth_from_returns(arr)
     peak = np.maximum.accumulate(eq)
     drawdown = eq / np.maximum(peak, 1e-18) - 1.0
     max_dd = float(drawdown.min()) if drawdown.size else 0.0
@@ -115,8 +120,8 @@ def performance_report(
         "alpha_annualization": "arithmetic",
     }
 
-    if benchmark_returns:
-        b = np.asarray([float(x) for x in benchmark_returns], dtype=float)
+    b = _as_1d_float(benchmark_returns)
+    if b.size > 0:
         m = min(len(b), n)
         if m >= 30:
             a2, b2 = arr[-m:] - rf_per, b[-m:] - rf_per

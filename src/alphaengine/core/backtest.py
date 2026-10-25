@@ -399,9 +399,9 @@ def _ar1_effective_n(returns: list) -> tuple:
     t-stat; this discounts it. Conservative convention: capped at n, so NEGATIVE
     autocorrelation is not credited (never claims more significance than the raw
     sample). Returns (n_eff, r1)."""
-    import numpy as np
+    from .validation import _as_1d_float
 
-    arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
+    arr = _as_1d_float(returns)
     n = arr.size
     if n < 3:
         return (float(n), 0.0)

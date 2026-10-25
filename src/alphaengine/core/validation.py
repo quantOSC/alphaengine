@@ -17,14 +17,30 @@ from __future__ import annotations
 import itertools
 import math
 import warnings
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike
 from scipy import stats
 
 from .rates import cash_rate, rate_fields
 from .trace import record
 
 _EULER = 0.5772156649015329
+
+
+def _as_1d_float(values: ArrayLike | Sequence[float] | None) -> np.ndarray:
+    """Convert any 1-D array-like (list, ndarray, pandas Series) to a 1-D float ndarray, dropping None."""
+    if values is None:
+        return np.empty(0, dtype=float)
+    raw = np.asarray(values)
+    if raw.ndim == 0:
+        item = raw.item()
+        return np.empty(0, dtype=float) if item is None else np.asarray([float(item)], dtype=float)
+    if raw.dtype.kind in ("f", "i", "u"):
+        return raw.astype(float, copy=False).ravel()
+    return np.asarray([float(r) for r in raw.ravel() if r is not None], dtype=float)
 
 
 # ── Sharpe statistics ───────────────────────────────────────────────────
@@ -78,13 +94,13 @@ def expected_max_sharpe(n_trials: int, trials_sharpe_std: float) -> float:
 
 
 def deflated_sharpe(
-    returns: list[float],
+    returns: ArrayLike | Sequence[float],
     *,
     n_trials: int,
     trials_sharpe_std: float | None = None,
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
-) -> dict:
+) -> dict[str, Any]:
     """Deflated Sharpe Ratio for a return stream.
 
     DSR = PSR(SR0), where SR0 = expected max Sharpe across `n_trials`. A DSR
@@ -93,7 +109,7 @@ def deflated_sharpe(
     caller's hypothesis ledger; when absent we estimate it from the result's
     own sampling error (a conservative lower bound on selection variance).
     """
-    arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
+    arr = _as_1d_float(returns)
     n = arr.size
     if n < 8:
         return {"error": "need >= 8 observations", "n_obs": int(n)}
@@ -170,13 +186,13 @@ def deflated_sharpe(
 
 
 def min_track_record_length(
-    returns: list[float],
+    returns: ArrayLike | Sequence[float],
     *,
     sr_benchmark: float = 0.0,
     confidence: float = 0.95,
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
-) -> dict:
+) -> dict[str, Any]:
     """Minimum Track Record Length (Bailey & López de Prado, 2012): the number of
     observations needed for the observed Sharpe to be statistically greater than
     `sr_benchmark` at `confidence`. Answers "is this backtest long enough to trust,
@@ -185,7 +201,7 @@ def min_track_record_length(
     MinTRL = 1 + [1 - γ3·SR + ((γ4-1)/4)·SR²] · (Z_α / (SR - SR*))²  (per-period).
     Returns the required count + whether the actual sample already clears it.
     """
-    arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
+    arr = _as_1d_float(returns)
     n = arr.size
     if n < 8:
         return {"error": "need >= 8 observations", "n_obs": int(n)}
@@ -257,6 +273,8 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
             f"n_splits must be an even integer >= 2 (got {n_splits!r}); "
             "CSCV partitions blocks into equal in-sample and out-of-sample halves."
         )
+    if pnl_matrix is None:
+        return {"error": "need (T>=2S observations, N>=2 configs)", "shape": [0]}
     M = np.asarray(pnl_matrix, dtype=float)
     if M.ndim != 2 or M.shape[1] < 2 or M.shape[0] < n_splits * 2:
         return {"error": "need (T>=2S observations, N>=2 configs)", "shape": list(M.shape)}
@@ -313,7 +331,7 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
 
 
 def combinatorial_oos_stability(
-    returns: list[float],
+    returns: ArrayLike | Sequence[float],
     *,
     n_groups: int = 8,
     n_test_groups: int = 2,
@@ -323,7 +341,7 @@ def combinatorial_oos_stability(
     max_paths: int = 2000,
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
-) -> dict:
+) -> dict[str, Any]:
     """Combinatorial out-of-sample stability over a single pre-computed return stream.
 
     WHAT THIS MEASURES (AND HOW IT DIFFERS FROM FULL CPCV):
@@ -342,7 +360,7 @@ def combinatorial_oos_stability(
     deflated Sharpe (haircut by `n_trials`) across all held-out sub-sample
     combinations.
     """
-    arr = np.asarray([float(r) for r in (returns or []) if r is not None], dtype=float)
+    arr = _as_1d_float(returns)
     n = arr.size
     if n < 8:
         return {"error": "need >= 8 observations", "n_obs": int(n)}
@@ -465,7 +483,7 @@ def combinatorial_oos_stability(
 
 
 def cpcv_score(
-    returns: list[float],
+    returns: ArrayLike | Sequence[float],
     *,
     n_groups: int = 8,
     n_test_groups: int = 2,
@@ -475,7 +493,7 @@ def cpcv_score(
     max_paths: int = 2000,
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
-) -> dict:
+) -> dict[str, Any]:
     """Deprecated alias for :func:`combinatorial_oos_stability`.
 
     Measures combinatorial out-of-sample sub-sample stability on a single return

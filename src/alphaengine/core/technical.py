@@ -54,7 +54,9 @@ def _extract(series: Any) -> tuple[np.ndarray, np.ndarray | None, np.ndarray | N
             lows = np.asarray([float(r["low"]) for r in rows], dtype=float)
             return closes, highs, lows
         return closes, None, None
-    closes = np.asarray([float(x) for x in (series or []) if x is not None], dtype=float)
+    from .validation import _as_1d_float
+
+    closes = _as_1d_float(series)
     return closes, None, None
 
 

@@ -113,7 +113,9 @@ def _series_to_list(s) -> list[float]:
     """A series is either a list of closes or a {date: close} dict (sorted by date)."""
     if isinstance(s, dict):
         return [float(s[k]) for k in sorted(s.keys())]
-    return [float(x) for x in (s or []) if x is not None]
+    if s is None:
+        return []
+    return [float(x) for x in np.asarray(s).ravel() if x is not None]
 
 
 def _align_pair(a, b) -> tuple[list[float], list[float]]:

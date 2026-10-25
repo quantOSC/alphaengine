@@ -349,3 +349,84 @@ def test_the_pair_screen_keeps_only_the_fdr_survivors() -> None:
     # One pair is the raw test.
     assert _benjamini_hochberg([0.04], 0.05) == [True]
     assert _benjamini_hochberg([0.06], 0.05) == [False]
+
+
+def test_array_like_list_ndarray_and_series_across_validation_and_metrics() -> None:
+    """deflated_sharpe, min_track_record_length, combinatorial_oos_stability,
+    cpcv_score, pbo_cscv, performance_report, and compute_var_cvar accept
+    Python lists, numpy ndarrays, and pandas Series (whose __bool__ raises
+    ValueError) and return identical figures.
+    """
+    from alphaengine.core import min_track_record_length
+
+    class _FakeSeries:
+        """Mimics pandas.Series: array-like via __array__, raises ValueError on bool()."""
+
+        def __init__(self, data: list[float]) -> None:
+            self._arr = np.asarray(data, dtype=float)
+
+        def __bool__(self) -> bool:
+            raise ValueError("The truth value of a Series is ambiguous.")
+
+        def __len__(self) -> int:
+            return int(self._arr.size)
+
+        def __iter__(self):
+            return iter(self._arr)
+
+        def __array__(self, dtype=None):
+            return np.asarray(self._arr, dtype=dtype)
+
+    try:
+        import pandas as pd
+
+        series_cls = pd.Series
+        df_cls = pd.DataFrame
+    except ImportError:
+        series_cls = _FakeSeries
+        df_cls = None
+
+    rng = np.random.default_rng(17)
+    as_list = rng.normal(0.0008, 0.012, 120).tolist()
+    as_ndarray = np.asarray(as_list, dtype=float)
+    as_series = series_cls(as_list)
+    as_fake_series = _FakeSeries(as_list)
+
+    bench_list = rng.normal(0.0004, 0.01, 120).tolist()
+    bench_ndarray = np.asarray(bench_list, dtype=float)
+    bench_series = series_cls(bench_list)
+
+    # 1. deflated_sharpe & min_track_record_length
+    dsr_list = deflated_sharpe(as_list, n_trials=9)
+    mart_list = min_track_record_length(as_list)
+    for candidate in (as_ndarray, as_series, as_fake_series):
+        assert deflated_sharpe(candidate, n_trials=9) == dsr_list
+        assert min_track_record_length(candidate) == mart_list
+
+    # 2. combinatorial_oos_stability & cpcv_score
+    stab_list = combinatorial_oos_stability(as_list, n_groups=6, n_test_groups=2, n_trials=9)
+    for candidate in (as_ndarray, as_series, as_fake_series):
+        assert combinatorial_oos_stability(candidate, n_groups=6, n_test_groups=2, n_trials=9) == stab_list
+        with pytest.deprecated_call(match="combinatorial_oos_stability"):
+            assert cpcv_score(candidate, n_groups=6, n_test_groups=2, n_trials=9) == stab_list
+
+    # 3. pbo_cscv (2-D list, 2-D ndarray, list of Series, and DataFrame if pandas present)
+    mat_list = rng.normal(0.0005, 0.01, size=(80, 6)).tolist()
+    mat_ndarray = np.asarray(mat_list, dtype=float)
+    mat_series_rows = [series_cls(row) for row in mat_list]
+    pbo_expected = pbo_cscv(mat_list, n_splits=8)
+    assert pbo_cscv(mat_ndarray, n_splits=8) == pbo_expected
+    assert pbo_cscv(mat_series_rows, n_splits=8) == pbo_expected
+    if df_cls is not None:
+        assert pbo_cscv(df_cls(mat_list), n_splits=8) == pbo_expected
+
+    # 4. performance_report & compute_var_cvar
+    perf_list = performance_report(as_list, benchmark_returns=bench_list)
+    risk_list = compute_var_cvar(as_list)
+    for candidate, bench in (
+        (as_ndarray, bench_ndarray),
+        (as_series, bench_series),
+        (as_fake_series, _FakeSeries(bench_list)),
+    ):
+        assert performance_report(candidate, benchmark_returns=bench) == perf_list
+        assert compute_var_cvar(candidate) == risk_list

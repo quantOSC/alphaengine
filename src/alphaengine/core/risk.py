@@ -17,11 +17,15 @@ Pure numpy/scipy. Deterministic given inputs on the pinned stack.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
+from numpy.typing import ArrayLike
 from scipy import stats
 
 from .trace import record
+from .validation import _as_1d_float
 
 
 def _clean(val):
@@ -48,26 +52,20 @@ def _quantile_loss(point: float, mean: float, horizon: int) -> float:
 
 
 def compute_var_cvar(
-    portfolio_returns: list[float],
+    portfolio_returns: ArrayLike | Sequence[float],
     *,
     confidence: float = 0.95,
     horizon_days: int = 1,
     portfolio_value: float = 100_000.0,
     bootstrap_samples: int = 1000,
-) -> dict:
+) -> dict[str, Any]:
     """Portfolio VaR (parametric + Cornish-Fisher + historical) and CVaR.
 
     `portfolio_returns`: historical daily portfolio returns as decimals. VaR is
     reported as a positive loss fraction (and dollars at `portfolio_value`).
     """
-    arr = np.array(
-        [
-            r
-            for r in (portfolio_returns or [])
-            if r is not None and not (isinstance(r, float) and np.isnan(r))
-        ],
-        dtype=float,
-    )
+    raw = _as_1d_float(portfolio_returns)
+    arr = raw[~np.isnan(raw)]
     n_obs = arr.size
     if n_obs < 20:
         return {"error": "need >= 20 observations", "n_obs": int(n_obs)}
