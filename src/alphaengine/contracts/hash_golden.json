@@ -1,0 +1,113 @@
+{
+  "contract_version": "1.2",
+  "float_format": ".8f",
+  "cases": [
+    {
+      "id": "empty_object",
+      "description": "Empty dictionary",
+      "input": {},
+      "canonical_json": "{}",
+      "expected_sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "id": "key_ordering_and_booleans",
+      "description": "Unsorted nested keys, booleans, ints, and null",
+      "input": {
+        "z": 1,
+        "a": 2,
+        "m": {
+          "b": true,
+          "a": false,
+          "nil": null
+        }
+      },
+      "canonical_json": "{\"a\":2,\"m\":{\"a\":false,\"b\":true,\"nil\":null},\"z\":1}",
+      "expected_sha256": "0b058199711c6e024d83bccd57a63dfd454106f1767d05b330817c4063f8a939"
+    },
+    {
+      "id": "float_edge_cases",
+      "description": "Float formatting to 8 decimals, -0.0 normalization, scientific notation, and rounding",
+      "input": {
+        "zero": 0.0,
+        "neg_zero": -0.0,
+        "one_ eighth": 0.125,
+        "pi": 3.141592653589793,
+        "small_1e_8": 1e-08,
+        "tiny_rounds_to_zero": 1e-12,
+        "round_up": 1.234567896,
+        "negative": -0.0421,
+        "int_preserved": 252
+      },
+      "canonical_json": "{\"int_preserved\":252,\"neg_zero\":\"0.00000000\",\"negative\":\"-0.04210000\",\"one_ eighth\":\"0.12500000\",\"pi\":\"3.14159265\",\"round_up\":\"1.23456790\",\"small_1e_8\":\"0.00000001\",\"tiny_rounds_to_zero\":\"0.00000000\",\"zero\":\"0.00000000\"}",
+      "expected_sha256": "0a34369a933f20905b6e02948b250015c846786eed8ce2c49da8d40ee4527d43"
+    },
+    {
+      "id": "content_sha256_excluded",
+      "description": "Existing content_sha256 key is stripped before canonical hashing",
+      "input": {
+        "label": "momentum-9",
+        "n_trials": 9,
+        "deflated_sharpe": 0.8434,
+        "content_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "canonical_json": "{\"deflated_sharpe\":\"0.84340000\",\"label\":\"momentum-9\",\"n_trials\":9}",
+      "expected_sha256": "f85a38aac86e3fcfa95876dff6e063d991a2fbfefaea56a9d7b4423972b3f12a"
+    },
+    {
+      "id": "study_schema_1_2",
+      "description": "Full Schema 1.2 Study dictionary with nested performance, surface, and trial_ledger",
+      "input": {
+        "assignment_id": null,
+        "best_params": null,
+        "charts": null,
+        "created_at": "2026-10-24T00:00:00+00:00",
+        "data_description": "synthetic",
+        "data_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "deflated_sharpe": 0.427,
+        "engine_version": "1.1.1",
+        "grid_keys": [
+          "fast",
+          "slow"
+        ],
+        "label": "golden-study",
+        "min_track_record_length": {
+          "min_track_record_length": 142.5,
+          "sufficient": true
+        },
+        "n_failed_trials": 0,
+        "n_trials": 5,
+        "n_trials_source": "derived_from_grid",
+        "notes": "",
+        "performance": {
+          "sharpe_annualized": 1.1548,
+          "max_drawdown_pct": 9.12
+        },
+        "process": null,
+        "psr_vs_zero": 0.8434,
+        "schema_version": "1.2",
+        "selection": {
+          "pbo": 0.3,
+          "verdict": "acceptable"
+        },
+        "sr0_expected_max": 0.0849,
+        "surface": {
+          "shape": "plateau",
+          "best_sharpe": 0.0727
+        },
+        "thesis_id": null,
+        "trial_ledger": [
+          {
+            "index": 0,
+            "params_hash": "a1b2c3d4e5f6",
+            "n_obs": 200,
+            "sharpe": 0.0727,
+            "failed": null
+          }
+        ],
+        "verdict": "likely_noise"
+      },
+      "canonical_json": "{\"assignment_id\":null,\"best_params\":null,\"charts\":null,\"created_at\":\"2026-10-24T00:00:00+00:00\",\"data_description\":\"synthetic\",\"data_hash\":\"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\",\"deflated_sharpe\":\"0.42700000\",\"engine_version\":\"1.1.1\",\"grid_keys\":[\"fast\",\"slow\"],\"label\":\"golden-study\",\"min_track_record_length\":{\"min_track_record_length\":\"142.50000000\",\"sufficient\":true},\"n_failed_trials\":0,\"n_trials\":5,\"n_trials_source\":\"derived_from_grid\",\"notes\":\"\",\"performance\":{\"max_drawdown_pct\":\"9.12000000\",\"sharpe_annualized\":\"1.15480000\"},\"process\":null,\"psr_vs_zero\":\"0.84340000\",\"schema_version\":\"1.2\",\"selection\":{\"pbo\":\"0.30000000\",\"verdict\":\"acceptable\"},\"sr0_expected_max\":\"0.08490000\",\"surface\":{\"best_sharpe\":\"0.07270000\",\"shape\":\"plateau\"},\"thesis_id\":null,\"trial_ledger\":[{\"failed\":null,\"index\":0,\"n_obs\":200,\"params_hash\":\"a1b2c3d4e5f6\",\"sharpe\":\"0.07270000\"}],\"verdict\":\"likely_noise\"}",
+      "expected_sha256": "e65876a1d7f93273c3a5515be8ea919fec1dd5bc975b4e6670c9b67d821f8d03"
+    }
+  ]
+}

@@ -11,13 +11,14 @@ Pure Python stdlib (`hashlib`, `json`, `pathlib`). No database dependency.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from .study.schema import canonical_json, canonical_sha256
 
 PROJECT_FORMAT_VERSION = "1.0"
 PROJECT_DIR_NAME = ".alphaengine"
@@ -37,6 +38,7 @@ __all__ = [
     "Project",
     "ProjectNotFoundError",
     "canonical_bytes",
+    "canonical_sha256",
     "sha256_hex",
     "init_project",
     "find_project",
@@ -47,34 +49,25 @@ class ProjectNotFoundError(RuntimeError):
     """Raised when a project-only operation is invoked outside `.alphaengine/`."""
 
 
-def _normalize(node: Any) -> Any:
+def _sanitize_json_numbers(node: Any) -> Any:
+    """Replace non-finite floats with None while keeping finite numbers numeric for JSON storage."""
     if isinstance(node, dict):
-        return {str(k): _normalize(node[k]) for k in sorted(node.keys(), key=str)}
+        return {str(k): _sanitize_json_numbers(node[k]) for k in sorted(node.keys(), key=str)}
     if isinstance(node, (list, tuple)):
-        return [_normalize(v) for v in node]
-    if isinstance(node, bool) or node is None or isinstance(node, (int, str)):
-        return node
-    if isinstance(node, float):
-        if not math.isfinite(node):
-            return None
-        return 0.0 if node == 0.0 else round(node, 10)
-    return str(node)
+        return [_sanitize_json_numbers(v) for v in node]
+    if isinstance(node, float) and not math.isfinite(node):
+        return None
+    return node
 
 
 def canonical_bytes(payload: Any) -> bytes:
-    """Deterministic UTF-8 JSON bytes for content addressing."""
-    return json.dumps(
-        _normalize(payload),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
+    """Deterministic UTF-8 JSON bytes using the single study schema 1.2 canonical format."""
+    return canonical_json(payload).encode("utf-8")
 
 
 def sha256_hex(payload: Any) -> str:
-    """64-character hex SHA-256 of ``payload`` (bytes or canonical JSON object)."""
-    raw = payload if isinstance(payload, (bytes, bytearray)) else canonical_bytes(payload)
-    return hashlib.sha256(raw).hexdigest()
+    """64-character hex SHA-256 of ``payload`` via ``canonical_sha256``."""
+    return canonical_sha256(payload)
 
 
 def _format_toml(
@@ -188,12 +181,17 @@ class Project:
 
     def put_object(self, payload: Any) -> str:
         """Write a content-addressed JSON object under `.alphaengine/objects/<sha256>.json`."""
-        blob = canonical_bytes(payload)
-        digest = hashlib.sha256(blob).hexdigest()
+        digest = canonical_sha256(payload)
         self.objects_dir.mkdir(parents=True, exist_ok=True)
         obj_path = self.objects_dir / f"{digest}.json"
         if not obj_path.exists():
-            obj_path.write_bytes(blob)
+            stored_bytes = json.dumps(
+                _sanitize_json_numbers(payload),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            obj_path.write_bytes(stored_bytes)
         return digest
 
     def get_object(self, digest: str) -> Any:
@@ -203,10 +201,11 @@ class Project:
         if not obj_path.is_file():
             raise FileNotFoundError(f"No object {clean} in {self.objects_dir}")
         raw = obj_path.read_bytes()
-        actual = hashlib.sha256(raw).hexdigest()
+        parsed = json.loads(raw.decode("utf-8"))
+        actual = canonical_sha256(parsed)
         if actual != clean:
             raise ValueError(f"Object {clean} failed integrity check (computed {actual})")
-        return json.loads(raw.decode("utf-8"))
+        return parsed
 
     def append_jsonl(self, rel_path: str, record: dict[str, Any]) -> str:
         """Store `record` as a content-addressed object and append a line to `.alphaengine/<rel_path>`."""
@@ -215,7 +214,7 @@ class Project:
         entry.setdefault("object_sha256", digest)
         target = self.dot_dir / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(_normalize(entry), sort_keys=True, ensure_ascii=False)
+        line = json.dumps(_sanitize_json_numbers(entry), sort_keys=True, ensure_ascii=False)
         with target.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         return digest

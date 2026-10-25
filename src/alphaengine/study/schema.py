@@ -30,14 +30,16 @@ __all__ = [
     "load",
     "seal_study",
     "verify_study",
+    "verify_study_mode",
     "canonical_json",
+    "canonical_sha256",
     "compute_content_sha256",
     "SCHEMA_VERSION",
 ]
 
 
 def _normalize_canonical(node: Any) -> Any:
-    """Normalize nested values with sorted keys and fixed float formatting for hashing."""
+    """Normalize nested values with sorted keys and fixed 8-decimal float formatting for hashing."""
     if isinstance(node, dict):
         return {str(k): _normalize_canonical(node[k]) for k in sorted(node.keys(), key=str)}
     if isinstance(node, (list, tuple)):
@@ -52,31 +54,94 @@ def _normalize_canonical(node: Any) -> Any:
     return str(node)
 
 
-def canonical_json(study: Study | dict[str, Any]) -> str:
-    """Deterministic canonical JSON over a Study (excluding ``content_sha256``)."""
-    raw = dict(study.to_dict() if isinstance(study, Study) else study)
+def _normalize_legacy_round10(node: Any) -> Any:
+    """Legacy normalization (round(float, 10) as numeric JSON) for backward-compatible verification."""
+    if isinstance(node, dict):
+        return {str(k): _normalize_legacy_round10(node[k]) for k in sorted(node.keys(), key=str)}
+    if isinstance(node, (list, tuple)):
+        return [_normalize_legacy_round10(v) for v in node]
+    if isinstance(node, bool) or node is None or isinstance(node, (int, str)):
+        return node
+    if isinstance(node, float):
+        if not math.isfinite(node):
+            return None
+        return 0.0 if node == 0.0 else round(node, 10)
+    return str(node)
+
+
+def _strip_content_sha(payload: Any) -> Any:
+    if isinstance(payload, Study):
+        raw: Any = dict(payload.to_dict())
+    elif isinstance(payload, dict):
+        raw = dict(payload)
+    else:
+        return payload
     raw.pop("content_sha256", None)
+    return raw
+
+
+def canonical_json(study: Study | dict[str, Any] | Any) -> str:
+    """Deterministic canonical JSON over a Study or arbitrary JSON-serializable payload."""
+    raw = _strip_content_sha(study)
     normalized = _normalize_canonical(raw)
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def canonical_sha256(payload: Study | dict[str, Any] | Any) -> str:
+    """Single canonical 64-hex SHA-256 hash function used for content_sha256, seals, and CAS objects."""
+    if isinstance(payload, (bytes, bytearray)):
+        return hashlib.sha256(payload).hexdigest()
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
 def compute_content_sha256(study: Study | dict[str, Any]) -> str:
     """Full 64-hex SHA-256 content hash over canonical JSON of the Study."""
-    return hashlib.sha256(canonical_json(study).encode("utf-8")).hexdigest()
+    return canonical_sha256(study)
+
+
+def _legacy_hashes(study: Study | dict[str, Any]) -> set[str]:
+    """Compute legacy study hashes so studies sealed under pre-1.1.1 formats still verify as 'legacy'."""
+    raw = _strip_content_sha(study)
+    candidates: set[str] = set()
+    # 1. Legacy 10-decimal numeric float normalization
+    leg10 = json.dumps(
+        _normalize_legacy_round10(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    candidates.add(hashlib.sha256(leg10.encode("utf-8")).hexdigest())
+    # 2. Legacy plain sort_keys JSON (compact and default separators)
+    for sep in ((",", ":"), (", ", ": ")):
+        plain = json.dumps(raw, sort_keys=True, separators=sep, default=str, ensure_ascii=False)
+        candidates.add(hashlib.sha256(plain.encode("utf-8")).hexdigest())
+    return candidates
+
+
+def verify_study_mode(study: Study | dict[str, Any]) -> str | None:
+    """Return `'canonical'` if `content_sha256` matches, `'legacy'` for legacy seals, or `None`."""
+    claimed = (
+        study.content_sha256
+        if isinstance(study, Study)
+        else (study.get("content_sha256") if isinstance(study, dict) else None)
+    )
+    if not claimed or not isinstance(claimed, str):
+        return None
+    clean = claimed.strip().lower()
+    if clean == canonical_sha256(study):
+        return "canonical"
+    if clean in _legacy_hashes(study):
+        return "legacy"
+    return None
 
 
 def seal_study(study: Study) -> str:
     """Compute and store ``content_sha256`` on ``study``, returning the 64-hex digest."""
-    digest = compute_content_sha256(study)
+    digest = canonical_sha256(study)
     study.content_sha256 = digest
     return digest
 
 
 def verify_study(study: Study) -> bool:
-    """True when ``study.content_sha256`` is present and matches its canonical content hash."""
-    if not study.content_sha256:
-        return False
-    return study.content_sha256 == compute_content_sha256(study)
+    """True when ``study.content_sha256`` is present and matches canonical or legacy hash."""
+    return verify_study_mode(study) is not None
 
 
 @dataclass

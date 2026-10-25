@@ -1018,3 +1018,38 @@ def test_require_firm_key_choke_point_keyring_and_no_key_leak(
     json_out = capsys.readouterr().out
     assert secret not in json_out
     assert "ae_live_[REDACTED]" in json_out
+
+
+def test_canonical_sha256_contract_and_legacy_verifier(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import hashlib
+    import json
+
+    from alphaengine.contracts import hash_golden_path
+    from alphaengine.project import sha256_hex
+    from alphaengine.study import Study, canonical_sha256, verify_study_mode
+    from alphaengine.study.schema import _normalize_legacy_round10
+
+    assert hash_golden_path().is_file()
+    assert canonical_sha256({"x": 1.5}) == sha256_hex({"x": 1.5})
+    assert canonical_sha256({"zero": -0.0}) == canonical_sha256({"zero": 0.0})
+
+    # Build a study sealed with the legacy 10-decimal numeric float format and verify it is labeled 'legacy'
+    st = Study(label="legacy study", n_trials=4, deflated_sharpe=0.5123456789)
+    raw = st.to_dict()
+    raw.pop("content_sha256", None)
+    leg_blob = json.dumps(
+        _normalize_legacy_round10(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    leg_sha = hashlib.sha256(leg_blob.encode("utf-8")).hexdigest()
+    st.content_sha256 = leg_sha
+
+    assert verify_study_mode(st) == "legacy"
+    assert st.verify() is True
+
+    leg_path = tmp_path / "legacy_study.json"
+    leg_path.write_text(json.dumps(st.to_dict(), indent=2), encoding="utf-8")
+    assert cli.main(["verify", str(leg_path)]) == 0
+    ver_out = capsys.readouterr().out
+    assert "Verified (legacy)." in ver_out

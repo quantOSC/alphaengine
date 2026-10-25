@@ -15,9 +15,7 @@ WHY THE TRIAL COUNT IS NOT A PARAMETER
 
 from __future__ import annotations
 
-import hashlib
 import itertools
-import json
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -61,25 +59,20 @@ def _expand(grid: Mapping[str, Iterable[Any]]) -> list[dict[str, Any]]:
 
 
 def _hash_data(data: Any) -> str:
-    """Full 64-hex sha256 content hash of the input series.
+    """Full 64-hex sha256 content hash of the input series via `canonical_sha256`."""
+    from ..study.schema import canonical_sha256
 
-    This is the segment identity, and it is deliberately NOT a user-supplied
-    label: a name can be changed to escape a history, an array cannot. Two runs
-    over the same data are recognisably the same segment even if the researcher
-    renamed the experiment.
-    """
     try:
         arr = np.asarray(data, dtype=float)
-        return hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()
+        return canonical_sha256(arr.tolist())
     except (TypeError, ValueError):
-        # Not array-shaped (a dict of price series, say). Hash a canonical
-        # JSON rendering so the identity is still stable across runs.
-        blob = json.dumps(data, sort_keys=True, default=str).encode()
-        return hashlib.sha256(blob).hexdigest()
+        return canonical_sha256(data)
 
 
 def _hash_params(p: Params) -> str:
-    return hashlib.sha256(json.dumps(dict(p), sort_keys=True, default=str).encode()).hexdigest()[:12]
+    from ..study.schema import canonical_sha256
+
+    return canonical_sha256(dict(p))[:12]
 
 
 def _sharpe(returns: npt.NDArray[np.float64]) -> float:

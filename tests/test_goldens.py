@@ -185,3 +185,19 @@ def test_screen_counts_close_over_the_whole_universe() -> None:
     got = screen_universe(names, rank_by="return_pct", top_n=50)
     assert got["universe_size"] == got["n_evaluated"] + got["n_insufficient"]
     assert got["n_evaluated"] == got["n_passing"] + got["n_failing"] + got["n_undetermined"]
+
+
+# ── canonical hash contract ────────────────────────────────────────────────
+def test_canonical_sha256_matches_hash_golden_contract() -> None:
+    import json
+
+    from alphaengine.contracts import hash_golden_path
+    from alphaengine.study.schema import canonical_json, canonical_sha256
+
+    fixture = json.loads(hash_golden_path().read_text(encoding="utf-8"))
+    assert fixture["contract_version"] == "1.2"
+    assert len(fixture["cases"]) >= 5
+    for case in fixture["cases"]:
+        assert canonical_json(case["input"]) == case["canonical_json"], f"json drift on {case['id']}"
+        assert canonical_sha256(case["input"]) == case["expected_sha256"], f"sha256 drift on {case['id']}"
+        assert len(case["expected_sha256"]) == 64

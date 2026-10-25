@@ -13,7 +13,6 @@ search effort.
 from __future__ import annotations
 
 import contextvars
-import hashlib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,12 +59,12 @@ def is_auto_sweep_suppressed() -> bool:
 
 
 def hash_dataset_any(data: Any) -> list[str]:
-    """Compute 64-hex SHA-256 dataset hashes for arbitrary in-memory data."""
+    """Compute 64-hex SHA-256 dataset hashes for arbitrary in-memory data via `canonical_sha256`."""
     if data is None:
         return []
     try:
         arr = np.asarray(data, dtype=float)
-        return [hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()]
+        return [sha256_hex(arr.tolist())]
     except (TypeError, ValueError):
         return [sha256_hex(data)]
 

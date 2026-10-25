@@ -19,7 +19,7 @@ from typing import Any
 
 from ._version import __version__
 from .project import Project
-from .study import Study, compute_content_sha256, load, save
+from .study import Study, compute_content_sha256, load, save, verify_study_mode
 
 __all__ = [
     "seal_from_project",
@@ -165,12 +165,14 @@ def verify_study_file(
 
     stored_sha = raw.get("content_sha256")
     computed_sha = compute_content_sha256(study)
-    hash_ok = bool(stored_sha and stored_sha == computed_sha)
+    mode = verify_study_mode(raw) or verify_study_mode(study)
+    hash_ok = mode is not None
     report_info: dict[str, Any] = {
         "study_path": str(p),
         "stored_sha256": stored_sha,
         "computed_sha256": computed_sha,
         "hash_verified": hash_ok,
+        "verification_mode": mode,
         "data_verified": None,
         "mismatches": {},
     }

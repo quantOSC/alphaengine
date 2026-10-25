@@ -33,11 +33,13 @@ from .schema import (
     SCHEMA_VERSION,
     Study,
     canonical_json,
+    canonical_sha256,
     compute_content_sha256,
     load,
     save,
     seal_study,
     verify_study,
+    verify_study_mode,
 )
 
 __all__ = [
@@ -48,7 +50,9 @@ __all__ = [
     "load",
     "seal_study",
     "verify_study",
+    "verify_study_mode",
     "canonical_json",
+    "canonical_sha256",
     "compute_content_sha256",
     "SCHEMA_VERSION",
 ]

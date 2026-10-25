@@ -4808,8 +4808,12 @@ def cmd_seal(args: argparse.Namespace) -> int:
         existing = raw_disk.get("content_sha256")
         computed = compute_content_sha256(study)
         if existing:
-            if existing == computed:
-                say(green("Verified.") + f"  {computed}  " + dim(str(path)))
+            from .study import verify_study_mode
+
+            mode = verify_study_mode(raw_disk) or verify_study_mode(study)
+            if mode is not None:
+                mode_label = " (legacy)" if mode == "legacy" else ""
+                say(green(f"Verified{mode_label}.") + f"  {existing}  " + dim(str(path)))
                 return 0
             say(
                 red("Seal mismatch.")
@@ -4892,8 +4896,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
             say(f"    {k}: recorded {m['recorded']} != reproduced {m['reproduced']}")
         return 1
 
+    mode_label = " (legacy)" if info.get("verification_mode") == "legacy" else ""
     extra = " + figures reproduced" if info.get("data_verified") is True else ""
-    say(green("Verified.") + f"  {info['computed_sha256']}  {dim(str(path) + extra)}")
+    say(
+        green(f"Verified{mode_label}.")
+        + f"  {info.get('stored_sha256') or info['computed_sha256']}  {dim(str(path) + extra)}"
+    )
     return 0
 
 
