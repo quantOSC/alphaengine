@@ -3673,21 +3673,9 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
 
 
 def refused(exc: Any) -> None:
-    """Report a server refusal, and make an AUTH refusal actionable.
+    """Report a server refusal; 401/403 emit the canonical firm-key message."""
+    from .auth import FIRM_KEY_ERROR_MESSAGE
 
-    ── WHY THIS IS NOT JUST A RED LINE ────────────────────────────────────────
-
-    "The server refused: Authentication required" is true, useless, and actively
-    misleading to somebody who IS a paying user — they are signed into the
-    portal in a browser two windows away, so the natural reading is that
-    something is broken. It is not: a browser session is not a CLI credential
-    and never will be, because this process has no cookie jar and should not
-    acquire one.
-
-    So a 401 says what is actually wrong, where the key comes from, and offers
-    to take it right here. Every other status keeps the plain message, because
-    the fix for a 404 or a 422 is not a credential.
-    """
     status = getattr(exc, "status", None)
     detail = getattr(exc, "detail", str(exc))
 
@@ -3695,34 +3683,7 @@ def refused(exc: Any) -> None:
         say(red(f"The server refused: {detail}"))
         return
 
-    say("")
-    say(
-        yellow("  Not authenticated.")
-        + dim(
-            "  This command requires a portal-issued ae_live_ key; "
-            "your browser login does not reach this process."
-        )
-    )
-    say(dim("  A browser session is a cookie; this needs a key. They are different"))
-    say(dim("  credentials on purpose."))
-    say("")
-    say(
-        "  " + dim("Need one:") + " a portal-issued ae_live_ key (request access at https://qosai.app/access)"
-    )
-    say("  " + dim("Get one:") + f"  the portal {ARROW} Data {ARROW} API keys {ARROW} New key")
-    say("  " + dim("Then:") + "     " + bold("login") + dim(f"   (or export {_ENV_KEY}=ae_live_...)"))
-    say(
-        "  "
-        + dim("Offline:")
-        + "  "
-        + bold("alphaengine demo")
-        + dim(", ")
-        + bold("alphaengine process")
-        + dim(", and the Python API (")
-        + bold("import alphaengine")
-        + dim(") work without an account.")
-    )
-    say("")
+    say(red(FIRM_KEY_ERROR_MESSAGE))
 
 
 def offer_key(which: str = "quantos") -> bool:
@@ -5603,6 +5564,10 @@ _GATED_COMMANDS: frozenset[str] = frozenset(
     {
         "run",
         *QUESTION_VERBS.keys(),
+        "workflows",
+        "runs",
+        "gaps",
+        "tonight",
         "init",
         "log",
         "show",

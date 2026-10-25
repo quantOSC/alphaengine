@@ -238,7 +238,16 @@ def test_the_glyphs_are_the_real_ones_when_the_stream_can_take_them():
 def test_offline_names_the_host_and_the_half_that_still_works():
     """A workflow server being absent is not an error state for this package."""
     out = subprocess.run(
-        [sys.executable, "-m", "alphaengine.cli", "workflows", "--url", "http://127.0.0.1:9"],
+        [
+            sys.executable,
+            "-m",
+            "alphaengine.cli",
+            "workflows",
+            "--url",
+            "http://127.0.0.1:9",
+            "--key",
+            "ae_live_test",
+        ],
         capture_output=True,
         text=True,
     )
@@ -578,24 +587,20 @@ class _Refusal(RuntimeError):
 
 
 def test_a_401_explains_that_a_browser_login_is_not_a_cli_credential(capsys, monkeypatch):
-    """THE REPORTED BUG. A paying user, signed into the portal, read
-    "Authentication required" as the product being broken. It is not: this
-    process has no cookie jar and should never acquire one."""
+    from alphaengine.auth import FIRM_KEY_ERROR_MESSAGE
+
     monkeypatch.setattr(cli, "_tty", lambda: True)
     cli.refused(_Refusal(401, "Authentication required"))
     out = capsys.readouterr().out
-    assert "browser login does not reach this process" in out
-    assert "ae_live_" in out
-    assert "https://qosai.app/access" in out
-    assert "Data" in out and "API keys" in out, "it must say where the key comes from"
-    assert "Then:" in out and "QUANTOS_API_KEY" in out, "and how to enter one"
-    assert "alphaengine demo" in out and "alphaengine process" in out and "import alphaengine" in out
+    assert FIRM_KEY_ERROR_MESSAGE in out
 
 
 def test_a_403_is_treated_the_same_way(capsys, monkeypatch):
+    from alphaengine.auth import FIRM_KEY_ERROR_MESSAGE
+
     monkeypatch.setattr(cli, "_tty", lambda: True)
     cli.refused(_Refusal(403, "Forbidden"))
-    assert "Not authenticated" in capsys.readouterr().out
+    assert FIRM_KEY_ERROR_MESSAGE in capsys.readouterr().out
 
 
 def test_a_non_auth_refusal_keeps_the_plain_message(capsys, monkeypatch):
