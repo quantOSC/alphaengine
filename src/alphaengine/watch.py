@@ -248,12 +248,13 @@ def monitor_live_drift(
         command="monitor_live",
         params={"reference_run_id": run_rec.get("run_id"), "live_file": str(lp.name)},
         dataset_hashes=hash_dataset_any(live_list),
-        n_trials=1,
+        n_trials=0,
         n_trials_source="monitor_live",
         figures=figures,
         verdict=status,
         idea_id=run_rec.get("idea_id"),
         family=str(run_rec.get("family") or "monitor"),
+        already_counted_in_ledger=True,
     )
     return build_envelope(
         command="monitor_live",
@@ -265,7 +266,7 @@ def monitor_live_drift(
         family=str(rec["family"]),
         params_hash=str(rec["params_hash"]),
         dataset_hashes=rec["dataset_hashes"],
-        n_trials=1,
+        n_trials=int(rec["cumulative_trials"]),
         n_trials_source="monitor_live",
         cumulative_trials=int(rec["cumulative_trials"]),
         project_trials=int(rec["project_trials"]),

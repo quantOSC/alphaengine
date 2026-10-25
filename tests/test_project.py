@@ -935,6 +935,8 @@ def test_watch_pipeline_reruns_on_dataset_change_and_monitor_live_detects_drift(
     assert cli.main(["validate", "--data", str(bt_csv), "--input", "n_trials=3", "--json"]) == 0
     bt_env = json.loads(capsys.readouterr().out)
     bt_run_id = bt_env["run_id"]
+    bt_cum_n = bt_env["cumulative_trials"]
+    bt_proj_n = bt_env["project_trials"]
 
     # Calm live returns within the expected range -> `within_expected_range`
     calm_live = tmp_path / "live_calm.csv"
@@ -946,6 +948,15 @@ def test_watch_pipeline_reruns_on_dataset_change_and_monitor_live_detects_drift(
     calm_env = json.loads(capsys.readouterr().out)
     assert calm_env["verdict"] == "within_expected_range"
     assert calm_env["figures"]["drift_flags"] == []
+    assert calm_env["figures"]["run_n_trials"] == 0
+    assert calm_env["cumulative_trials"] == bt_cum_n
+    assert calm_env["project_trials"] == bt_proj_n
+
+    # Re-running live monitor on same or updated live file never inflates cumulative N
+    assert cli.main(["monitor", bt_run_id, "--live", str(calm_live), "--json"]) == 0
+    calm_env_2 = json.loads(capsys.readouterr().out)
+    assert calm_env_2["cumulative_trials"] == bt_cum_n
+    assert calm_env_2["project_trials"] == bt_proj_n
 
     # Severe drawdown live returns outside the backtest's bootstrapped interval -> `drift_flagged`
     crash_live = tmp_path / "live_crash.csv"
@@ -957,6 +968,11 @@ def test_watch_pipeline_reruns_on_dataset_change_and_monitor_live_detects_drift(
     crash_out = capsys.readouterr().out
     assert "drift_flagged" in crash_out
     assert "Research tool, not investment advice." in crash_out
+
+    from alphaengine.ledger import cumulative_trials_for
+
+    _, final_proj_n = cumulative_trials_for(proj)
+    assert final_proj_n == bt_proj_n
 
 
 def test_require_firm_key_choke_point_keyring_and_no_key_leak(
