@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .._version import __version__
+
 Invoke = Callable[[str, dict[str, Any]], Any]
 Think = Callable[[str], str]
 
@@ -45,9 +47,9 @@ TOOLS: tuple[tuple[str, str], ...] = (
     ("done", "stop. args.answer may cite only numbers the tools returned"),
 )
 
-_PROMPT = """You are the simulator inside alphaengine 1.0.
-
-The user asked a question. You answer it by calling tools, as many as the
+_PROMPT = (
+    f"You are the simulator inside alphaengine {__version__}.\n\n"
+    """The user asked a question. You answer it by calling tools, as many as the
 scenario needs, one per reply. The math is already written. You decide the
 order. You do not invent a figure.
 When constructing a portfolio or analyzing a scenario or simulation, build the
@@ -70,6 +72,7 @@ Reply with ONE JSON object and nothing else.
 {"tool": "<name>", "args": {}}
 {"tool": "done", "args": {"answer": "two or three sentences citing only tool numbers"}}
 """
+)
 
 
 @dataclass
@@ -106,7 +109,7 @@ class Trace:
     auth_error: str | None = None
 
     def render(self) -> str:
-        lines = ["alphaengine 1.0", f"question  {self.question}", ""]
+        lines = [f"alphaengine {__version__}", f"question  {self.question}", ""]
         if not self.calls:
             lines.append("no tools ran")
         for i, call in enumerate(self.calls, start=1):

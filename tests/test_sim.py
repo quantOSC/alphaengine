@@ -81,7 +81,7 @@ def test_a_sentence_runs_two_tools_and_refuses_an_invented_number(tmp_path) -> N
     path = trace.save(tmp_path)
     text_path = path if path.suffix == ".txt" else path.with_suffix(".txt")
     text = text_path.read_text(encoding="utf-8")
-    assert text.startswith("alphaengine 1.0")
+    assert text.startswith(f"alphaengine {__version__}")
     assert "profile" in text and "var" in text
     assert "Refused" in text
 
@@ -100,7 +100,7 @@ def test_a_saved_trace_is_a_charted_pdf(tmp_path) -> None:
     assert raw.startswith(b"%PDF")
     assert len(raw) > 2000
     text = path.with_suffix(".txt").read_text(encoding="utf-8")
-    assert text.startswith("alphaengine 1.0")
+    assert text.startswith(f"alphaengine {__version__}")
     assert "stress the book" in text
     assert "AAPL" not in text
 

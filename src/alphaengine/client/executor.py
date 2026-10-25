@@ -318,6 +318,7 @@ class StepExecutor:
             "compute.overlap": self._overlap,
             "compute.backtest": self._backtest,
             "compute.score_backtest": self._score_backtest,
+            "compute.combinatorial_oos_stability": self._cpcv,
             "compute.cpcv": self._cpcv,
             "compute.factors": self._factors,
             "compute.pairs": self._pairs,

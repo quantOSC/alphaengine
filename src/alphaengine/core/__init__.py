@@ -8,7 +8,7 @@ These are published methods, not proprietary formulae:
 
   probabilistic / deflated Sharpe   Bailey & Lopez de Prado (2014)
   PBO via CSCV                      Bailey, Borwein, Lopez de Prado & Zhu (2017)
-  CPCV                              purged, embargoed cross-validation
+  combinatorial_oos_stability       purged, embargoed out-of-sample stability
   minimum track record length       how long a record must be before skill is
                                     distinguishable from luck
 

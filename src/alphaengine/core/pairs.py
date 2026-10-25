@@ -22,7 +22,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover
     raise ModuleNotFoundError(
         "pairs needs statsmodels, which is not a core dependency of "
         "alphaengine. Install it with:  pip install 'alphaengine[factors]'  "
-        "The core (deflated Sharpe, PBO, CPCV, performance, risk) needs "
+        "The core (deflated Sharpe, PBO via CSCV, combinatorial_oos_stability, performance, risk) needs "
         "only numpy and scipy and is unaffected."
     ) from exc
 

@@ -150,7 +150,7 @@ at `login`). To delete the stored file at any time, run
 flowchart LR
   A["demo / import<br/>offline maths"] --> B["login<br/>QuantOS key"]
   B --> C["login anthropic<br/>your model"]
-  A -.->|"no account"| D["DSR · PBO · ICIR · HRP"]
+  A -.->|"no account"| D["DSR · PBO (CSCV) · ICIR · HRP"]
   B -.->|"ae_live_"| E["screen · validate · runs"]
   C -.->|"BYOK"| F["plain English in"]
 ```
@@ -269,7 +269,7 @@ A portal that rejects the trace does not fail the run.
 ## What's new in 0.8.0
 
 Named processes, Grinold, and a frozen chart contract. Existing goldens
-(deflated Sharpe, PBO, performance, screen) are byte-identical. New figures
+(deflated Sharpe, PBO via CSCV, performance, screen) are byte-identical. New figures
 are a public contract from this release. The study schema is **1.1**: optional
 `process` and `charts` fields; 1.0 studies still load.
 
@@ -298,7 +298,7 @@ a = grinold_alpha(panel, ic=0.05, vols=vols)  # alpha stays here; missing vols a
 ## What's new in 0.7.0
 
 The daily modelling morning, and the overnight book, without a third
-dependency. Existing goldens (deflated Sharpe, PBO, performance, screen) are
+dependency. Existing goldens (deflated Sharpe, PBO via CSCV, performance, screen) are
 byte-identical. New figures are a public contract from this release.
 
 | You have | You get | Module |
@@ -538,7 +538,7 @@ above exists to copy:
 per-period returns themselves. `sweep` does `np.asarray(list(raw))`, so a dict
 of results iterates its *keys* and fails on the first string.
 
-**Return the same length for every combination.** PBO splits the trial matrix
+**Return the same length for every combination.** PBO via CSCV splits the trial matrix
 into time blocks and compares configurations within each block, which only means
 anything if they line up in time. Ragged output is refused rather than truncated,
 because silently trimming produces a confident number over series that do not
@@ -590,7 +590,7 @@ diffable, and versioned so it still parses in two years.
 
 | Module | Contents |
 |---|---|
-| `alphaengine.core` | deflated Sharpe, PSR, PBO via CSCV, CPCV, minimum track record length, performance and risk |
+| `alphaengine.core` | deflated Sharpe, PSR, PBO via CSCV, `combinatorial_oos_stability`, minimum track record length, performance and risk |
 | `alphaengine.core.panel` | cross-sectional rank, z-score, winsorize, neutralize |
 | `alphaengine.core.signals` | IC, ICIR, quantile returns, decay |
 | `alphaengine.core.cross_section` | Fama-MacBeth, quantile book with turnover |

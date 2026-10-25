@@ -159,7 +159,9 @@ is what a changed figure costs. The API may still move underneath it.
 # prior-work warnings, export `[run_id]`-cited committee memos, discover
 # `alphaengine.plugins` entry points, watch datasets, monitor live drift, and
 # sync with quantOS on opt-in (`ae push` / `ae pull`).
-__version__ = "1.1.0"
+from importlib.metadata import version as _pkg_version
+
+__version__ = _pkg_version("alphaengine")
 
 #: Default workflow/ingest API host until a dedicated qosai.app API host exists.
 #: Overridable via ``ALPHAENGINE_API_URL`` (or ``QUANTOS_API_URL``).

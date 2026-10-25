@@ -8,6 +8,7 @@ does not know how long the next call will take.
 
 from __future__ import annotations
 
+from .._version import __version__
 from ..cli import _pulse, surface_lines
 
 _MARK = "▸"
@@ -20,7 +21,7 @@ def stage_lines(
     stack: list[str] | None = None,
     rows: int = 6,
     cols: int = 64,
-    version: str = "1.0",
+    version: str = __version__,
 ) -> list[str]:
     """One frame. `t` is seconds. A real terminal colours the surface."""
     moving = t * (1.8 if activity else 0.45)

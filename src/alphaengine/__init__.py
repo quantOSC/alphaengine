@@ -24,14 +24,23 @@ WHAT THIS LIBRARY IS NOT
 OFFLINE BY CONSTRUCTION
     Importing this module makes no network call and needs no account. numpy and
     scipy, nothing else. Everything above runs on a laptop with the wifi off.
-    A workflow run can also send a math trace — the formula, its inputs, and
-    the series that line was computed on — to the portal on its own channel.
-    Study ingest still refuses anything series-shaped.
+    Summary figures upload only when you explicitly run a firm CLI workflow or
+    `report()`; full return series upload only with `--share-series`.
 """
 
 from typing import Any
 
 from ._version import __version__
+from .core import (
+    combinatorial_oos_stability,
+    compute_var_cvar,
+    cpcv_score,
+    deflated_sharpe,
+    min_track_record_length,
+    pbo_cscv,
+    performance_report,
+    probabilistic_sharpe_ratio,
+)
 from .study import SCHEMA_VERSION, Study, load, save
 from .sweep import SweepResult, sweep
 
@@ -51,6 +60,14 @@ __all__ = [
     "ReportError",
     "SCHEMA_VERSION",
     "io",
+    "combinatorial_oos_stability",
+    "cpcv_score",
+    "deflated_sharpe",
+    "probabilistic_sharpe_ratio",
+    "min_track_record_length",
+    "pbo_cscv",
+    "performance_report",
+    "compute_var_cvar",
 ]
 
 

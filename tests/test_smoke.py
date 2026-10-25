@@ -9,8 +9,28 @@ import alphaengine
 
 
 def test_version_is_exposed():
+    import importlib.metadata
+    import inspect
+
+    import alphaengine._version as ver_mod
+
     assert isinstance(alphaengine.__version__, str)
-    assert alphaengine.__version__
+    assert alphaengine.__version__ == importlib.metadata.version("alphaengine")
+    src = inspect.getsource(ver_mod)
+    assert "importlib.metadata" in src
+
+
+def test_combinatorial_oos_stability_and_deprecated_cpcv_alias():
+    import pytest
+
+    from alphaengine import combinatorial_oos_stability, cpcv_score
+
+    returns = [0.002 * ((t % 7) - 3) + 0.0005 for t in range(120)]
+    res = combinatorial_oos_stability(returns, n_groups=6, n_test_groups=2)
+    assert "sharpe_annualized" in res
+    with pytest.deprecated_call(match="combinatorial_oos_stability"):
+        alias_res = cpcv_score(returns, n_groups=6, n_test_groups=2)
+    assert alias_res["sharpe_annualized"] == res["sharpe_annualized"]
 
 
 def test_documented_entry_point_is_callable():
