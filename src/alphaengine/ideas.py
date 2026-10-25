@@ -210,13 +210,9 @@ def idea_summary(proj: Project, idea_ref: str) -> dict[str, Any]:
         if str(r.get("idea_id") or "") == iid
         or (not r.get("idea_id") and fam and str(r.get("family") or "") == fam)
     ]
-    cum_trials = sum(
-        int(r["n_trials"])
-        for r in linked
-        if isinstance(r.get("n_trials"), int)
-        and not isinstance(r.get("n_trials"), bool)
-        and int(r["n_trials"]) > 0
-    )
+    from .ledger import cumulative_trials_for
+
+    _fam_t, cum_trials = cumulative_trials_for(proj, idea_id=iid, family=fam)
     latest_run = linked[-1] if linked else None
     latest_figs = dict(latest_run.get("figures") or {}) if latest_run else {}
     current_verdict = latest_run.get("verdict") if latest_run else None

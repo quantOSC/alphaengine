@@ -297,6 +297,12 @@ def run_pipeline(
                     "inputs": step_inputs,
                 },
                 returns_for_deflation=returns_col,
+                already_counted_in_ledger=bool(
+                    upstream_env is not None
+                    and upstream_env.get("n_trials")
+                    and backtest_fn is None
+                    and wf in ("validate_study", "size_position", "stress_study", "monitor_sleeve")
+                ),
             )
             if trial_rows:
                 record_trials(

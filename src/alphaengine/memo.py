@@ -68,7 +68,14 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
     figs = dict((run_rec or {}).get("figures") or {})
     ds_hashes = list((run_rec or {}).get("dataset_hashes") or [])
     primary_hash = ds_hashes[0] if ds_hashes else ""
-    n_trials_val = cum_trials if idea_rec is not None else int((run_rec or {}).get("n_trials") or 0)
+    from .ledger import cumulative_trials_for
+
+    _fam_t, proj_cum_trials = cumulative_trials_for(proj)
+    n_trials_val = max(
+        proj_cum_trials,
+        cum_trials,
+        int((run_rec or {}).get("cumulative_trials") or (run_rec or {}).get("n_trials") or 0),
+    )
     n_trials_src = str((run_rec or {}).get("n_trials_source") or "derived_from_grid")
     failed_count = sum(1 for t in all_trials if t.get("failed") is not None)
 

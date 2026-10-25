@@ -137,14 +137,20 @@ class SweepResult:
             dispersion = float(np.std([t.sharpe for t in ok], ddof=1))
             if math.isfinite(dispersion) and dispersion > 0:
                 trials_sharpe_std = dispersion
+        effective_n = (
+            max(self.n_trials, int(self.cumulative_trials))
+            if self.cumulative_trials is not None
+            else self.n_trials
+        )
         dsr = deflated_sharpe(
             col.tolist(),
-            n_trials=self.n_trials,
+            n_trials=effective_n,
             trials_sharpe_std=trials_sharpe_std,
             risk_free_rate=risk_free_rate,
         )
         out: dict[str, Any] = {
-            "n_trials": self.n_trials,
+            "n_trials": effective_n,
+            "run_n_trials": self.n_trials,
             "n_trials_source": "derived_from_grid",
             "best_trial_index": best.index,
             "best_params_hash": best.params_hash,
@@ -160,16 +166,10 @@ class SweepResult:
         if self.run_id is not None:
             out["run_id"] = self.run_id
         if self.cumulative_trials is not None:
-            out["cumulative_trials"] = self.cumulative_trials
+            out["cumulative_trials"] = effective_n
             out["project_trials"] = self.project_trials
-            cum_dsr = deflated_sharpe(
-                col.tolist(),
-                n_trials=max(self.n_trials, self.cumulative_trials),
-                trials_sharpe_std=trials_sharpe_std,
-                risk_free_rate=risk_free_rate,
-            )
-            out["cumulative_deflated_sharpe"] = cum_dsr.get("deflated_sharpe")
-            out["cumulative_verdict"] = cum_dsr.get("verdict")
+            out["cumulative_deflated_sharpe"] = dsr.get("deflated_sharpe")
+            out["cumulative_verdict"] = dsr.get("verdict")
 
         # Minimum track record length: how long this record must be before the
         # result is distinguishable from luck. Bites universally, and converts
@@ -394,6 +394,8 @@ def sweep(
 
 def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable[Any]]) -> None:
     """When `sweep()` runs inside a `.alphaengine/` project, record the run and trials."""
+    from dataclasses import asdict
+
     from ..ledger import is_auto_sweep_suppressed, record_run, record_trials
     from ..project import find_project
 
@@ -403,8 +405,6 @@ def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable
     if proj is None:
         return
     try:
-        from dataclasses import asdict
-
         grid_serializable = {str(k): list(v) for k, v in grid.items()}
         family = f"sweep:{','.join(result.grid_keys)}" if result.grid_keys else "sweep"
         best = result.best
@@ -444,15 +444,16 @@ def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable
             returns_for_deflation=best_col,
             trials_sharpe_std=trials_std,
         )
-        record_trials(
-            proj,
-            run_id=str(rec["run_id"]),
-            trials=result.ledger(),
-            family=family,
-            timestamp=str(rec["timestamp"]),
-        )
+        if rec.get("duplicate_of") is None:
+            record_trials(
+                proj,
+                run_id=str(rec["run_id"]),
+                trials=result.ledger(),
+                family=family,
+                timestamp=str(rec["timestamp"]),
+            )
         result.run_id = str(rec["run_id"])
         result.cumulative_trials = int(rec["cumulative_trials"])
         result.project_trials = int(rec["project_trials"])
-    except Exception:  # noqa: BLE001 - never break an in-memory sweep on filesystem issues
-        pass
+    except OSError as exc:
+        raise RuntimeError(f"Failed to record sweep in project ledger at {proj.dot_dir}: {exc}") from exc

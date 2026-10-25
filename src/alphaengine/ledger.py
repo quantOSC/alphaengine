@@ -69,20 +69,47 @@ def hash_dataset_any(data: Any) -> list[str]:
         return [sha256_hex(data)]
 
 
+def _run_config_signature(
+    command: str,
+    params_hash: str,
+    dataset_hashes: list[str],
+) -> str:
+    return sha256_hex(
+        {
+            "command": command,
+            "params_hash": params_hash,
+            "dataset_hashes": sorted(str(h) for h in dataset_hashes if h),
+        }
+    )
+
+
 def cumulative_trials_for(
     proj: Project,
     *,
     idea_id: str | None = None,
     family: str | None = None,
 ) -> tuple[int, int]:
-    """Return `(prior_family_or_idea_trials, prior_project_total_trials)` from the ledger."""
+    """Return `(family_or_idea_trials, project_cumulative_trials)` across distinct configs in the ledger."""
     runs = proj.read_jsonl("ledger/runs.jsonl")
     family_total = 0
     project_total = 0
     target_idea = (idea_id or "").strip() or None
     target_family = (family or "").strip() or None
+    seen_configs: set[str] = set()
     for row in runs:
-        n = row.get("n_trials")
+        if row.get("duplicate_of"):
+            continue
+        sig = str(row.get("config_sha256") or "")
+        if not sig:
+            sig = _run_config_signature(
+                str(row.get("command") or ""),
+                str(row.get("params_hash") or ""),
+                list(row.get("dataset_hashes") or []),
+            )
+        if sig in seen_configs:
+            continue
+        seen_configs.add(sig)
+        n = row.get("run_n_trials") if row.get("run_n_trials") is not None else row.get("n_trials")
         count = int(n) if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
         project_total += count
         if (
@@ -140,6 +167,7 @@ def record_run(
     returns_for_deflation: list[float] | None = None,
     trials_sharpe_std: float | None = None,
     run_id: str | None = None,
+    already_counted_in_ledger: bool = False,
 ) -> dict[str, Any]:
     """Write a run record to `.alphaengine/ledger/runs.jsonl` and return the stored dict."""
     ts = datetime.now(timezone.utc).isoformat()
@@ -165,6 +193,21 @@ def record_run(
     resolved_family = (family or "").strip() or idea_family or (resolved_idea_id or "") or command
     idea_id = resolved_idea_id
 
+    config_sha = _run_config_signature(command, params_hash, ds_hashes)
+    existing_runs = proj.read_jsonl("ledger/runs.jsonl")
+    duplicate_of: str | None = None
+    for prev in existing_runs:
+        prev_sig = str(prev.get("config_sha256") or "")
+        if not prev_sig:
+            prev_sig = _run_config_signature(
+                str(prev.get("command") or ""),
+                str(prev.get("params_hash") or ""),
+                list(prev.get("dataset_hashes") or []),
+            )
+        if prev_sig == config_sha:
+            duplicate_of = str(prev.get("run_id") or "")
+            break
+
     prior_fam, prior_proj = cumulative_trials_for(
         proj,
         idea_id=idea_id,
@@ -173,22 +216,37 @@ def record_run(
     this_trials = (
         int(n_trials) if isinstance(n_trials, int) and not isinstance(n_trials, bool) and n_trials > 0 else 0
     )
-    cum_trials = prior_fam + this_trials
-    proj_trials = prior_proj + this_trials
+    added_trials = 0 if (duplicate_of is not None or already_counted_in_ledger) else this_trials
+    # Project-wide cumulative trial ledger feeds every DSR (no per-run or per-family reset)
+    proj_trials = max(prior_proj + added_trials, this_trials if already_counted_in_ledger else 0)
+    fam_trials = max(prior_fam + added_trials, this_trials if already_counted_in_ledger else 0)
+    cum_trials = proj_trials
 
     figs = dict(figures or {})
+    if returns_for_deflation and len(returns_for_deflation) >= 8 and trials_sharpe_std is None:
+        # Preserve trial Sharpe dispersion from the single-run figures if already computed
+        raw_std = figs.get("trials_sharpe_std")
+        if isinstance(raw_std, (int, float)) and not isinstance(raw_std, bool) and float(raw_std) > 0:
+            trials_sharpe_std = float(raw_std)
+
     # Enforce verdict refusal when trial count is not_recorded on validation/sweep runs
     if n_trials_source == "not_recorded":
         if verdict == "edge":
             verdict = None
         figs["n_trials"] = None
+        figs["run_n_trials"] = None
         figs["n_trials_source"] = "not_recorded"
     else:
-        figs.setdefault("n_trials", n_trials)
-        figs.setdefault("n_trials_source", n_trials_source)
+        figs["run_n_trials"] = this_trials
+        if "deflated_sharpe" in figs:
+            figs["run_deflated_sharpe"] = figs["deflated_sharpe"]
+        figs["n_trials"] = cum_trials
+        figs["n_trials_source"] = n_trials_source
 
     figs["cumulative_trials"] = cum_trials
+    figs["family_trials"] = fam_trials
     figs["project_trials"] = proj_trials
+    figs["duplicate_of"] = duplicate_of
 
     if (
         returns_for_deflation
@@ -204,9 +262,14 @@ def record_run(
             trials_sharpe_std=trials_sharpe_std,
         )
         if "deflated_sharpe" in cum_dsr:
+            # Headline DSR, SR0, and verdict use the cumulative trial count everywhere
+            figs["deflated_sharpe"] = cum_dsr["deflated_sharpe"]
+            figs["sr0_expected_max"] = cum_dsr["sr0_expected_max"]
+            figs["verdict"] = cum_dsr["verdict"]
             figs["cumulative_deflated_sharpe"] = cum_dsr["deflated_sharpe"]
             figs["cumulative_sr0_expected_max"] = cum_dsr["sr0_expected_max"]
             figs["cumulative_verdict"] = cum_dsr["verdict"]
+            verdict = str(cum_dsr["verdict"])
 
     record: dict[str, Any] = {
         "run_id": rid,
@@ -216,10 +279,14 @@ def record_run(
         "family": resolved_family,
         "params": clean_params,
         "params_hash": params_hash,
+        "config_sha256": config_sha,
+        "duplicate_of": duplicate_of,
         "dataset_hashes": ds_hashes,
-        "n_trials": n_trials if n_trials_source != "not_recorded" else None,
+        "run_n_trials": this_trials if n_trials_source != "not_recorded" else None,
+        "n_trials": cum_trials if n_trials_source != "not_recorded" else None,
         "n_trials_source": n_trials_source,
         "cumulative_trials": cum_trials,
+        "family_trials": fam_trials,
         "project_trials": proj_trials,
         "figures": figs,
         "verdict": verdict,
@@ -336,8 +403,16 @@ def _flatten_scalars(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in sorted(d.items(), key=lambda item: str(item[0])):
         if k in (
+            "n_trials",
+            "run_n_trials",
+            "run_deflated_sharpe",
+            "deflated_sharpe",
+            "sr0_expected_max",
+            "verdict",
             "cumulative_trials",
+            "family_trials",
             "project_trials",
+            "duplicate_of",
             "cumulative_deflated_sharpe",
             "cumulative_sr0_expected_max",
             "cumulative_verdict",

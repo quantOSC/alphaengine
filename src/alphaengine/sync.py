@@ -116,6 +116,7 @@ def build_sync_payload(proj: Project, *, share_series: bool = False) -> dict[str
     for r in proj.read_jsonl("ledger/runs.jsonl"):
         if r.get("read_only"):
             continue
+        cum_n = r.get("cumulative_trials") if r.get("cumulative_trials") is not None else r.get("n_trials")
         clean_run = {
             "run_id": r.get("run_id"),
             "timestamp": r.get("timestamp"),
@@ -124,10 +125,12 @@ def build_sync_payload(proj: Project, *, share_series: bool = False) -> dict[str
             "family": r.get("family"),
             "params_hash": r.get("params_hash"),
             "dataset_hashes": list(r.get("dataset_hashes") or []),
-            "n_trials": r.get("n_trials"),
+            "n_trials": cum_n if r.get("n_trials_source") != "not_recorded" else None,
+            "run_n_trials": r.get("run_n_trials"),
             "n_trials_source": r.get("n_trials_source"),
-            "cumulative_trials": r.get("cumulative_trials"),
+            "cumulative_trials": cum_n,
             "project_trials": r.get("project_trials"),
+            "duplicate_of": r.get("duplicate_of"),
             "verdict": r.get("verdict"),
             "engine_version": r.get("engine_version") or __version__,
             "object_sha256": r.get("object_sha256"),

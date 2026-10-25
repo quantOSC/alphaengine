@@ -2222,6 +2222,7 @@ def _run_local_in_project(
             family=str(family),
             repro_spec=repro_spec,
             returns_for_deflation=returns_col,
+            already_counted_in_ledger=bool(stdin_in and upstream_env and upstream_env.get("n_trials")),
         )
         if trial_rows:
             record_trials(
@@ -2269,16 +2270,14 @@ def _run_local_in_project(
         say(f"  {green(ON)}  {bold(wf)}  {dim(DOT)}  {env['run_id']}")
         _render_artifact({"figures": {"local": env["figures"]}})
         say("")
-        src_note = dim(f"({env['n_trials_source']})")
-        say(f"  {dim('trials (this run)')}     {env['n_trials']}  {src_note}")
-        say(
-            f"  {dim('trials (cumulative)')}   {env['cumulative_trials']}  "
-            f"{dim('(family ' + str(env['family']) + ', project total ' + str(env['project_trials']) + ')')}"
+        src_note = dim(
+            f"({env['n_trials_source']}, this run {env['figures'].get('run_n_trials', env['n_trials'])})"
         )
-        if env["figures"].get("cumulative_deflated_sharpe") is not None:
+        say(f"  {dim('trials (cumulative)')}   {env['cumulative_trials']}  {src_note}")
+        if env["figures"].get("deflated_sharpe") is not None:
             say(
-                f"  {dim('cumulative DSR')}        {env['figures']['cumulative_deflated_sharpe']}  "
-                f"{dim('(' + str(env['figures'].get('cumulative_verdict') or '') + ')')}"
+                f"  {dim('deflated Sharpe')}       {env['figures']['deflated_sharpe']}  "
+                f"{dim('(' + str(env.get('verdict') or '') + ')')}"
             )
     return 0
 

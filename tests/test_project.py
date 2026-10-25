@@ -132,29 +132,48 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
     # Run 1: `ae validate --project alphaengine.demo --family mom --idea idea_1`
     assert cli.main(["validate", "--project", "alphaengine.demo", "--family", "mom", "--idea", "idea_1"]) == 0
     out1 = capsys.readouterr().out
-    assert "trials (this run)" in out1 and "9" in out1
     assert "trials (cumulative)" in out1 and "9" in out1
 
-    # Run 2: second run on the same idea/family accumulates trials (9 + 9 = 18)
+    # Identical re-run: same config hash must NOT increase cumulative N (stays 9, not 18)
     assert cli.main(["validate", "--project", "alphaengine.demo", "--family", "mom", "--idea", "idea_1"]) == 0
-    out2 = capsys.readouterr().out
-    assert "trials (this run)" in out2 and "9" in out2
-    assert "18" in out2
+    out_dup = capsys.readouterr().out
+    assert "trials (cumulative)" in out_dup and "9" in out_dup
 
-    # Run 3: `ae process ou` on a different family
+    # Distinct config on the same dataset: adds 9 new trials (9 + 9 = 18) and updates headline DSR
+    assert (
+        cli.main(
+            [
+                "validate",
+                "--project",
+                "alphaengine.demo",
+                "--family",
+                "mom",
+                "--idea",
+                "idea_1",
+                "--input",
+                'grid={"fast":[6,12,24],"slow":[60,120,240]}',
+            ]
+        )
+        == 0
+    )
+    out2 = capsys.readouterr().out
+    assert "trials (cumulative)" in out2 and "18" in out2
+
+    # Run 3: `ae process ou` on a different family accumulates into the project-wide ledger (18 + 80 = 98)
     assert cli.main(["process", "ou", "--family", "ou_stress"]) == 0
     out3 = capsys.readouterr().out
-    assert "cumulative trials 80" in out3
+    assert "cumulative trials 98" in out3
 
-    # Direct Python `sweep()` inside a project also records to ledger and accumulates trials
+    # Direct Python `sweep()` inside a project also records to ledger and accumulates trials (98 + 3 = 101)
     r_py = sweep(
         lambda data=None, fast=5: [0.001 * ((i % 5) - 2) for i in range(40)],
         {"fast": [5, 10, 15]},
         data=[100.0 + i for i in range(45)],
     )
     assert r_py.run_id is not None
-    assert r_py.cumulative_trials == 3
-    assert r_py.verdict()["cumulative_trials"] == 3
+    assert r_py.cumulative_trials == 101
+    assert r_py.verdict()["n_trials"] == 101
+    assert r_py.verdict()["cumulative_trials"] == 101
 
     # `ae log` with filters
     assert cli.main(["log", "--idea", "idea_1"]) == 0
@@ -166,13 +185,17 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
     log_fam = capsys.readouterr().out
     assert "process" in log_fam
 
-    # `ae show` on the first and second runs
+    # `ae show` on the first and third runs
     proj = find_project(tmp_path)
     assert proj is not None
     runs = proj.read_jsonl("ledger/runs.jsonl")
-    assert len(runs) == 4
+    assert len(runs) == 5
+    assert runs[1]["duplicate_of"] == runs[0]["run_id"]
+    assert runs[1]["cumulative_trials"] == 9
+    assert runs[2]["cumulative_trials"] == 18
+    assert runs[2]["figures"]["deflated_sharpe"] == runs[2]["figures"]["cumulative_deflated_sharpe"]
     r1_id = str(runs[0]["run_id"])
-    r3_id = str(runs[2]["run_id"])
+    r3_id = str(runs[3]["run_id"])
 
     assert cli.main(["show", r1_id[:8]]) == 0
     show_out = capsys.readouterr().out
@@ -358,11 +381,28 @@ def test_hypotheses_as_objects_kill_rules_and_prior_work_warning(
     run1_out = capsys.readouterr().out
     assert "prior work" not in run1_out
 
-    # 3. Run 2 on the same idea/family: emits prior-work warning!
+    # 3. Run 2 with an identical config emits prior-work warning and does NOT double-count trials (stays 9)
     assert cli.main(["validate", "--project", "alphaengine.demo", "--idea", idea_id]) == 0
     run2_out = capsys.readouterr().out
     assert "prior work" in run2_out
     assert "similar to run_" in run2_out
+
+    # 3b. Run 3 with a distinct grid emits prior-work warning and accumulates trials (9 -> 18)
+    assert (
+        cli.main(
+            [
+                "validate",
+                "--project",
+                "alphaengine.demo",
+                "--idea",
+                idea_id,
+                "--input",
+                'grid={"fast":[7,14,28],"slow":[60,120,240]}',
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
 
     # 4. `ae idea show <id>` shows linked runs, cumulative trials (18), and kill rule TRIGGERED
     assert cli.main(["idea", "show", idea_id]) == 0
