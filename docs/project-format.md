@@ -71,9 +71,11 @@ Each `.jsonl` file under `ledger/`, `data/`, and `ideas/` contains one UTF-8 JSO
 
 ---
 
-## 4. Discovery Rule
+## 4. Discovery Rule & Network Boundary
 
 When any `ae` / `alphaengine` command runs:
 1. It checks the current working directory and each parent directory for `.alphaengine/project.toml`.
 2. If found, the command attaches to that `Project` instance.
-3. If not found, commands that do not strictly require a project (`demo`, `process`, `seal <study.json>`, `report`, `version`, etc.) run in standalone mode without touching the filesystem.
+3. If not found, commands that do not strictly require a project (`demo`, `process`, `verify <study.json>`, `version`, etc.) run in standalone mode without touching the filesystem.
+
+**Network boundary:** The Python library (`import alphaengine`, `sweep`, DSR, PBO via CSCV, `combinatorial_oos_stability`, metrics, loaders), `alphaengine demo`, `alphaengine process`, and `ae verify` make no network calls. Network calls occur only during `login`/`whoami`, firm CLI workflows, `report`, and `seal`/`push`/`pull` against the configured remote. Full return series upload only when `--share-series` is explicitly passed; otherwise the 512-element wire guard rejects any series-length list.

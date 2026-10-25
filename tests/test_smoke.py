@@ -64,22 +64,86 @@ def test_submodule_stays_reachable_explicitly():
     assert runner_sweep is alphaengine.sweep
 
 
-def test_import_makes_no_network_call():
-    """Importing must never reach the network.
+def test_import_and_core_math_make_no_network_call(monkeypatch, tmp_path):
+    """Importing alphaengine and running DSR, PBO via CSCV,
+    combinatorial_oos_stability, metrics, sweep, and loaders must never touch
+    a socket.
 
-    Asserted as a test rather than trusted as a convention: the offline
-    guarantee is the reason a researcher can install this without asking
-    anyone, and it would be easy to break accidentally by adding a client at
-    module scope.
+    Asserted with a real socket blocker rather than trusted as a convention:
+    the offline guarantee is why a researcher can install and run the library
+    without asking anyone.
     """
+    import socket
     import sys
 
+    def _forbid_network(*args, **kwargs):
+        raise RuntimeError("network call forbidden in offline library path")
+
+    monkeypatch.setattr(socket, "socket", _forbid_network)
+    monkeypatch.setattr(socket, "create_connection", _forbid_network)
+
+    from alphaengine import (
+        combinatorial_oos_stability,
+        compute_var_cvar,
+        deflated_sharpe,
+        pbo_cscv,
+        performance_report,
+        sweep,
+    )
+    from alphaengine.io import from_quantconnect, from_vectorbt, load_csv
+
     assert "alphaengine" in sys.modules
-    # No HTTP client should have been pulled in as a side effect of importing.
-    # A transitive dependency importing one of these is the realistic way the
-    # offline claim gets quietly broken.
     for mod in ("requests", "httpx", "urllib3", "aiohttp"):
         assert mod not in sys.modules, f"importing alphaengine dragged in {mod}"
+
+    # 1. DSR
+    returns = [0.002 * ((t % 9) - 4) + 0.0006 for t in range(120)]
+    dsr = deflated_sharpe(returns, n_trials=9)
+    assert "deflated_sharpe" in dsr and 0.0 <= dsr["deflated_sharpe"] <= 1.0
+
+    # 2. PBO via CSCV (T observations x N configs)
+    trial_matrix = [[0.0015 * ((t + k) % 11 - 5) + 0.0002 * k for k in range(8)] for t in range(120)]
+    pbo = pbo_cscv(trial_matrix, n_splits=8)
+    assert "pbo" in pbo and 0.0 <= pbo["pbo"] <= 1.0
+
+    # 3. combinatorial_oos_stability
+    stab = combinatorial_oos_stability(returns, n_groups=6, n_test_groups=2, n_trials=9)
+    assert "sharpe_annualized" in stab and stab["n_paths"] == 15
+
+    # 4. Metrics & risk
+    perf = performance_report(returns)
+    risk = compute_var_cvar(returns)
+    assert "sharpe_annualized" in perf and "cvar" in risk
+
+    # 5. Sweep
+    sr = sweep(
+        lambda *, data, scale: [r * scale for r in data],
+        {"scale": [0.8, 1.0, 1.2]},
+        data=returns,
+    )
+    assert sr.n_trials == 3
+
+    # 6. Loaders (CSV, QuantConnect, VectorBT)
+    csv_path = tmp_path / "prices.csv"
+    csv_path.write_text(
+        "date,AAPL,MSFT\n2025-01-01,100.0,200.0\n2025-01-02,101.0,199.0\n2025-01-03,102.5,202.0\n",
+        encoding="utf-8",
+    )
+    loaded = load_csv(csv_path)
+    assert set(loaded) == {"AAPL", "MSFT"}
+
+    qc_path = tmp_path / "qc.json"
+    qc_path.write_text(
+        '{"Charts": {"Strategy Equity": {"Series": {"Equity": {"Values": ['
+        '{"x": 1704067200, "y": 100000.0}, {"x": 1704153600, "y": 100500.0}, {"x": 1704240000, "y": 101002.5}'
+        "]}}}}}",
+        encoding="utf-8",
+    )
+    qc_study = from_quantconnect(qc_path, n_trials=3)
+    assert len(qc_study.returns) == 2
+
+    vbt_study = from_vectorbt([0.01, -0.005, 0.008], n_trials=3)
+    assert len(vbt_study.returns) == 3
 
 
 def test_report_refuses_a_series_before_it_leaves_the_machine():

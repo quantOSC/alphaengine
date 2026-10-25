@@ -25,10 +25,11 @@ from typing import Any
 import numpy as np
 
 from .core import deflated_sharpe, min_track_record_length, performance_report
+from .loaders import load_csv, load_delimited
 from .study import Study
 from .sweep.runner import _hash_data
 
-__all__ = ["from_quantconnect", "from_vectorbt", "StudyWithReturns"]
+__all__ = ["from_quantconnect", "from_vectorbt", "load_csv", "load_delimited", "StudyWithReturns"]
 
 
 class StudyWithReturns(Study):

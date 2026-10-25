@@ -629,14 +629,15 @@ Study.from_sweep(r, label="momentum, 9 configs").report()
 What crosses is an explicit allowlist: the trial count and how it was obtained,
 a content hash of the data, the verdict, the shape of the neighbourhood, the
 performance figures. Computation runs locally; when you are signed in to
-quantOS, summary figures are reported to your account, and full series are
-shared only if you opt in (`--share-series` or `ALPHAENGINE_SHARE_SERIES=1`).
-Without opt-in, a guard keyed on length (at most 512 elements) refuses to send
+quantOS, summary figures are reported to your account, and full return series
+upload only with `--share-series` (or `ALPHAENGINE_SHARE_SERIES=1`). Without
+`--share-series`, a guard keyed on length (at most 512 elements) refuses to send
 anything series-shaped whatever it is called.
 
-Reporting is the only part of this package that touches a network, so it is the
-only part that is not imported until you call it. `import alphaengine` still
-makes no network call.
+### What uses the network
+
+- **Zero network calls (completely offline):** `import alphaengine`, `sweep()`, `Study.save()`, `Study.load()`, every math primitive in `alphaengine.core` (`deflated_sharpe`, `pbo_cscv`, `combinatorial_oos_stability`, performance, risk, covariance, allocation, process calibration/stress, Grinold), local loaders (`load_csv`, `from_quantconnect`, `from_vectorbt`), `alphaengine demo`, `alphaengine process`, and `ae verify`.
+- **Uses the network (requires a firm `ae_live_` key from Connect):** `login` / `whoami`, CLI workflows (`validate`, `screen`, `diagnose`, `decompose`, `pairs`, `walkforward`, `compare`, `size`, `run`, `workflows`, `runs`, `gaps`, `tonight`), `Study.report()` / `ae report`, and workspace sync (`ae seal` key check, `ae push`, `ae pull`). Full return series upload **only** when `--share-series` is passed.
 
 ## Where this sits in QuantOS
 
