@@ -2,9 +2,8 @@
 
 ## Reporting a vulnerability
 
-Report privately through [GitHub Private Vulnerability Reporting / Security Advisories](https://github.com/quantOSC/alphaengine/security/advisories/new),
-or email **wfe818@gmail.com**. Please don't open a public issue for a
-suspected vulnerability.
+Report privately through [GitHub Private Vulnerability Reporting / Security Advisories](https://github.com/quantOSC/alphaengine/security/advisories/new).
+Please don't open a public issue for a suspected vulnerability.
 
 We'll acknowledge within **3 working days** and give an assessment within **10**.
 If we accept the report we'll agree a disclosure timeline with you and credit
@@ -13,8 +12,8 @@ you in the advisory unless you'd rather we didn't.
 ## What's in scope
 
 This repository: the library, its build, and its release pipeline. The hosted
-platform is a separate system, report issues there to the same address and say
-so.
+platform is a separate system; report issues there through the same private
+vulnerability reporting channel and say so.
 
 ## How this package is built and shipped
 
