@@ -207,11 +207,12 @@ def report(
     import urllib.error
     import urllib.request
 
-    key = os.environ.get(_ENV_KEY, "") if api_key is None else api_key
-    if not key.strip():
-        raise ReportError(
-            f"No API key. Pass api_key=..., or set {_ENV_KEY}. Create one in the portal under Settings."
-        )
+    from ..auth import FirmKeyError, redact_secrets, require_firm_key
+
+    try:
+        key = require_firm_key(api_key)
+    except FirmKeyError as exc:
+        raise ReportError(f"No API key. {exc}") from exc
 
     root = (base_url or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip(
         "/"
@@ -245,7 +246,7 @@ def report(
         # first, which is why the failure to read it is suppressed entirely.
         detail = ""
         with contextlib.suppress(Exception):
-            detail = json.loads(e.read().decode("utf-8")).get("detail", "")
+            detail = redact_secrets(str(json.loads(e.read().decode("utf-8")).get("detail", "")))
         if e.code in (401, 403):
             raise ReportError(
                 f"The key was rejected ({e.code}). It may be revoked, or from a different "
@@ -253,4 +254,5 @@ def report(
             ) from e
         raise ReportError(f"The server refused the study ({e.code}). {detail}".strip()) from e
     except urllib.error.URLError as e:
-        raise ReportError(f"Could not reach {root}: {e.reason}. Your study is still on your disk.") from e
+        reason = redact_secrets(str(e.reason))
+        raise ReportError(f"Could not reach {root}: {reason}. Your study is still on your disk.") from e

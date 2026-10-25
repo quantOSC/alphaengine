@@ -349,11 +349,13 @@ def narration_to(sink: Callable[[str], None]) -> Iterator[None]:
 
 
 def say(*parts: str) -> None:
+    from .auth import redact_secrets
+
     sink = _SINK.get()
     if sink is not None:
-        sink(_ANSI.sub("", " ".join(parts)))
+        sink(redact_secrets(_ANSI.sub("", " ".join(parts))))
         return
-    print(*parts, flush=True)
+    print(*(redact_secrets(str(p)) for p in parts), flush=True)
 
 
 #: Spinner frames. Braille where the stream takes it, ASCII where it does not —
@@ -905,7 +907,14 @@ def _explain_offline(url: str) -> None:
 
 def cmd_init(args: argparse.Namespace) -> int:
     """Create `.alphaengine/` in the target directory (or current directory)."""
+    from .auth import FirmKeyError, require_firm_key
     from .project import PROJECT_FORMAT_VERSION, init_project
+
+    try:
+        require_firm_key(getattr(args, "key", None))
+    except FirmKeyError as exc:
+        say(red(str(exc)))
+        return 2
 
     target = getattr(args, "directory", None) or "."
     name = getattr(args, "name", None)
@@ -1813,12 +1822,28 @@ def _overlap_payload(data: Any, symbol: str) -> dict[str, Any] | None:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from .auth import FirmKeyError, require_firm_key
     from .client import Offline, ServerError
     from .core.relations import KINDS
     from .project import find_project
 
-    proj = find_project()
     wf_str = str(getattr(args, "workflow", "") or "")
+    if (
+        getattr(args, "url", None)
+        and not getattr(args, "json_out", False)
+        and not wf_str.lower().endswith((".yaml", ".yml"))
+        and not getattr(args, "_header_printed", False)
+    ):
+        say(f"{bold(args.workflow)} {dim(DOT + ' ' + resolve_api_url(args.url))}")
+        args._header_printed = True
+
+    try:
+        require_firm_key(getattr(args, "key", None))
+    except FirmKeyError as exc:
+        say(red(str(exc)))
+        return 2
+
+    proj = find_project()
     if wf_str.lower().endswith((".yaml", ".yml")):
         return _cmd_run_pipeline(args, wf_str, proj)
     if wf_str == "monitor_sleeve" and getattr(args, "live", None):
@@ -1886,17 +1911,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         inputs["label"] = args.label
 
     # Inside a local `.alphaengine/` project, or when `--json` / `--stdin` is passed
-    # and no remote `--url` or `--key` was specified, execute locally.
-    if (
-        (proj is not None or getattr(args, "json_out", False) or getattr(args, "stdin_in", False))
-        and getattr(args, "url", None) is None
-        and getattr(args, "key", None) is None
-        and not os.environ.get(_ENV_KEY)
-    ):
+    # and no remote `--url` was specified, execute locally after `require_firm_key()`.
+    if (proj is not None or getattr(args, "json_out", False) or getattr(args, "stdin_in", False)) and getattr(
+        args, "url", None
+    ) is None:
         return _run_local_in_project(args, proj, data=data, backtest_fn=backtest_fn, inputs=inputs)
 
     try:
-        say(f"{bold(args.workflow)} {dim(DOT + ' ' + url)}")
+        if not getattr(args, "_header_printed", False):
+            say(f"{bold(args.workflow)} {dim(DOT + ' ' + url)}")
         catalogue = session.workflows()
         # THE ACCOUNT IS REACHED FOR BEFORE REFUSING — same courtesy as the
         # agent path. `alphaengine run screen_universe`, signed in, with one
@@ -5580,6 +5603,29 @@ def _cmd_monitor_live(args: argparse.Namespace, proj: Any) -> int:
     return 0
 
 
+_GATED_COMMANDS: frozenset[str] = frozenset(
+    {
+        "run",
+        *QUESTION_VERBS.keys(),
+        "init",
+        "log",
+        "show",
+        "diff",
+        "rerun",
+        "watch",
+        "data",
+        "idea",
+        "seal",
+        "report",
+        "remote",
+        "push",
+        "pull",
+        "plugin",
+        "shell",
+    }
+)
+
+
 def main(argv: list[str] | None = None) -> int:
     # SIGN-IN IS RESTORED BEFORE ANYTHING READS A CREDENTIAL, and in exactly one
     # place. Doing it per-command is how `alphaengine run` ends up 401-ing for a
@@ -5588,7 +5634,7 @@ def main(argv: list[str] | None = None) -> int:
     # The environment always wins over the file — CI, a VPC deploy and a
     # colleague's machine all set the variable, and a stale file silently
     # overriding it is a bug that takes a day to find.
-    from .auth import apply_stored
+    from .auth import FirmKeyError, apply_stored, require_firm_key
     from .model import NoModelConfigured
 
     apply_stored()
@@ -5630,7 +5676,19 @@ def main(argv: list[str] | None = None) -> int:
         handlers[verb] = cmd_run
     handler = handlers[args.command]
     try:
+        if args.command in _GATED_COMMANDS:
+            if (
+                args.command in ("run", *QUESTION_VERBS.keys())
+                and getattr(args, "url", None)
+                and not getattr(args, "json_out", False)
+            ):
+                say(f"{bold(args.workflow)} {dim(DOT + ' ' + resolve_api_url(args.url))}")
+                args._header_printed = True
+            require_firm_key(getattr(args, "key", None))
         return handler(args)
+    except FirmKeyError as exc:
+        say(red(str(exc)))
+        return 2
     except KeyboardInterrupt:
         say("")
         return 130

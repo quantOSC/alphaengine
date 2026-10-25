@@ -190,11 +190,12 @@ def push_workspace(
     import urllib.error
     import urllib.request
 
-    key = os.environ.get(_ENV_KEY, "") if api_key is None else api_key
-    if not key.strip():
-        raise ReportError(
-            f"No API key. Pass --key or set {_ENV_KEY} (request access at https://qosai.app/access)."
-        )
+    from .auth import FirmKeyError, redact_secrets, require_firm_key
+
+    try:
+        key = require_firm_key(api_key)
+    except FirmKeyError as exc:
+        raise ReportError(f"No API key. {exc}") from exc
 
     headers = {
         "Content-Type": "application/json",
@@ -259,12 +260,12 @@ def push_workspace(
             }
         detail = ""
         with contextlib.suppress(Exception):
-            detail = json.loads(e.read().decode("utf-8")).get("detail", "")
+            detail = redact_secrets(str(json.loads(e.read().decode("utf-8")).get("detail", "")))
         if e.code in (401, 403):
             raise ReportError(f"The key was rejected ({e.code}). {detail}".strip()) from e
         raise ReportError(f"The server refused sync ({e.code}). {detail}".strip()) from e
     except urllib.error.URLError as e:
-        raise ReportError(f"Could not reach {root}: {e.reason}.") from e
+        raise ReportError(f"Could not reach {root}: {redact_secrets(str(e.reason))}.") from e
 
 
 def pull_workspace(
@@ -279,11 +280,12 @@ def pull_workspace(
     import urllib.error
     import urllib.request
 
-    key = os.environ.get(_ENV_KEY, "") if api_key is None else api_key
-    if not key.strip():
-        raise ReportError(
-            f"No API key. Pass --key or set {_ENV_KEY} (request access at https://qosai.app/access)."
-        )
+    from .auth import FirmKeyError, require_firm_key
+
+    try:
+        key = require_firm_key(api_key)
+    except FirmKeyError as exc:
+        raise ReportError(f"No API key. {exc}") from exc
 
     root = resolve_remote_url(proj, remote_name=remote_name, explicit_url=base_url)
     headers = {

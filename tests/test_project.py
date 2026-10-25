@@ -16,6 +16,13 @@ from alphaengine.project import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _default_firm_key(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "_cfg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "_cfg"))
+    monkeypatch.setenv("QUANTOS_API_KEY", "ae_live_firm_test_key")
+
+
 def test_ae_init_creates_project_layout_and_project_toml(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -107,7 +114,6 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
     from alphaengine import sweep
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     assert cli.main(["init", "--name", "ledger-test"]) == 0
     capsys.readouterr()
 
@@ -194,7 +200,6 @@ def test_dataset_registry_hygiene_checks_and_lineage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     assert cli.main(["init", "--name", "data-test"]) == 0
     capsys.readouterr()
 
@@ -262,7 +267,6 @@ def test_json_envelope_pipes_and_declarative_yaml_pipelines(
 
     root = Path(__file__).resolve().parents[1]
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     assert cli.main(["init", "--name", "pipe-test"]) == 0
     capsys.readouterr()
 
@@ -325,7 +329,6 @@ def test_hypotheses_as_objects_kill_rules_and_prior_work_warning(
     import json
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     assert cli.main(["init", "--name", "idea-test"]) == 0
     capsys.readouterr()
 
@@ -384,7 +387,6 @@ def test_seal_run_or_idea_verify_study_with_data_and_export_memo_md_and_pdf(
     import json
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     assert cli.main(["init", "--name", "seal-memo-test"]) == 0
     capsys.readouterr()
 
@@ -463,7 +465,6 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     from alphaengine.sync import _guard_sync_payload
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     monkeypatch.delenv("ALPHAENGINE_SHARE_SERIES", raising=False)
     assert cli.main(["init", "--name", "sync-test"]) == 0
     capsys.readouterr()
@@ -612,7 +613,6 @@ def test_research_shell_tab_completion_status_line_inline_commands_and_agent_rec
     from alphaengine.repl import SLASH, SessionState, run_shell
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     monkeypatch.setattr("alphaengine.events.data_dir", lambda: tmp_path / "events")
     assert cli.main(["init", "--name", "shell-os"]) == 0
     capsys.readouterr()
@@ -835,7 +835,6 @@ def test_watch_pipeline_reruns_on_dataset_change_and_monitor_live_detects_drift(
     from alphaengine.watch import watch_pipeline
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
     assert cli.main(["init", "--name", "watch-monitor"]) == 0
     capsys.readouterr()
 
@@ -918,3 +917,104 @@ def test_watch_pipeline_reruns_on_dataset_change_and_monitor_live_detects_drift(
     crash_out = capsys.readouterr().out
     assert "drift_flagged" in crash_out
     assert "Research tool, not investment advice." in crash_out
+
+
+def test_require_firm_key_choke_point_keyring_and_no_key_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+    import types
+
+    from alphaengine import auth
+    from alphaengine.auth import FIRM_KEY_ERROR_MESSAGE, FirmKeyError, redact_secrets, require_firm_key
+    from alphaengine.envelope import build_envelope, emit_json
+    from alphaengine.study import Study, save
+
+    monkeypatch.chdir(tmp_path)
+
+    # First create a sealed study file so we can verify `ae verify` works keyless
+    sealed_path = tmp_path / "sealed.json"
+    st = Study(label="keyless verify", n_trials=3, verdict="marginal")
+    st.seal()
+    save(st, sealed_path)
+
+    # Remove all keys
+    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    auth.clear_stored(purge=True)
+
+    with pytest.raises(FirmKeyError) as exc_info:
+        require_firm_key()
+    assert str(exc_info.value) == FIRM_KEY_ERROR_MESSAGE
+
+    # 1. Every gated command refuses without an `ae_live_` key, including `validate` against a dead host
+    gated_invocations = [
+        ["validate", "--url", "http://127.0.0.1:9"],
+        ["validate"],
+        ["screen"],
+        ["diagnose"],
+        ["signal"],
+        ["stress"],
+        ["overlap"],
+        ["size"],
+        ["monitor"],
+        ["run", "validate_study", "--url", "http://127.0.0.1:9"],
+        ["init"],
+        ["log"],
+        ["show", "HEAD"],
+        ["diff", "a", "b"],
+        ["rerun", "HEAD"],
+        ["watch", "pipe.yaml"],
+        ["data", "list"],
+        ["idea", "list"],
+        ["seal", str(sealed_path)],
+        ["report", str(sealed_path)],
+        ["remote", "list"],
+        ["push", "--dry-run"],
+        ["pull"],
+        ["plugin", "list"],
+        ["shell"],
+    ]
+    for argv in gated_invocations:
+        rc = cli.main(argv)
+        out = capsys.readouterr().out
+        assert rc == 2, f"Expected exit 2 without key for {argv}, got {rc}"
+        assert FIRM_KEY_ERROR_MESSAGE in out, f"Missing firm key error message for {argv}: {out}"
+
+    # 2. Free keyless commands (`demo`, `process`, `verify`) succeed without any key
+    assert cli.main(["verify", str(sealed_path)]) == 0
+    assert "Verified." in capsys.readouterr().out
+    assert cli.main(["process", "gbm"]) == 0
+    capsys.readouterr()
+    assert cli.main(["demo"]) == 0
+    capsys.readouterr()
+
+    # 3. OS keychain (`keyring`) storage with 0600 fallback
+    kr_store: dict[tuple[str, str], str] = {}
+    fake_kr = types.ModuleType("keyring")
+    fake_kr.set_password = lambda svc, k, v: kr_store.__setitem__((svc, k), v)  # type: ignore[attr-defined]
+    fake_kr.get_password = lambda svc, k: kr_store.get((svc, k))  # type: ignore[attr-defined]
+    fake_kr.delete_password = lambda svc, k: kr_store.pop((svc, k), None)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "keyring", fake_kr)
+    monkeypatch.setattr(auth, "_ALLOW_KEYRING_IN_TEST", True)
+
+    auth.save_key("QUANTOS_API_KEY", "ae_live_keychain_secret_999")
+    assert kr_store.get(("alphaengine", "QUANTOS_API_KEY")) == "ae_live_keychain_secret_999"
+    assert auth.config_path().is_file()
+    assert require_firm_key() == "ae_live_keychain_secret_999"
+    auth.remove_key("QUANTOS_API_KEY")
+    assert ("alphaengine", "QUANTOS_API_KEY") not in kr_store
+
+    # 4. Key never appears in logs, errors, tracebacks, or `--json` output
+    secret = "ae_live_super_secret_token_123456"
+    assert secret not in redact_secrets(f"Authorization failed for Bearer {secret} in traceback")
+    assert "ae_live_[REDACTED]" in redact_secrets(f"Key={secret}")
+
+    cli.say(f"Error talking to server with key {secret}")
+    say_out = capsys.readouterr().out
+    assert secret not in say_out
+    assert "ae_live_[REDACTED]" in say_out
+
+    emit_json(build_envelope(command="test", figures={"leaked_note": f"used {secret}"}))
+    json_out = capsys.readouterr().out
+    assert secret not in json_out
+    assert "ae_live_[REDACTED]" in json_out

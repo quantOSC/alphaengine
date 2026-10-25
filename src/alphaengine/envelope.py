@@ -84,8 +84,11 @@ def read_stdin_envelope(stream: Any = None) -> dict[str, Any]:
 
 
 def emit_json(envelope: dict[str, Any]) -> None:
-    """Print the JSON result envelope to stdout."""
-    sys.stdout.write(json.dumps(envelope, indent=2, sort_keys=True, default=str) + "\n")
+    """Print the JSON result envelope to stdout, redacting any secret tokens."""
+    from .auth import redact_secrets
+
+    text = json.dumps(envelope, indent=2, sort_keys=True, default=str)
+    sys.stdout.write(redact_secrets(text) + "\n")
     sys.stdout.flush()
 
 

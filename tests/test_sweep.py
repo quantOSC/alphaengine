@@ -344,7 +344,7 @@ def test_cli_seal_and_report_retail_and_default(tmp_path, monkeypatch, capsys):
 
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
-    monkeypatch.delenv("QUANTOS_API_KEY", raising=False)
+    monkeypatch.setenv("QUANTOS_API_KEY", "ae_live_test")
 
     r = sweep(ma_cross, {"fast": [5, 10], "slow": [50]}, data=prices())
     study = Study.from_sweep(r, label="cli study", notes="ready")
