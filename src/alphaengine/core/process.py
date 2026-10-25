@@ -17,6 +17,7 @@ TRIAL COUNT HONESTY. A Monte Carlo stress records `n_trials = n_paths` with
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Any
 
 import numpy as np
@@ -330,7 +331,13 @@ def garch_calibrate(values: Any) -> dict[str, Any]:
     x0 = np.array([var0 * 0.05, 0.05, 0.90], dtype=float)
     bounds = [(1e-18, None), (0.0, 0.999), (0.0, 0.999)]
     cons = {"type": "ineq", "fun": lambda p: 0.998 - p[1] - p[2]}
-    result = minimize(nll, x0, method="SLSQP", bounds=bounds, constraints=cons, tol=1e-12)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Values in x were outside bounds during a minimize step",
+            category=RuntimeWarning,
+        )
+        result = minimize(nll, x0, method="SLSQP", bounds=bounds, constraints=cons, tol=1e-12)
     omega, alpha, beta = result.x if result.success else x0
     omega, alpha, beta = float(omega), float(alpha), float(beta)
     persist = alpha + beta

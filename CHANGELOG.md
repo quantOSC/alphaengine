@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.2] - 2026-10-24
+
+### Fixed
+- **Array-like inputs across validation and metrics (`core/validation.py`, `core/performance.py`, `core/risk.py`):** Replaced truthiness checks (`returns or []`, `if equity_curve:`, `if benchmark_returns:`, `portfolio_returns or []`) with `np.asarray` conversion so `deflated_sharpe`, `min_track_record_length`, `combinatorial_oos_stability` / `cpcv_score`, `pbo_cscv`, `performance_report`, and `compute_var_cvar` accept Python `list`, NumPy `ndarray`, and pandas `Series` / `DataFrame` without raising `ValueError: The truth value of an array/Series is ambiguous`.
+- **Complete `_GATED_COMMANDS` and unified 401/403 refusal (`cli.py`):** Added `workflows`, `runs`, `gaps`, and `tonight` to `_GATED_COMMANDS` so every gated command goes through `require_firm_key()`, and replaced the separate `"Not authenticated"` refusal block with `FIRM_KEY_ERROR_MESSAGE`.
+- **Live-monitor trial accounting (`watch.py`):** `ae monitor <run> --live <file>` (`monitor_live`) now records `n_trials=0` (`already_counted_in_ledger=True`) so out-of-sample live drift checks never inflate the project's cumulative trial count `N`.
+- **Clean SLSQP bounds clipping (`core/process.py`, `core/allocate.py`):** Suppressed the benign SciPy SLSQP bounds-clipping `RuntimeWarning` during GARCH(1,1) and risk-parity optimization.
+
+### Changed
+- **Security policy (`SECURITY.md`):** Replaced personal email contact with [GitHub Private Vulnerability Reporting / Security Advisories](https://github.com/quantOSC/alphaengine/security/advisories/new).
+
 ## [1.1.1] - 2026-10-24
 
 ### Added

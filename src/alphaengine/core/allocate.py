@@ -13,6 +13,7 @@ test, not a hope.
 from __future__ import annotations
 
 import math
+import warnings
 from typing import Any
 
 import numpy as np
@@ -135,7 +136,13 @@ def risk_parity_weights(cov: np.ndarray, *, names: list[str] | None = None) -> d
 
     bounds = [(0.0, 1.0)] * n
     cons = {"type": "eq", "fun": lambda w: float(np.sum(w) - 1.0)}
-    result = minimize(objective, w0, method="SLSQP", bounds=bounds, constraints=cons, tol=1e-12)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="Values in x were outside bounds during a minimize step",
+            category=RuntimeWarning,
+        )
+        result = minimize(objective, w0, method="SLSQP", bounds=bounds, constraints=cons, tol=1e-12)
     raw = np.clip(result.x if result.success else w0, 0.0, None)
     raw = raw / raw.sum()
     weights = _rounded_weights(raw, labels)
