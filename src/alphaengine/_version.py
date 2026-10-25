@@ -146,7 +146,7 @@ is what a changed figure costs. The API may still move underneath it.
 # cross-trial Sharpe dispersion into `deflated_sharpe` per Bailey & López de
 # Prado (2014). `combinatorial_oos_stability` replaces `cpcv_score` (kept as a
 # deprecated alias). Study schema 1.2 adds `content_sha256` sealing, full 64-hex
-# data hashes, `alphaengine seal`, `alphaengine report [--retail]`, and
+# data hashes, `alphaengine seal`, `alphaengine report`, and
 # `alphaengine.io` loaders (`from_quantconnect`, `from_vectorbt`). Series upload
 # on `/traces` is opt-in via `--share-series` or `ALPHAENGINE_SHARE_SERIES=1`.
 # 1.1.0 IS THE LOCAL-FIRST RESEARCH OS. No golden in tests/test_goldens.py

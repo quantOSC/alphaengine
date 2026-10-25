@@ -39,14 +39,13 @@ from .._version import API_URL_ENV, DEFAULT_API_URL, LEGACY_API_URL_ENV
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .schema import Study
 
-__all__ = ["report", "ReportError", "_retail_payload"]
+__all__ = ["report", "ReportError"]
 
 DEFAULT_BASE_URL = DEFAULT_API_URL
 _ENV_KEY = "QUANTOS_API_KEY"
 _ENV_API_URL = API_URL_ENV
 _ENV_URL = LEGACY_API_URL_ENV
 _PATH = "/api/me/runs/ingest"
-_RETAIL_PATH = "/api/retail/ledger/import"
 _TIMEOUT = 30
 
 
@@ -136,35 +135,6 @@ def _payload(
     return {k: v for k, v in out.items() if v is not None}
 
 
-def _retail_payload(
-    study: Study,
-    *,
-    source: str = "AlphaEngine CLI",
-    family: str = "alphaengine_study",
-) -> dict[str, Any]:
-    """Payload for ``POST /api/retail/ledger/import``."""
-    perf = study.performance or {}
-    surf = study.surface or {}
-    sharpe = perf.get("sharpe_annualized")
-    if sharpe is None:
-        sharpe = perf.get("sharpe_ratio")
-    if sharpe is None:
-        sharpe = surf.get("best_sharpe", 0.0)
-    total_ret = perf.get("total_return_pct", 0.0)
-    max_dd = perf.get("max_drawdown_pct", 0.0)
-    n_trials = int(study.n_trials) if study.n_trials and study.n_trials > 0 else 1
-    return {
-        "source": str(source or "AlphaEngine CLI"),
-        "title": str(study.label or "(untitled study)"),
-        "sharpe": float(sharpe or 0.0),
-        "total_return_pct": float(total_ret or 0.0),
-        "max_drawdown_pct": float(max_dd or 0.0),
-        "n_trials_in_import": n_trials,
-        "family": str(family or "alphaengine_study"),
-        "notes": str(study.notes or ""),
-    }
-
-
 def report(
     study: Study,
     *,
@@ -173,9 +143,6 @@ def report(
     timeout: int = _TIMEOUT,
     assignment_id: str | None = None,
     thesis_id: str | None = None,
-    retail: bool = False,
-    source: str = "AlphaEngine CLI",
-    family: str = "alphaengine_study",
 ) -> dict[str, Any]:
     """Send a study to your workspace and return what the server recorded.
 
@@ -189,10 +156,6 @@ def report(
         timeout: seconds before giving up.
         assignment_id: optional portal assignment id this study answers.
         thesis_id: optional portal thesis id this study was run against.
-        retail: when True, posts to ``/api/retail/ledger/import`` instead of
-            ``/api/me/runs/ingest``.
-        source: ``source`` field when ``retail=True``.
-        family: ``family`` field when ``retail=True``.
 
     Raises:
         ReportError: no key, the key was rejected, or the server could not be
@@ -217,15 +180,10 @@ def report(
     root = (base_url or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip(
         "/"
     )
-    if retail:
-        body = _guard(_retail_payload(study, source=source, family=family))
-        target_path = _RETAIL_PATH
-    else:
-        body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
-        target_path = _PATH
+    body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
 
     req = urllib.request.Request(
-        root + target_path,
+        root + _PATH,
         data=json.dumps(body).encode("utf-8"),
         headers={
             "Content-Type": "application/json",

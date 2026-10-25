@@ -248,7 +248,7 @@ ae report memo HEAD --format md
 ## What's new in 1.0.3
 
 - **Opt-in series sharing & 512-element wire guard:** By default, workflow step traces (`/api/harness/runs/{id}/traces`) report scalar figures only; full series are shared only when you pass `--share-series` or set `ALPHAENGINE_SHARE_SERIES=1`.
-- **Sealed studies (schema 1.2) & CLI reporting:** Studies now carry a canonical-JSON SHA-256 seal (`content_sha256`), a full 64-hex `data_hash`, and an optional per-trial ledger (`include_ledger=True`). Use `alphaengine seal <study.json>` to seal or verify a study file, and `alphaengine report <study.json> [--retail]` to ingest into quantOS or the retail experiment ledger.
+- **Sealed studies (schema 1.2) & CLI reporting:** Studies now carry a canonical-JSON SHA-256 seal (`content_sha256`), a full 64-hex `data_hash`, and an optional per-trial ledger (`include_ledger=True`). Use `alphaengine seal <study.json>` to seal or verify a study file, and `alphaengine report <study.json>` to ingest into quantOS.
 - **Math fixes:** `SweepResult.verdict()` passes cross-trial Sharpe dispersion into `deflated_sharpe` per Bailey & López de Prado (2014); `deflated_sharpe(n_trials=1)` returns `psr_vs_zero` with `sr0_expected_max = 0.0` instead of deflating as `N=2`; `combinatorial_oos_stability` replaces `cpcv_score` (kept as a deprecated alias); and `pbo_cscv` validates that `n_splits` is an even integer $\ge 2$.
 - **Interop loaders (`alphaengine.io`):** `from_quantconnect(path)` and `from_vectorbt(portfolio_or_csv)` build a `Study` with returns and preserve trial-count provenance (`"asserted"` vs. `"not_recorded"`).
 
@@ -369,7 +369,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `watch <pipeline.yaml> [--interval SECONDS]` | re-run a declarative pipeline whenever a registered dataset file changes | shell + session |
 | `seal <study.json \| run \| idea>` | write canonical content_sha256 into a study (or seal a project run/idea) | shell + session |
 | `verify <study.json> [--data FILE]` | verify a study.json content_sha256 seal and optionally re-check figures | shell + session |
-| `report <study.json> [--retail] \| memo <idea \| run> [--format md \| pdf]` | send a study to quantOS, or export a cited committee memo (md/pdf) | shell + session |
+| `report <study.json> \| memo <idea \| run> [--format md \| pdf]` | send a study to quantOS (/api/me/runs/ingest), or export a cited committee memo | shell + session |
 | `<anything else>` | ask in plain English; your model picks a workflow and drives it | session |
 | `status` | the current run, and what is loaded | session |
 
@@ -430,7 +430,6 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--limit N` | how many rows to show (default 25) |
 | `--budget N` | how many runs a night is worth (default 3) |
 | `--purge` | remove ~/.config/alphaengine/credentials.json and clean up its config directory |
-| `--retail` | send the study to the retail experiment ledger (/api/retail/ledger/import) |
 | `--name NAME` | name for the initialized project or registered dataset |
 | `--idea ID` | attach the run or filter the log to a local hypothesis id |
 | `--family FAMILY` | strategy or experiment family for cumulative trial counting |
@@ -485,7 +484,6 @@ alphaengine seal HEAD
 alphaengine verify study.json
 alphaengine verify study.json --data prices.csv
 alphaengine report study.json
-alphaengine report study.json --retail
 alphaengine report memo HEAD --format md
 alphaengine models
 alphaengine trace

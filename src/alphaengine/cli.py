@@ -4450,15 +4450,10 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser(
         "report",
         parents=[common],
-        help="send a saved study to quantOS (/api/me/runs/ingest or --retail) or export a memo/PDF",
+        help="send a saved study to quantOS (/api/me/runs/ingest) or export a memo/PDF",
     )
     rp.add_argument("study_path", nargs="?", metavar="study.json", help="path to study.json or 'memo'")
     rp.add_argument("memo_target", nargs="?", default=None, help="idea id or run id for 'report memo'")
-    rp.add_argument(
-        "--retail",
-        action="store_true",
-        help="post to /api/retail/ledger/import instead of /api/me/runs/ingest",
-    )
     rp.add_argument(
         "--format",
         dest="fmt",
@@ -4967,17 +4962,11 @@ def cmd_report_study(args: argparse.Namespace) -> int:
         say(red(f"Refusing to report {path}: content_sha256 seal does not match study content."))
         return 2
 
-    retail = bool(getattr(args, "retail", False))
-    source = str(getattr(args, "source", "AlphaEngine CLI") or "AlphaEngine CLI")
-    family = str(getattr(args, "family", "alphaengine_study") or "alphaengine_study")
     try:
         res = send_report(
             study,
             api_key=getattr(args, "key", None),
             base_url=getattr(args, "url", None),
-            retail=retail,
-            source=source,
-            family=family,
         )
     except ReportError as exc:
         msg = str(exc)
@@ -4991,8 +4980,8 @@ def cmd_report_study(args: argparse.Namespace) -> int:
                 say(dim("  Key set. Run that again."))
         return 2
 
-    target = "/api/retail/ledger/import" if retail else "/api/me/runs/ingest"
-    rec_id = res.get("id") or res.get("study_id") or (res.get("imported") or {}).get("id") or ""
+    target = "/api/me/runs/ingest"
+    rec_id = res.get("id") or res.get("study_id") or ""
     tail = f"  ({rec_id})" if rec_id else ""
     say(green("Reported.") + f"  {study.label or path.name} {ARROW} {target}{tail}")
     return 0

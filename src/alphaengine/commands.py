@@ -104,11 +104,6 @@ FLAGS: dict[str, Flag] = {
         "",
         "remove ~/.config/alphaengine/credentials.json and clean up its config directory",
     ),
-    "retail": Flag(
-        "--retail",
-        "",
-        "send the study to the retail experiment ledger (/api/retail/ledger/import)",
-    ),
     "name": Flag(
         "--name",
         "NAME",
@@ -579,21 +574,19 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="report",
         group="run",
-        args="<study.json> [--retail] | memo <idea | run> [--format md | pdf]",
+        args="<study.json> | memo <idea | run> [--format md | pdf]",
         scope="both",
-        purpose="send a study to quantOS, or export a cited committee memo (md/pdf)",
+        purpose="send a study to quantOS (/api/me/runs/ingest), or export a cited committee memo",
         body=(
-            "Sends a saved `study.json` to your quantOS workspace (`POST /api/me/runs/ingest` "
-            "or `--retail` `/api/retail/ledger/import`).\n\n"
+            "Sends a saved `study.json` to your quantOS workspace (`POST /api/me/runs/ingest`).\n\n"
             "`report memo <idea|run> --format md|pdf` exports a committee-style research "
             "memo where every figure cites its `[run_id]`."
         ),
         examples=(
             "alphaengine report study.json",
-            "alphaengine report study.json --retail",
             "alphaengine report memo HEAD --format md",
         ),
-        flags=("retail", "format", "url", "key"),
+        flags=("format", "url", "key"),
     ),
     Command(
         verb="<anything else>",

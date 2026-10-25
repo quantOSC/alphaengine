@@ -16,7 +16,7 @@ import pytest
 from alphaengine import cli
 from alphaengine.client import Offline, ServerError
 from alphaengine.study import ReportError, Study, save
-from alphaengine.study.report import _guard, _payload, _retail_payload, report
+from alphaengine.study.report import _guard, _payload, report
 from alphaengine.tui import dispatch
 from alphaengine.tui.dispatch import Desk, submit
 
@@ -175,12 +175,6 @@ def test_study_report_error_paths_and_nested_list_guard(monkeypatch: pytest.Monk
     assert payload["charts"][0]["kind"] == "line"
     assert payload["trial_ledger"][0]["params_hash"] == "abc"
     assert _guard({"nested": [{"items": [1, 2, 3]}]})["nested"][0]["items"] == [1, 2, 3]
-
-    # Retail fallback sharpe branches (sharpe_ratio then best_sharpe)
-    s_ratio = Study(label="s1", performance={"sharpe_ratio": 0.42})
-    assert _retail_payload(s_ratio)["sharpe"] == 0.42
-    s_surf = Study(label="s2", surface={"best_sharpe": 1.15})
-    assert _retail_payload(s_surf)["sharpe"] == 1.15
 
     # HTTP 401/403 -> rejected key
     def raise_401(req: Any, timeout: Any = None) -> Any:

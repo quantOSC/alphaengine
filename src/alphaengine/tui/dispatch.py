@@ -564,12 +564,11 @@ def _report_cmd(desk: Desk, rest: str) -> None:
         target_arg = rem[0] if rem else "HEAD"
         cmd_report_study(_ns(desk, study_path="memo", memo_target=target_arg, fmt=fmt_arg or "md"))
         return
-    if tokens and (tokens[0].endswith(".json") or "--retail" in tokens):
+    if tokens and tokens[0].endswith(".json"):
         from ..cli import cmd_report_study
 
         study_path = next((t for t in tokens if not t.startswith("--")), "")
-        retail = "--retail" in tokens
-        cmd_report_study(_ns(desk, study_path=study_path, retail=retail))
+        cmd_report_study(_ns(desk, study_path=study_path))
         return
     if desk.pending_report is not None:
         path = desk.pending_report.save()

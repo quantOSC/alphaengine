@@ -336,7 +336,7 @@ def test_study_seal_full_data_hash_trial_ledger_and_1_1_backward_compat(tmp_path
     assert loaded_v11.verify() is False
 
 
-def test_cli_seal_and_report_retail_and_default(tmp_path, monkeypatch, capsys):
+def test_cli_seal_and_report_default(tmp_path, monkeypatch, capsys):
     import io
     import urllib.request
 
@@ -372,7 +372,7 @@ def test_cli_seal_and_report_retail_and_default(tmp_path, monkeypatch, capsys):
     assert cli.main(["seal", str(tampered_path)]) == 1
     capsys.readouterr()
 
-    # CLI report default -> /api/me/runs/ingest, --retail -> /api/retail/ledger/import
+    # CLI report -> /api/me/runs/ingest
     requests_seen: list[tuple[str, dict]] = []
 
     def fake_urlopen(req, timeout=None):
@@ -385,7 +385,7 @@ def test_cli_seal_and_report_retail_and_default(tmp_path, monkeypatch, capsys):
             def __exit__(self, *exc):
                 return False
 
-        return _Resp(b'{"id": "rec_1", "imported": {"id": "imp_1"}}')
+        return _Resp(b'{"id": "rec_1"}')
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
 
@@ -402,38 +402,12 @@ def test_cli_seal_and_report_retail_and_default(tmp_path, monkeypatch, capsys):
         )
         == 0
     )
-    assert (
-        cli.main(
-            [
-                "report",
-                str(study_path),
-                "--retail",
-                "--key",
-                "ae_live_test",
-                "--url",
-                "https://api.example.invalid",
-            ]
-        )
-        == 0
-    )
     capsys.readouterr()
 
-    assert len(requests_seen) == 2
+    assert len(requests_seen) == 1
     assert requests_seen[0][0] == "https://api.example.invalid/api/me/runs/ingest"
     assert requests_seen[0][1]["content_sha256"] == study.content_sha256
 
-    assert requests_seen[1][0] == "https://api.example.invalid/api/retail/ledger/import"
-    retail_body = requests_seen[1][1]
-    for k in (
-        "source",
-        "title",
-        "sharpe",
-        "total_return_pct",
-        "max_drawdown_pct",
-        "n_trials_in_import",
-        "family",
-        "notes",
-    ):
-        assert k in retail_body
-    assert retail_body["title"] == "cli study"
-    assert retail_body["n_trials_in_import"] == 2
+    # Verify `--retail` flag is rejected by parser
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["report", str(study_path), "--retail"])
