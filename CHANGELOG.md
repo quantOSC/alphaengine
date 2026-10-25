@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.1] - 2026-10-24
+
+### Added
+- **Single firm-key choke point (`alphaengine.auth.require_firm_key`):** Used by every gated command (`run`, `show`, `monitor`/`watch`, `validate`, `screen`, `diagnose`, `signal`, `stress`, `overlap`, `size`, `workflows`, `runs`, `gaps`, `tonight`, and the CLI OS: `init`, `log`, `diff`, `rerun`, `data`, `idea`, `seal`, `report`, `remote`, `push`, `pull`, `plugin`, `shell`). Free and keyless forever: `import alphaengine`, `alphaengine demo`, `alphaengine process`, and `ae verify`.
+- **OS keychain support & key redaction:** `auth.py` stores keys in the OS keychain (`keyring`) when available with `~/.config/alphaengine/credentials.json` (`0600`) as fallback, and `redact_secrets()` strips `ae_live_*` tokens from CLI output, error messages, tracebacks, and `--json` envelopes.
+- **Canonical SHA-256 contract & golden fixture (`alphaengine/contracts/hash_golden.json`):** Unified `content_sha256`, study seals, `.alphaengine/objects/` CAS blobs, dataset hashes, and parameter hashes on `canonical_sha256()` (Schema 1.2 sorted-key JSON, `.8f` float formatting, 64-hex SHA-256). Added `verify_study_mode()` so studies sealed under the pre-1.2 legacy format still verify and are labeled `"legacy"`.
+- **Free vs. Firm documentation (`docs/free-vs-firm.md`):** Documents the offline open-source library boundary, firm `ae_live_` Connect keys, and what uses the network.
+- **Socket-blocked offline smoke test:** Replaced the import-only check in `tests/test_smoke.py` with a socket-blocked test (`socket.socket` and `socket.create_connection` patched to raise) that imports `alphaengine` and executes `deflated_sharpe` (DSR), `pbo_cscv` (PBO via CSCV), `combinatorial_oos_stability`, `performance_report`, `compute_var_cvar`, `sweep`, `load_csv`, `from_quantconnect`, and `from_vectorbt`.
+
+### Changed
+- **Cumulative project-wide trials & DSR everywhere:** Project-wide cumulative trial counts (`project_trials` across `.alphaengine/ledger/trials.jsonl`) now feed every DSR — run output, headline `deflated_sharpe` and `n_trials`, `ae push` payloads, and `ae seal` studies — with no per-run or per-family reset.
+- **Identical re-run deduplication:** Re-running an identical configuration (`command`, `params_hash`, and `dataset_hashes` matching a prior run in `.alphaengine/ledger/runs.jsonl`) records `duplicate_of` and adds `0` new trials (`9 -> 9`), whereas distinct configurations always increment cumulative `N` (`9 -> 18`).
+- **Removed bare `except Exception: pass` in `sweep/runner.py`:** `_maybe_record_project_sweep` now raises a descriptive `RuntimeError` when a discovered `.alphaengine/` project ledger cannot be written.
+- **Metadata-driven `__version__` and naming cleanup:** `__version__` is loaded via `importlib.metadata.version("alphaengine")` with no hardcoded version strings; standardized `combinatorial_oos_stability` (with `cpcv_score` emitting `DeprecationWarning`) and `PBO via CSCV` across docs and top-level exports.
+
+### Removed
+- **Retail CLI path (`--retail` and `/api/retail/ledger/import`):** Removed `--retail` from `report` and CLI dispatch. Retail ledger import is performed via web upload in the quantOS portal.
+
 ## [1.1.0] - 2026-10-24
 
 ### Added

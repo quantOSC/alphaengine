@@ -123,16 +123,15 @@ Each is useful without the one above it. `login` lights the next one.
 
 | Rung | What you need | What you get |
 |---|---|---|
-| **The maths** | nothing | `alphaengine demo`, `alphaengine process`, and the full Python API (`import alphaengine`, `sweep`, `core`), offline, forever. No account. |
-| **Workflows** | a portal-issued `ae_live_` key (`login` or `QUANTOS_API_KEY`; request access at [https://qosai.app/access](https://qosai.app/access)) | The eight workflow commands (`diagnose`, `screen`, `signal`, `validate`, `stress`, `overlap`, `size`, `monitor`) plus `workflows`, `runs`, `gaps`, `tonight`, and `run <workflow>`. |
+| **The maths** | nothing | `alphaengine demo`, `alphaengine process`, `ae verify`, and the full Python API (`import alphaengine`, `sweep`, `core`), offline, forever. No account. |
+| **Firm workflows & CLI OS** | a firm `ae_live_` key from **Connect** in your firm's quantOS portal (`login` or `QUANTOS_API_KEY`; see [docs/free-vs-firm.md](docs/free-vs-firm.md)) | The eight workflow commands (`diagnose`, `screen`, `signal`, `validate`, `stress`, `overlap`, `size`, `monitor`), `workflows`, `runs`, `gaps`, `tonight`, `run <workflow>`, and the Research OS (`init`, `log`, `show`, `diff`, `rerun`, `watch`, `data`, `idea`, `seal`, `report`, `remote`, `push`, `pull`, `plugin`, `shell`). |
 | **Ask anything** | your OWN model key (`login anthropic`) | Plain English in. Runs under your account, not ours. |
 
-The eight workflow commands (`diagnose`, `screen`, `signal`, `validate`,
-`stress`, `overlap`, `size`, `monitor`) and `workflows` / `runs` require a
-portal-issued `ae_live_` key because the workflow graph and account record live
-on the server (request access at [https://qosai.app/access](https://qosai.app/access)).
-`alphaengine demo`, `alphaengine process`, and the Python library (`import alphaengine`)
-work completely offline without an account or key.
+The workflow commands and Research OS require a firm `ae_live_` key issued through
+**Connect** in your firm's quantOS portal (see [docs/free-vs-firm.md](docs/free-vs-firm.md)).
+There is no retail CLI key. `alphaengine demo`, `alphaengine process`, `ae verify`,
+and the Python library (`import alphaengine`) work completely offline without an
+account or key.
 
 **How credentials are handled.** QuantOS never receives your LLM provider key:
 it goes directly from this process to your chosen provider. By default, keys can
@@ -202,11 +201,35 @@ distinction is the whole of the data boundary below.
 
 ---
 
-## Research OS quickstart
+## Quickstart: Offline First, Then Connect for Firms
 
-AlphaEngine works like `git` for quantitative research: initialize a local `.alphaengine/` project once, and every dataset registration, hypothesis, workflow run, parameter sweep, and sealed study is recorded in an append-only content-addressed ledger on your disk (see [project format](docs/project-format.md), [result envelope](docs/result-format.md), and [plugins](docs/plugins.md)). Both `alphaengine` and the short alias `ae` run the same entry point.
+### 1. Free and offline (no account, no API key)
+
+The Python library (`import alphaengine`), every validation and portfolio math primitive, `alphaengine demo`, `alphaengine process`, and `ae verify` run 100% offline with no key (see [Free vs. Firm](docs/free-vs-firm.md)):
 
 ```bash
+pip install alphaengine
+
+# Run the built-in 9-trial parameter sweep and inspect the surface & DSR verdict
+alphaengine demo
+
+# Fit OU, GBM, jump-diffusion, and GARCH(1,1) processes and run DGP stress offline
+alphaengine process
+
+# Verify any sealed Study artifact (Schema 1.2 or legacy) without an account
+ae verify study.json
+```
+
+### 2. Connect for firms (`ae_live_` key from the quantOS portal)
+
+CLI workflows and the local-first Research OS (`ae init`, project ledgers, dataset registry, hypothesis tracking, sealing, memos, and workspace sync) require a firm `ae_live_` key issued through **Connect** in your firm's [quantOS portal](https://qosai.app). There is no retail CLI key or `--retail` flag.
+
+Both `alphaengine` and the short alias `ae` run the same entry point (see [Free vs. Firm](docs/free-vs-firm.md), [project format](docs/project-format.md), [result envelope](docs/result-format.md), and [plugins](docs/plugins.md)):
+
+```bash
+# Sign in with your firm's Connect key (stored in OS keychain or 0600 fallback)
+ae login
+
 # 1. Initialize a local .alphaengine/ workspace
 ae init --name equity-momentum
 
@@ -227,11 +250,23 @@ ae log --family mom_20d
 ae show HEAD
 ae rerun HEAD
 
-# 6. Seal into a Schema 1.2 Study, verify against data, and export a committee memo
+# 6. Seal into a Schema 1.2 Study, verify against data (keyless), and export a committee memo
 ae seal HEAD
 ae verify .alphaengine/studies/HEAD.json
 ae report memo HEAD --format md
 ```
+
+---
+
+## What's new in 1.1.1
+
+- **Single firm-key choke point (`require_firm_key()`):** Every gated CLI workflow (`run`, `validate`, `screen`, `diagnose`, `signal`, `stress`, `overlap`, `size`, `monitor`) and Research OS command (`init`, `log`, `show`, `diff`, `rerun`, `watch`, `data`, `idea`, `seal`, `report`, `remote`, `push`, `pull`, `plugin`, `shell`) validates a firm `ae_live_` key upfront via `alphaengine.auth.require_firm_key()`. The library, `alphaengine demo`, `alphaengine process`, and `ae verify` remain free and keyless.
+- **OS keychain storage & secret redaction:** `auth.py` stores credentials in the OS keychain (`keyring`) when available with `~/.config/alphaengine/credentials.json` (`0600`) as fallback, and automatically redacts `ae_live_*` tokens from CLI output, errors, tracebacks, and `--json` envelopes.
+- **Retail CLI path removed:** Removed `--retail` and `/api/retail/ledger/import` from the CLI; retail ledger import happens via web upload in the quantOS portal.
+- **Unified canonical SHA-256 contract & golden fixture:** `canonical_sha256()` (Schema 1.2 sorted-key JSON with fixed `.8f` float formatting and full 64-hex SHA-256) powers `content_sha256`, study seals, CAS objects, dataset hashes, and parameter hashes. Legacy seals still verify and are labeled `"legacy"`. Shipped `alphaengine/contracts/hash_golden.json` in the wheel for cross-repo verification.
+- **Project-wide cumulative trials & DSR everywhere (with re-run deduplication):** The project-wide cumulative trial ledger feeds every DSR — run output, headline `deflated_sharpe` and `n_trials`, push payloads, and sealed studies — with no per-run or per-family reset. Re-running an identical configuration (`command` + `params_hash` + `dataset_hashes`) records `duplicate_of` and adds `0` new trials (`9 -> 9`), while distinct configurations increment cumulative `N` (`9 -> 18`).
+- **Metadata versioning & socket-blocked offline test:** `__version__` is read from `importlib.metadata.version("alphaengine")` with no hardcoded version strings, `combinatorial_oos_stability` and `PBO via CSCV` naming is standardized throughout, and `tests/test_smoke.py` enforces zero socket calls across DSR, PBO via CSCV, `combinatorial_oos_stability`, metrics, `sweep`, and loaders.
+- **Free vs. Firm guide:** Added [`docs/free-vs-firm.md`](docs/free-vs-firm.md).
 
 ---
 
