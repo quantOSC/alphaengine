@@ -7,8 +7,9 @@ research. There is no windowed GUI: the product is a terminal session (an
 animated parameter-surface canvas at boot and while Working) plus
 `import alphaengine`.
 
-### Environment
+### Environment & Branching
 
+- **Two branches only (`development` and `main`).** All work goes into `development` first and is then merged into `main`. Do not create or keep any other branches.
 - Dependencies live in `.venv` (Python 3.12). Use `.venv/bin/<tool>` or
   `source .venv/bin/activate`. The console script is `.venv/bin/alphaengine`.
 - Installed editable with `dev` and `factors` extras so statsmodels is present.

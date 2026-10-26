@@ -528,7 +528,7 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     # 1. `ae remote add quantos <url>`
     assert cli.main(["remote", "add", "quantos", "https://sync.example.invalid"]) == 0
     rem_out = capsys.readouterr().out
-    assert "https://sync.example.invalid" in rem_out
+    assert rem_out.split()[-1] == "https://sync.example.invalid"
 
     # 2. `ae push --dry-run` prints exact payload without touching network
     assert cli.main(["push", "--dry-run"]) == 0

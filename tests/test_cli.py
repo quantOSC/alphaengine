@@ -1591,7 +1591,7 @@ def test_a_run_is_printed_as_a_url_not_a_bare_id(capsys, monkeypatch):
 
     cli._where_it_lives(_R())
     out = capsys.readouterr().out
-    assert "https://qosai.app/portal/runs/run_abc123" in out
+    assert out.split()[-1] == "https://qosai.app/portal/runs/run_abc123"
 
 
 def test_the_portal_follows_the_api_to_localhost(monkeypatch):

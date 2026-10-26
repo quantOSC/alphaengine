@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.3] - 2026-10-26
+
+### Fixed
+- **CodeQL URL assertion check (`tests/test_project.py`, `tests/test_cli.py`):** Replaced substring URL checks (`"https://..." in out`) with exact token equality (`out.split()[-1] == "https://..."`) to resolve the CodeQL `py/incomplete-url-substring-sanitization` alert.
+
+### Changed
+- **Two-branch workflow (`development` -> `main`):** Configured CI (`ci.yml`) and CodeQL (`codeql.yml`) across `development` and `main`.
+
 ## [1.1.2] - 2026-10-24
 
 ### Fixed
