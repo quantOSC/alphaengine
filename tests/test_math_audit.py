@@ -847,3 +847,100 @@ def test_m6_ledger_monte_carlo_rf_ppy_harvey_liu_icir_and_breadth_ir(tmp_path) -
     br_res = breadth_ir(ic=0.05, n_names=100, independent=True, periods_per_year=12, horizon=1)
     assert br_res["implied_ir_per_period"] == pytest.approx(0.5, abs=1e-6)
     assert br_res["implied_ir_annual"] == pytest.approx(1.732051, abs=1e-6)
+
+
+def test_m7_process_kind_ou_exact_ar1_and_garch_gbm_stress() -> None:
+    """Milestone 7 (M5, M6, M7):
+    - M5: losing equity curve normalized at 1.0 with kind='prices' gives daily log drift
+      -0.0012 +/- 1e-4 (not 0.70), and ambiguous series without kind raises ValueError.
+    - M6: OU simulation uses exact AR(1) map and x_t / x_{t-1} - 1 returns so no simulated
+      price is <= 0 on a theta~100 fixture, and refuses non-mean-reverting series.
+    - M7: GARCH stress includes calibrated mu so an input with annual Sharpe ~ 1.6 produces
+      a GARCH-stress median Sharpe within +/-0.4 of the input (was ~0.02), and GBM stress
+      uses r = exp(mu + sigma * eps) - 1.
+    """
+    from alphaengine.core import dgp_stress, garch_calibrate, gbm_calibrate, jump_calibrate
+    from alphaengine.core.process import _simulate_returns
+
+    # 1. M5: losing equity curve normalized at 1.0 with kind="prices"
+    rng = np.random.default_rng(42)
+    log_rets = rng.normal(-0.0012, 0.008, 500)
+    log_rets = log_rets - log_rets.mean() - 0.0012
+    eq_curve = np.exp(np.r_[0.0, np.cumsum(log_rets)])
+    assert eq_curve[0] == pytest.approx(1.0)
+    assert 0.5 < float(np.median(eq_curve)) < 0.9
+
+    with pytest.raises(ValueError, match="Ambiguous"):
+        gbm_calibrate(eq_curve)
+    with pytest.raises(ValueError, match="Ambiguous"):
+        jump_calibrate(eq_curve)
+    with pytest.raises(ValueError, match="Ambiguous"):
+        garch_calibrate(eq_curve)
+
+    gbm_cal = gbm_calibrate(eq_curve, kind="prices")
+    assert gbm_cal["mu"] == pytest.approx(-0.0012, abs=1e-4)
+
+    # 2. M6: OU stress on theta~100 fixture keeps all simulated prices > 0,
+    # and refuses non-mean-reverting series (no silent kappa=0.1, theta=0, sigma=0.01 defaults)
+    rng_ou = np.random.default_rng(7)
+    n_ou = 600
+    ou_100 = np.empty(n_ou, dtype=float)
+    ou_100[0] = 100.0
+    phi_true = math.exp(-0.15)
+    for t in range(1, n_ou):
+        ou_100[t] = 100.0 * (1.0 - phi_true) + phi_true * ou_100[t - 1] + 2.5 * rng_ou.normal()
+
+    seen_closes: list[np.ndarray] = []
+
+    def _capture_bt(data=None):
+        closes = np.asarray(data["close"], dtype=float)
+        seen_closes.append(closes)
+        return np.diff(closes) / closes[:-1]
+
+    ou_stress = dgp_stress(ou_100, dgp="ou", n_paths=50, seed=7, backtest_fn=_capture_bt)
+    assert ou_stress["n_ok"] == 50
+    assert len(seen_closes) == 50
+    for px_path in seen_closes:
+        assert np.all(px_path > 0.0), "simulated OU price was <= 0"
+
+    # Non-mean-reverting (explosive phi > 1) series is refused
+    explosive = 100.0 * (1.01 ** np.arange(100))
+    with pytest.raises(ValueError, match="not mean-reverting"):
+        dgp_stress(explosive, dgp="ou", n_paths=10, seed=7)
+    with pytest.raises(ValueError, match="not mean-reverting"):
+        _simulate_returns("ou", 50, {"mean_reverting": False, "kappa": None}, np.random.default_rng(1))
+
+    # 3. M7: GARCH stress preserves calibrated drift mu (input Sharpe ~ 1.6 -> median Sharpe within +/-0.4)
+    rng_g = np.random.default_rng(11)
+    n_g = 1500
+    omega_g, alpha_g, beta_g = 2e-6, 0.08, 0.90
+    eps = np.empty(n_g, dtype=float)
+    s2 = omega_g / (1.0 - alpha_g - beta_g)
+    for t in range(n_g):
+        s2 = omega_g + alpha_g * (eps[t - 1] ** 2 if t else s2) + beta_g * s2
+        eps[t] = math.sqrt(s2) * rng_g.normal()
+    # Set drift so annualized Sharpe (excess of 0) is ~ 1.6
+    sd_eps = float(eps.std(ddof=1))
+    target_sr_ann = 1.60
+    r_drifted = eps - eps.mean() + (target_sr_ann / math.sqrt(252.0)) * sd_eps
+    input_sr = float(r_drifted.mean() / r_drifted.std(ddof=1) * math.sqrt(252.0))
+    assert input_sr == pytest.approx(1.60, abs=0.05)
+
+    g_stress = dgp_stress(
+        r_drifted,
+        dgp="garch",
+        kind="returns",
+        n_paths=120,
+        seed=7,
+        risk_free_rate=0.0,
+        periods_per_year=252,
+    )
+    assert g_stress["converged"] is True
+    assert g_stress["mu"] is not None and g_stress["mu"] > 0
+    assert g_stress["sharpe_q50"] == pytest.approx(input_sr, abs=0.4)
+
+    # GBM stress uses r = exp(mu + sigma * eps) - 1
+    rng_gbm_check = np.random.default_rng(99)
+    z_expected = np.random.default_rng(99).normal(0.001, 0.02, 20)
+    r_gbm_sim = _simulate_returns("gbm", 20, {"mu": 0.001, "sigma": 0.02}, rng_gbm_check)
+    np.testing.assert_allclose(r_gbm_sim, np.expm1(z_expected), rtol=0.0, atol=1e-12)

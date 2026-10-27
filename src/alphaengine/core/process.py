@@ -228,19 +228,60 @@ def ou_simulate(
     }
 
 
-def gbm_calibrate(values: Any) -> dict[str, Any]:
+def _extract_returns(values: Any, *, kind: str | None = None) -> np.ndarray:
+    """Extract a 1-D return series from ``values``, given ``kind='prices'|'returns'`` or unambiguous shape.
+
+    Refuses ambiguous series (e.g. a normalized equity curve around 1.0 without
+    an explicit ``kind``) rather than guessing and turning price levels into
+    70% daily returns.
+    """
+    inferred_kind = kind
+    if inferred_kind is None and isinstance(values, dict):
+        if "returns" in values:
+            inferred_kind = "returns"
+        elif "close" in values or "prices" in values:
+            inferred_kind = "prices"
+
+    x = as_series(values)
+    if x.size == 0:
+        return x
+
+    if inferred_kind is not None:
+        k = str(inferred_kind).lower().strip()
+        if k in ("prices", "price"):
+            if np.any(x <= 0):
+                raise ValueError("kind='prices' requires strictly positive values (cannot take log of <= 0).")
+            return np.diff(np.log(x)) if x.size >= 2 else np.asarray([], dtype=float)
+        if k in ("returns", "return"):
+            return x
+        raise ValueError(f"kind must be 'prices' or 'returns', got {kind!r}.")
+
+    # Auto-detect when unambiguous; refuse ambiguous positive series near 1.0
+    med = float(np.median(np.abs(x)))
+    if np.all(x > 0):
+        if med > 1.5:
+            return np.diff(np.log(x)) if x.size >= 2 else np.asarray([], dtype=float)
+        raise ValueError(
+            f"Ambiguous all-positive series with median {med:.4f}; "
+            "pass kind='prices' (e.g. normalized equity curve) or kind='returns' explicitly."
+        )
+    if med > 0.5:
+        raise ValueError(
+            f"Ambiguous series with non-positive values and median |x|={med:.4f}; "
+            "pass kind='prices' or kind='returns' explicitly."
+        )
+    return x
+
+
+def gbm_calibrate(values: Any, *, kind: str | None = None) -> dict[str, Any]:
     """Log-return moments of a price (or return) series. Discrete GBM."""
     x = as_series(values)
-    n = int(x.size)
-    if n < 3:
-        return {"mu": None, "sigma": None, "n_obs": n, "method": "gbm"}
-    if np.all(x > 0) and np.median(np.abs(x)) > 1.0:
-        r = np.diff(np.log(x))
-    else:
-        r = x
+    if x.size < 3 and kind != "returns":
+        return {"mu": None, "sigma": None, "n_obs": int(x.size), "method": "gbm"}
+    r = _extract_returns(values, kind=kind)
     r = r[np.isfinite(r)]
     if r.size < 2:
-        return {"mu": None, "sigma": None, "n_obs": n, "method": "gbm"}
+        return {"mu": None, "sigma": None, "n_obs": int(x.size), "method": "gbm"}
     return {
         "mu": round(float(r.mean()), _RND),
         "sigma": round(float(r.std(ddof=1)), _RND),
@@ -249,7 +290,7 @@ def gbm_calibrate(values: Any) -> dict[str, Any]:
     }
 
 
-def jump_calibrate(values: Any, *, z: float = 3.0) -> dict[str, Any]:
+def jump_calibrate(values: Any, *, z: float = 3.0, kind: str | None = None) -> dict[str, Any]:
     """Merton-style split: diffusion vs rare jumps at |r| > z * robust scale."""
     x = as_series(values)
     n = int(x.size)
@@ -265,10 +306,7 @@ def jump_calibrate(values: Any, *, z: float = 3.0) -> dict[str, Any]:
     }
     if n < MIN_OBS:
         return empty
-    if np.all(x > 0) and np.median(np.abs(x)) > 1.0:
-        r = np.diff(np.log(x))
-    else:
-        r = x
+    r = _extract_returns(values, kind=kind)
     r = r[np.isfinite(r)]
     if r.size < MIN_OBS:
         empty["n_obs"] = int(r.size)
@@ -293,7 +331,7 @@ def jump_calibrate(values: Any, *, z: float = 3.0) -> dict[str, Any]:
     }
 
 
-def garch_calibrate(values: Any, *, maxiter: int | None = None) -> dict[str, Any]:
+def garch_calibrate(values: Any, *, kind: str | None = None, maxiter: int | None = None) -> dict[str, Any]:
     """GARCH(1,1) QMLE fit on percent returns (r * 100), rescaled to decimal units.
 
     Persistence is alpha + beta, clipped below 1. Reports ``converged=False``
@@ -302,13 +340,25 @@ def garch_calibrate(values: Any, *, maxiter: int | None = None) -> dict[str, Any
     the projected gradient norm is large.
     """
     x = as_series(values)
-    if np.all(x > 0) and x.size > 2 and np.median(np.abs(x)) > 1.0:
-        r = np.diff(np.log(x))
-    else:
-        r = x
+    empty_early: dict[str, Any] = {
+        "mu": None,
+        "omega": None,
+        "alpha": None,
+        "beta": None,
+        "persistence": None,
+        "n_obs": int(x.size),
+        "method": "garch",
+        "converged": False,
+        "vol_path": [],
+        "var_path": None,
+    }
+    if x.size < MIN_OBS:
+        return empty_early
+    r = _extract_returns(values, kind=kind)
     r = r[np.isfinite(r)]
     n = int(r.size)
     empty: dict[str, Any] = {
+        "mu": None,
         "omega": None,
         "alpha": None,
         "beta": None,
@@ -399,6 +449,7 @@ def garch_calibrate(values: Any, *, maxiter: int | None = None) -> dict[str, Any
         s2 = omega + alpha * x_t * x_t + beta * s2
     vol = np.sqrt(var_path)
     return {
+        "mu": round(float(r.mean()), _RND),
         "omega": round(omega, _RND),
         "alpha": round(alpha, _RND),
         "beta": round(beta, _RND),
@@ -413,14 +464,29 @@ def garch_calibrate(values: Any, *, maxiter: int | None = None) -> dict[str, Any
 
 def _simulate_returns(dgp: str, n: int, cal: dict[str, Any], rng: np.random.Generator) -> np.ndarray:
     if dgp == "ou":
-        kappa = float(cal.get("kappa") or 0.1)
-        theta = float(cal.get("theta") or 0.0)
-        sigma = float(cal.get("sigma") or 0.01)
-        x = np.empty(n)
+        if (
+            not cal.get("mean_reverting")
+            or cal.get("kappa") is None
+            or cal.get("theta") is None
+            or cal.get("sigma") is None
+        ):
+            raise ValueError("OU calibration is not mean-reverting; refusing to simulate OU paths.")
+        kappa = float(cal["kappa"])
+        theta = float(cal["theta"])
+        sigma = float(cal["sigma"])
+        phi = float(cal.get("phi") if cal.get("phi") is not None else math.exp(-kappa))
+        shock_sd = sigma * math.sqrt(max((1.0 - phi * phi) / (2.0 * kappa), 0.0)) if kappa > 1e-12 else sigma
+        x = np.empty(n + 1, dtype=float)
         x[0] = theta
-        for t in range(1, n):
-            x[t] = x[t - 1] + kappa * (theta - x[t - 1]) + sigma * rng.normal()
-        return np.diff(x, prepend=x[0])
+        z = rng.normal(0.0, 1.0, n)
+        for t in range(1, n + 1):
+            x[t] = theta * (1.0 - phi) + phi * x[t - 1] + shock_sd * z[t - 1]
+        # Convert positive level paths via x_t / x_{t-1} - 1 (flooring positive levels
+        # so simulated prices remain strictly positive), or log-spread paths via exp(dx) - 1.
+        if theta > 0.0:
+            x_pos = np.maximum(x, 1e-8)
+            return x_pos[1:] / x_pos[:-1] - 1.0
+        return np.expm1(np.diff(x))
     if dgp == "jump":
         mu = float(cal.get("mu") or 0.0)
         sig = float(cal.get("sigma") or 0.01)
@@ -432,24 +498,29 @@ def _simulate_returns(dgp: str, n: int, cal: dict[str, Any], rng: np.random.Gene
         r = r + jumps * rng.normal(jmu, max(jsig, 1e-12), n)
         return r
     if dgp == "garch":
+        mu = float(cal.get("mu") or 0.0)
         omega = float(cal.get("omega") or 1e-6)
         alpha = float(cal.get("alpha") or 0.05)
         beta = float(cal.get("beta") or 0.9)
         s2 = omega / max(1.0 - alpha - beta, 1e-6)
-        r = np.empty(n)
+        r = np.empty(n, dtype=float)
+        eps_prev = 0.0
         for t in range(n):
-            s2 = max(omega + alpha * (r[t - 1] ** 2 if t else s2) + beta * s2, 1e-18)
-            r[t] = math.sqrt(s2) * rng.normal()
+            s2 = max(omega + alpha * (eps_prev**2 if t else s2) + beta * s2, 1e-18)
+            eps_t = math.sqrt(s2) * rng.normal()
+            r[t] = mu + eps_t
+            eps_prev = eps_t
         return r
     mu = float(cal.get("mu") or 0.0)
     sig = float(cal.get("sigma") or 0.01)
-    return rng.normal(mu, max(sig, 1e-12), n)
+    return np.expm1(rng.normal(mu, max(sig, 1e-12), n))
 
 
 def dgp_stress(
     values: Any,
     *,
     dgp: str = "gbm",
+    kind: str | None = None,
     n_paths: int = 200,
     seed: int = 7,
     backtest_fn: Any = None,
@@ -469,12 +540,14 @@ def dgp_stress(
         name = "gbm"
     if name == "ou":
         cal = ou_calibrate(x)
+        if not cal.get("mean_reverting"):
+            raise ValueError("OU calibration is not mean-reverting; refusing to run dgp_stress(dgp='ou').")
     elif name == "jump":
-        cal = jump_calibrate(x)
+        cal = jump_calibrate(values, kind=kind)
     elif name == "garch":
-        cal = garch_calibrate(x)
+        cal = garch_calibrate(values, kind=kind)
     else:
-        cal = gbm_calibrate(x)
+        cal = gbm_calibrate(values, kind=kind)
     n = max(int(cal.get("n_obs") or x.size), 2)
     p = max(1, min(int(n_paths), MAX_PATHS))
     rng = np.random.default_rng(int(seed))

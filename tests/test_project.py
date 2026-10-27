@@ -1113,3 +1113,102 @@ def test_canonical_sha256_contract_and_legacy_verifier(
     assert cli.main(["verify", str(leg_path)]) == 0
     ver_out = capsys.readouterr().out
     assert "Verified (legacy)." in ver_out
+
+
+def test_end_to_end_signed_in_runs_sealed_portal_trace_and_rich_pdfs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import io
+    import json
+    import urllib.request
+
+    pytest.importorskip("matplotlib")
+    from alphaengine import auth
+
+    monkeypatch.chdir(tmp_path)
+    auth.save_key("QUANTOS_API_KEY", "ae_live_e2e_firm_key")
+    auth.apply_stored()
+
+    # 1. Signed-in local Research OS workflow runs + sealing + verification
+    assert cli.main(["init", "--name", "e2e-desk"]) == 0
+    assert (
+        cli.main(["idea", "new", "Momentum holds post-cost", "--kill-if", "DSR < 0.9", "--family", "e2e_mom"])
+        == 0
+    )
+    assert (
+        cli.main(["validate", "--project", "alphaengine.demo", "--idea", "idea_1", "--family", "e2e_mom"])
+        == 0
+    )
+    assert cli.main(["seal", "HEAD"]) == 0
+    capsys.readouterr()
+
+    sealed_files = list((tmp_path / ".alphaengine" / "studies").glob("*.json"))
+    assert len(sealed_files) == 1
+    sealed_file = sealed_files[0]
+    assert cli.main(["verify", str(sealed_file)]) == 0
+    assert "Verified." in capsys.readouterr().out
+
+    # 2. Send sealed study & workspace sync & math trace to portal
+    portal_calls: list[tuple[str, dict]] = []
+
+    def fake_portal_urlopen(req, timeout=None):
+        body = json.loads(req.data.decode("utf-8")) if req.data else {}
+        portal_calls.append((req.full_url, body))
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Resp(b'{"ok": true, "id": "run_portal_1", "study_id": "st_portal_1"}')
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_portal_urlopen)
+    assert cli.main(["remote", "add", "quantos", "https://portal.example.invalid"]) == 0
+    assert cli.main(["report", str(sealed_file), "--url", "https://portal.example.invalid"]) == 0
+    assert cli.main(["push"]) == 0
+    capsys.readouterr()
+
+    urls = [u for u, _ in portal_calls]
+    assert "https://portal.example.invalid/api/me/runs/ingest" in urls
+    assert "https://portal.example.invalid/api/workspace/sync" in urls
+    ingest_body = [b for u, b in portal_calls if u.endswith("/api/me/runs/ingest")][0]
+    assert ingest_body["content_sha256"] and len(ingest_body["content_sha256"]) == 64
+    assert ingest_body["n_trials"] == 9
+
+    # Also verify portal math trace reporting (/api/harness/runs/{id}/traces)
+    from alphaengine.client import StepExecutor
+    from alphaengine.client.session import Run, Session
+
+    sess = Session("https://portal.example.invalid", api_key="ae_live_e2e_firm_key", share_series=True)
+    ex = StepExecutor(data=[0.002 * ((i % 7) - 3) + 0.0005 for i in range(60)])
+    ex.execute("compute.deflated_sharpe", {"n_trials": 9})
+    assert ex.last_lines
+    wf_run = Run(
+        session=sess,
+        run_id="run_portal_1",
+        executor=ex,
+    )
+    wf_run._report_trace({"step_id": "s1", "op": "compute.deflated_sharpe"}, "att_1")
+    trace_reqs = [b for u, b in portal_calls if u.endswith("/api/harness/runs/run_portal_1/traces")]
+    assert len(trace_reqs) == 1
+    assert trace_reqs[0]["lines"][0]["id"] == "deflated_sharpe"
+    assert "series" in trace_reqs[0]["lines"][0]
+
+    # 3. Rich exported PDFs: committee memo PDF and multi-page charted portfolio/stress/MC/bakeoff PDF
+    assert cli.main(["report", "memo", "HEAD", "--format", "pdf"]) == 0
+    capsys.readouterr()
+    memo_pdfs = list((tmp_path / ".alphaengine" / "studies").glob("memo_*.pdf"))
+    assert len(memo_pdfs) == 1
+    assert memo_pdfs[0].read_bytes().startswith(b"%PDF")
+    assert memo_pdfs[0].stat().st_size > 2000
+
+    (tmp_path / "downloads").mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("alphaengine.agent.sim.downloads_dir", lambda: tmp_path / "downloads")
+    assert cli.main(["report"]) == 0
+    capsys.readouterr()
+    rich_pdfs = list((tmp_path / "downloads").glob("*.pdf"))
+    assert len(rich_pdfs) == 1
+    assert rich_pdfs[0].read_bytes().startswith(b"%PDF")
+    assert rich_pdfs[0].stat().st_size > 10000

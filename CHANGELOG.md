@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.10] - 2026-10-27
+
+### Fixed
+- **Explicit `kind="prices"|"returns"` and ambiguity refusal (`core/process.py` — M5):** Added `kind="prices"|"returns"` to `gbm_calibrate`, `jump_calibrate`, `garch_calibrate`, and `dgp_stress` via `_extract_returns`, refusing ambiguous all-positive series near `1.0` when `kind` is omitted. On a losing equity curve normalized at `1.0` (`median ~ 0.692`) with `kind="prices"`, daily log drift `mu` moves `0.692 -> -0.0012`.
+- **Exact AR(1) OU stress simulation and non-stationary refusal (`core/process.py` — M6):** `_simulate_returns("ou", ...)` and `dgp_stress(..., dgp="ou")` now refuse non-mean-reverting calibrations instead of falling back to `kappa=0.1, theta=0, sigma=0.01`, simulate OU paths using the exact AR(1) transition $X_t = \theta(1-\phi) + \phi X_{t-1} + \sigma\sqrt{(1-\phi^2)/(2\kappa)}Z_t$, and convert positive levels to simple returns via $X_t / X_{t-1} - 1$ so simulated prices remain strictly positive on $\theta \approx 100$ fixtures.
+- **Calibrated drift $\mu$ in GARCH stress and exact log-normal GBM returns (`core/process.py` — M7):** Recorded `mu` in `garch_calibrate`, added `mu` to simulated GARCH innovations in `_simulate_returns("garch", ...)` (moving `sharpe_q50` on a `Sharpe=1.60` GARCH fixture from `~0.02 -> ~1.58`), and updated GBM simulation to use $r_t = \exp(\mu + \sigma \varepsilon_t) - 1$.
+
 ## [1.1.9] - 2026-10-27
 
 ### Fixed
