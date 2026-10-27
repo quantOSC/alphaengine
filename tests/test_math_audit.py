@@ -542,3 +542,62 @@ def test_correlated_trials_dsr_luck_bar_audit_case_and_n_eff_participation() -> 
     assert v["run_n_trials"] == 3
     assert "n_eff_participation" in v and v["n_eff_participation"] >= 1.0
     assert "deflated_sharpe_at_n_eff" in v and isinstance(v["deflated_sharpe_at_n_eff"], float)
+
+
+def _sim_garch_path(seed: int, n: int = 3000, omega: float = 2e-6, alpha: float = 0.08, beta: float = 0.90):
+    rng = np.random.default_rng(seed)
+    r = np.empty(n, dtype=float)
+    s2 = omega / (1.0 - alpha - beta)
+    for t in range(n):
+        s2 = omega + alpha * (r[t - 1] ** 2 if t else s2) + beta * s2
+        r[t] = math.sqrt(s2) * rng.normal()
+    return r
+
+
+def test_garch_calibrate_six_seeded_paths_and_hardcoded_arch_parity() -> None:
+    """Milestone 3 (H2): 6 seeded GARCH(1,1) paths (n=3000, alpha=0.08, beta=0.90),
+    hardcoded arch reference comparison on seed=1, and maxiter=0 non-convergence.
+    """
+    from alphaengine.core import dgp_stress, garch_calibrate, vol_target
+
+    for seed in range(1, 7):
+        r = _sim_garch_path(seed)
+        cal = garch_calibrate(r)
+        assert cal["converged"] is True
+        assert 0.05 <= cal["alpha"] <= 0.11
+        assert 0.86 <= cal["beta"] <= 0.94
+        assert not (abs(cal["alpha"] - 0.05) < 1e-6 and abs(cal["beta"] - 0.90) < 1e-6)
+
+    # Hardcoded arch reference on seed=1: arch_model(r*100, vol="GARCH", p=1, q=1, mean="Zero")
+    # gives alpha[1] = 0.086216, beta[1] = 0.893527
+    r1 = _sim_garch_path(1)
+    cal1 = garch_calibrate(r1)
+    assert cal1["alpha"] == pytest.approx(0.086216, abs=0.01)
+    assert cal1["beta"] == pytest.approx(0.893527, abs=0.01)
+
+    # Propagates converged=True to vol_target(method="garch") and dgp_stress(dgp="garch")
+    vt_ok = vol_target(r1, method="garch")
+    assert vt_ok["converged"] is True
+    assert vt_ok["method"] == "garch"
+    st_ok = dgp_stress(r1, dgp="garch", n_paths=20, seed=7)
+    assert st_ok["converged"] is True
+
+    # Forced optimizer failure (maxiter=0) reports converged=False and never returns x0
+    cal_fail = garch_calibrate(r1, maxiter=0)
+    assert cal_fail["converged"] is False
+    assert cal_fail["alpha"] is None and cal_fail["beta"] is None
+    vt_fail = vol_target(r1, method="garch", garch_var=cal_fail)
+    assert vt_fail["converged"] is False
+
+
+def test_garch_calibrate_matches_live_arch_package() -> None:
+    """Milestone 3 (H2): live comparison against arch.arch_model on seed=1."""
+    arch_mod = pytest.importorskip("arch")
+    from alphaengine.core import garch_calibrate
+
+    r1 = _sim_garch_path(1)
+    am = arch_mod.arch_model(r1 * 100.0, vol="GARCH", p=1, q=1, mean="Zero").fit(disp="off")
+    cal = garch_calibrate(r1)
+    assert cal["converged"] is True
+    assert cal["alpha"] == pytest.approx(float(am.params["alpha[1]"]), abs=0.01)
+    assert cal["beta"] == pytest.approx(float(am.params["beta[1]"]), abs=0.01)

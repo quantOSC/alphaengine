@@ -293,8 +293,14 @@ def jump_calibrate(values: Any, *, z: float = 3.0) -> dict[str, Any]:
     }
 
 
-def garch_calibrate(values: Any) -> dict[str, Any]:
-    """GARCH(1,1) QMLE. Persistence is alpha+beta, clipped below 1."""
+def garch_calibrate(values: Any, *, maxiter: int | None = None) -> dict[str, Any]:
+    """GARCH(1,1) QMLE fit on percent returns (r * 100), rescaled to decimal units.
+
+    Persistence is alpha + beta, clipped below 1. Reports ``converged=False``
+    (and ``None`` parameter estimates, never silently returning ``x0``) when
+    SLSQP fails, when fitted parameters stay within ``1e-6`` of ``x0``, or when
+    the projected gradient norm is large.
+    """
     x = as_series(values)
     if np.all(x > 0) and x.size > 2 and np.median(np.abs(x)) > 1.0:
         r = np.diff(np.log(x))
@@ -302,44 +308,88 @@ def garch_calibrate(values: Any) -> dict[str, Any]:
         r = x
     r = r[np.isfinite(r)]
     n = int(r.size)
-    empty = {
+    empty: dict[str, Any] = {
         "omega": None,
         "alpha": None,
         "beta": None,
         "persistence": None,
         "n_obs": n,
         "method": "garch",
+        "converged": False,
         "vol_path": [],
         "var_path": None,
     }
     if n < MIN_OBS:
         return empty
-    var0 = float(np.mean(r**2))
+
+    # Fit on percent returns (r * 100) so omega, alpha, and beta are O(0.01..1.0),
+    # then rescale omega and var_path by 1e-4 back to decimal return units.
+    r_pct = r * 100.0
+    var0_pct = float(np.mean(r_pct**2))
+    if not math.isfinite(var0_pct) or var0_pct <= 1e-18:
+        return empty
+    r2_pct = r_pct**2
 
     def nll(p: np.ndarray) -> float:
-        omega, alpha, beta = float(p[0]), float(p[1]), float(p[2])
-        if omega <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 0.999:
+        omega_p, alpha, beta = float(p[0]), float(p[1]), float(p[2])
+        if omega_p <= 0 or alpha < 0 or beta < 0 or alpha + beta >= 0.999:
             return 1e12
-        s2 = var0
+        s2 = var0_pct
         acc = 0.0
-        for x_t in r:
-            s2 = max(s2, 1e-18)
-            acc += math.log(s2) + (x_t * x_t) / s2
-            s2 = omega + alpha * x_t * x_t + beta * s2
+        for x2_t in r2_pct:
+            s2 = max(s2, 1e-12)
+            acc += math.log(s2) + x2_t / s2
+            s2 = omega_p + alpha * x2_t + beta * s2
         return 0.5 * acc
 
-    x0 = np.array([var0 * 0.05, 0.05, 0.90], dtype=float)
-    bounds = [(1e-18, None), (0.0, 0.999), (0.0, 0.999)]
+    x0 = np.array([var0_pct * 0.05, 0.05, 0.90], dtype=float)
+    if maxiter is not None and int(maxiter) <= 0:
+        return empty
+
+    bounds = [(1e-8, None), (0.0, 0.999), (0.0, 0.999)]
     cons = {"type": "ineq", "fun": lambda p: 0.998 - p[1] - p[2]}
+    opts = {"maxiter": int(maxiter)} if maxiter is not None else None
     with warnings.catch_warnings():
         warnings.filterwarnings(
             "ignore",
             message="Values in x were outside bounds during a minimize step",
             category=RuntimeWarning,
         )
-        result = minimize(nll, x0, method="SLSQP", bounds=bounds, constraints=cons, tol=1e-12)
-    omega, alpha, beta = result.x if result.success else x0
-    omega, alpha, beta = float(omega), float(alpha), float(beta)
+        result = minimize(
+            nll,
+            x0,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=cons,
+            tol=1e-8,
+            options=opts,
+        )
+
+    p_hat = np.asarray(result.x, dtype=float)
+    moved_from_x0 = not np.allclose(p_hat, x0, atol=1e-6, rtol=0.0)
+    proj_grad_ok = False
+    if hasattr(result, "jac") and result.jac is not None:
+        g = np.asarray(result.jac, dtype=float).copy()
+        if g.size == 3 and np.all(np.isfinite(g)):
+            for idx, (lb, ub) in enumerate(bounds):
+                if lb is not None and p_hat[idx] <= lb + 1e-6 and g[idx] > 0:
+                    g[idx] = 0.0
+                if ub is not None and p_hat[idx] >= ub - 1e-6 and g[idx] < 0:
+                    g[idx] = 0.0
+            if p_hat[1] + p_hat[2] >= 0.998 - 1e-5 and (g[1] + g[2]) < 0:
+                tang = 0.5 * (g[1] - g[2])
+                g[1] = tang
+                g[2] = -tang
+            proj_grad_norm = float(np.linalg.norm(g) / max(n, 1))
+            proj_grad_ok = math.isfinite(proj_grad_norm) and proj_grad_norm < 1e-2
+
+    converged = bool(result.success) and moved_from_x0 and proj_grad_ok
+    if not converged:
+        return empty
+
+    omega_pct, alpha, beta = float(p_hat[0]), float(p_hat[1]), float(p_hat[2])
+    omega = omega_pct * 1e-4
+    var0 = var0_pct * 1e-4
     persist = alpha + beta
     s2 = var0
     var_path = np.empty(n)
@@ -355,7 +405,7 @@ def garch_calibrate(values: Any) -> dict[str, Any]:
         "persistence": round(persist, _RND),
         "n_obs": n,
         "method": "garch",
-        "converged": bool(result.success),
+        "converged": True,
         "vol_path": sketch_curve(vol),
         "var_path": var_path,
     }
@@ -429,24 +479,26 @@ def dgp_stress(
     p = max(1, min(int(n_paths), MAX_PATHS))
     rng = np.random.default_rng(int(seed))
     sharpes: list[float] = []
-    for _ in range(p):
-        r = _simulate_returns(name, n, cal, rng)
-        if backtest_fn is not None:
-            px = 100.0 * np.cumprod(1.0 + r)
-            try:
-                raw = backtest_fn(data={"close": px.tolist()})
-                series = as_series(raw)
-                s = (
-                    _sharpe(series, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
-                    if series.size
-                    else _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
-                )
-            except Exception:
+    can_simulate = not (name == "garch" and not cal.get("converged", False))
+    if can_simulate:
+        for _ in range(p):
+            r = _simulate_returns(name, n, cal, rng)
+            if backtest_fn is not None:
+                px = 100.0 * np.cumprod(1.0 + r)
+                try:
+                    raw = backtest_fn(data={"close": px.tolist()})
+                    series = as_series(raw)
+                    s = (
+                        _sharpe(series, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
+                        if series.size
+                        else _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
+                    )
+                except Exception:
+                    s = _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
+            else:
                 s = _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
-        else:
-            s = _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year)
-        if s is not None and math.isfinite(s):
-            sharpes.append(float(s))
+            if s is not None and math.isfinite(s):
+                sharpes.append(float(s))
     arr = np.asarray(sharpes, dtype=float)
     q = np.quantile(arr, [0.10, 0.50, 0.90]) if arr.size else [None, None, None]
     pos = float(np.mean(arr > 0)) if arr.size else None

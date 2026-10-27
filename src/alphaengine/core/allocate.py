@@ -167,19 +167,21 @@ def vol_target(
     ewma_lambda: float = 0.94,
     periods_per_year: int = 252,
     method: str = "ewma",
-    garch_var: np.ndarray | list[float] | None = None,
+    garch_var: np.ndarray | list[float] | dict[str, Any] | None = None,
+    garch_converged: bool | None = None,
 ) -> dict[str, Any]:
     """Scalar overlay: leverage so forecast vol matches `target` (annualised).
 
     `method=ewma` is RiskMetrics. `method=garch` uses a supplied GARCH variance
-    path, or EWMA if none was given so a missing calibration cannot explode.
+    path, or calibrates GARCH(1,1) on `returns` when none is supplied, falling
+    back to EWMA with ``converged=False`` when GARCH calibration does not converge.
     """
     r = np.asarray(returns, dtype=float).reshape(-1)
     r = r[np.isfinite(r)]
     n = int(r.size)
     how = str(method or "ewma").lower()
     if n < 2:
-        return {
+        out_short: dict[str, Any] = {
             "target": float(target),
             "n_obs": n,
             "mean_leverage": None,
@@ -187,14 +189,34 @@ def vol_target(
             "ewma_lambda": float(ewma_lambda),
             "method": how,
         }
+        if how == "garch":
+            out_short["converged"] = False
+        return out_short
     ppy = max(int(periods_per_year), 1)
     tgt = float(target)
     gvar = None
-    if garch_var is not None:
-        gvar = np.asarray(garch_var, dtype=float).reshape(-1)
-        if gvar.size != n:
+    conv = garch_converged
+    if how == "garch":
+        if isinstance(garch_var, dict):
+            conv = bool(garch_var.get("converged", False)) if conv is None else bool(conv)
+            raw_vp = garch_var.get("var_path")
+            if raw_vp is not None:
+                gvar = np.asarray(raw_vp, dtype=float).reshape(-1)
+        elif garch_var is not None:
+            gvar = np.asarray(garch_var, dtype=float).reshape(-1)
+            if conv is None:
+                conv = bool(gvar.size == n)
+        else:
+            from .process import garch_calibrate
+
+            cal = garch_calibrate(r)
+            conv = bool(cal.get("converged", False)) if conv is None else bool(conv)
+            if cal.get("var_path") is not None:
+                gvar = np.asarray(cal["var_path"], dtype=float).reshape(-1)
+        if gvar is not None and gvar.size != n:
             gvar = None
-    if how == "garch" and gvar is not None:
+            conv = False
+    if how == "garch" and gvar is not None and conv is not False:
         vol_ann = np.sqrt(np.clip(gvar, 0.0, None) * ppy)
         leverages = np.where(vol_ann <= 1e-12, 0.0, tgt / vol_ann)
         scaled = r * leverages
@@ -208,6 +230,7 @@ def vol_target(
             "periods_per_year": ppy,
             "max_leverage": round(float(leverages.max()), _RND),
             "method": "garch",
+            "converged": True,
         }
     lam = min(max(float(ewma_lambda), 1e-6), 0.999999)
     warm = min(20, n)
@@ -221,7 +244,7 @@ def vol_target(
         leverages[i] = lev
         scaled[i] = x * lev
     realized = float(scaled.std(ddof=1) * math.sqrt(ppy)) if n > 1 else None
-    return {
+    out_ewma: dict[str, Any] = {
         "target": tgt,
         "n_obs": n,
         "mean_leverage": round(float(leverages.mean()), _RND),
@@ -231,6 +254,9 @@ def vol_target(
         "max_leverage": round(float(leverages.max()), _RND),
         "method": "ewma" if how != "garch" else "ewma",
     }
+    if how == "garch":
+        out_ewma["converged"] = False
+    return out_ewma
 
 
 def cov_from_returns(

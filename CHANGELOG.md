@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.6] - 2026-10-27
+
+### Fixed
+- **GARCH(1,1) percent-return scaling and convergence honesty (`core/process.py`, `core/allocate.py` — H2):**
+  - Fit `garch_calibrate` on percent returns (`r * 100`, `tol=1e-8`) and rescale $\omega$ and `var_path` by $10^{-4}$ back to decimal units. Previously fitting on decimal returns (`var0 ~ 1e-4, tol=1e-12`) caused SLSQP to stall at the initial guess `x0 = (0.05*var0, 0.05, 0.90)` on 4 of 6 seeded GARCH(1,1) paths (`n=3000, \alpha=0.08, \beta=0.90`); all 6 now converge with $\alpha \in [0.0622, 0.0878]$ and $\beta \in [0.8869, 0.9161]$ (on `seed=1`: `(0.05, 0.90) -> (0.087844, 0.891434)`, matching `arch` `(0.086216, 0.893527)` within $\pm 0.003$).
+  - Report `converged=False` (and `None` parameters rather than silently returning `x0`) when SLSQP fails, when fitted parameters stay within `1e-6` of `x0`, or when the projected gradient norm is large, and propagate `converged` to `vol_target(method="garch")` and `dgp_stress(dgp="garch")`.
+  - Added `arch>=7.0` to the `dev` optional extra for reference parity tests (`runtime` dependencies remain `numpy` and `scipy` only).
+
 ## [1.1.5] - 2026-10-27
 
 ### Fixed

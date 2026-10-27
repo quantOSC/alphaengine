@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "alphaengine"
-version = "1.1.5"
+version = "1.1.6"
 description = "Validated research tooling for investment strategies: deflation, overfitting detection, and honest trial counts."
 readme = "README.md"
 license = "Apache-2.0"
@@ -104,6 +104,7 @@ dev = [
     "statsmodels>=0.14",
     "textual>=1.0",
     "matplotlib>=3.8",
+    "arch>=7.0",
 ]
 
 [project.urls]
@@ -192,5 +193,5 @@ ignore_missing_imports = true
 # import is an error, so this is the difference between a build that passes on a
 # machine that happens to have them and one that passes anywhere.
 [[tool.mypy.overrides]]
-module = ["scipy.*", "statsmodels.*", "pyarrow.*", "httpx", "textual.*", "matplotlib.*"]
+module = ["scipy.*", "statsmodels.*", "pyarrow.*", "httpx", "textual.*", "matplotlib.*", "arch.*"]
 ignore_missing_imports = true

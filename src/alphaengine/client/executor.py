@@ -1188,6 +1188,7 @@ class StepExecutor:
             raise UnsupportedOp("compute.vol_target needs a return series.")
         how = str(params.get("method") or "ewma").lower()
         gvar = ws.get("garch_var")
+        gconv = ws.get("garch_converged")
         return dict(
             vol_target(
                 returns,
@@ -1196,6 +1197,7 @@ class StepExecutor:
                 periods_per_year=int(params.get("periods_per_year") or 252),
                 method=how,
                 garch_var=gvar,
+                garch_converged=gconv,
             )
         )
 
@@ -1277,6 +1279,7 @@ class StepExecutor:
         series = self._series_or_refuse("compute.garch needs a return series.")
         out = dict(garch_calibrate(series))
         ws["garch_var"] = out.pop("var_path")
+        ws["garch_converged"] = bool(out.get("converged", False))
         out["charts"] = [chart("curve", "vol_path", "GARCH vol")]
         return out
 
