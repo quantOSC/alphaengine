@@ -40,6 +40,21 @@ def _parametric_loss(mean: float, z: float, std: float, horizon: int) -> float:
     return max(0.0, -mean * h + z * std * math.sqrt(h))
 
 
+def cornish_fisher_loss_z(confidence: float, skew: float, excess_kurt: float) -> float:
+    """Cornish-Fisher adjusted positive loss quantile z-score.
+
+    Uses ``z = Phi^{-1}(confidence) > 0`` and returns the negated left-tail
+    expansion ``z - (z^2 - 1)*S/6 + (z^3 - 3*z)*K/24 - (2*z^3 - 5*z)*S^2/36``
+    so negative skewness (left-tail risk) increases the loss quantile.
+    """
+    z = float(stats.norm.ppf(confidence))
+    s = float(skew)
+    k = float(excess_kurt)
+    return float(
+        z - (z**2 - 1.0) * s / 6.0 + (z**3 - 3.0 * z) * k / 24.0 - (2.0 * z**3 - 5.0 * z) * (s**2) / 36.0
+    )
+
+
 def _quantile_loss(point: float, mean: float, horizon: int) -> float:
     """Scale a one-day return quantile to a horizon without dropping the drift.
 
@@ -93,9 +108,7 @@ def compute_var_cvar(
     if std > 0:
         skew = float(np.mean(((arr - mean) / std) ** 3))
         kurt = float(np.mean(((arr - mean) / std) ** 4) - 3.0)  # excess
-        z_cf = (
-            z + (z**2 - 1) * skew / 6.0 + (z**3 - 3 * z) * kurt / 24.0 - (2 * z**3 - 5 * z) * (skew**2) / 36.0
-        )
+        z_cf = cornish_fisher_loss_z(confidence, skew, kurt)
         # The CF expansion is only valid near-normal; extreme skew/kurtosis
         # can drive z_cf <= 0, which would report a NEGATIVE loss (violating
         # the positive-loss convention). Outside the validity domain, fall

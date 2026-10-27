@@ -48,7 +48,7 @@ from .process import (
 )
 from .profile import profile_data
 from .rates import TREASURY_BILL_AS_OF, TREASURY_BILL_RATE, TREASURY_BILL_SERIES
-from .risk import compute_var_cvar
+from .risk import compute_var_cvar, cornish_fisher_loss_z
 from .screen import screen_universe
 from .series_shapes import series_values
 from .signals import information_coefficient, quantile_returns, signal_decay, signal_icir
@@ -79,6 +79,7 @@ __all__ = [
     "TREASURY_BILL_AS_OF",
     "TREASURY_BILL_SERIES",
     "compute_var_cvar",
+    "cornish_fisher_loss_z",
     # simulation and scoring
     "run_backtest",
     "score_backtest",

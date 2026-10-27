@@ -430,3 +430,40 @@ def test_array_like_list_ndarray_and_series_across_validation_and_metrics() -> N
     ):
         assert performance_report(candidate, benchmark_returns=bench) == perf_list
         assert compute_var_cvar(candidate) == risk_list
+
+
+def test_cornish_fisher_loss_z_known_answers_and_skew_direction() -> None:
+    """Milestone 1 (H1): Cornish-Fisher loss z-score sign convention.
+
+    At confidence=0.95 (z = 1.6448536):
+      - S=-1, K=0 -> 1.910328 (old bug returned 1.341814)
+      - S=+1, K=0 -> 1.341814
+      - S=0,  K=3 -> 1.584311
+      - S=0,  K=0 -> 1.644854
+    """
+    from alphaengine.core import cornish_fisher_loss_z
+
+    assert cornish_fisher_loss_z(0.95, -1.0, 0.0) == pytest.approx(1.910328, abs=1e-5)
+    assert cornish_fisher_loss_z(0.95, 1.0, 0.0) == pytest.approx(1.341814, abs=1e-5)
+    assert cornish_fisher_loss_z(0.95, 0.0, 3.0) == pytest.approx(1.584311, abs=1e-5)
+    assert cornish_fisher_loss_z(0.95, 0.0, 0.0) == pytest.approx(1.644854, abs=1e-5)
+
+    # Seeded fixture with negative skew (~ -1.4) and positive excess kurtosis (~ 3.7)
+    rng = np.random.default_rng(7)
+    r = rng.normal(0.0, 0.0052, 4000) - 0.010 * (rng.exponential(1.0, 4000) - 1.0)
+    r = r - r.mean()
+
+    res = compute_var_cvar(r, confidence=0.95)
+    cf = res["cornish_fisher"]
+    assert cf["skewness"] == pytest.approx(-1.4, abs=0.1)
+    assert cf["excess_kurtosis"] == pytest.approx(3.7, abs=0.4)
+
+    gauss_var = res["parametric"]["var_pct"]
+    cf_var = cf["var_pct"]
+    hist_var = res["historical"]["var_pct"]
+    assert cf_var > gauss_var
+    assert abs(cf_var - hist_var) / hist_var <= 0.25
+
+    # On the mirrored series (-r), positive skewness lowers CF VaR below Gaussian VaR
+    res_mirrored = compute_var_cvar(-r, confidence=0.95)
+    assert res_mirrored["cornish_fisher"]["var_pct"] < res_mirrored["parametric"]["var_pct"]

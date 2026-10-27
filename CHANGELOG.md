@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.4] - 2026-10-27
+
+### Fixed
+- **Cornish-Fisher VaR skewness sign (`core/risk.py` — H1):** Added `cornish_fisher_loss_z(confidence, skew, excess_kurt)` using the negated left-tail expansion $z - (z^2 - 1)S/6 + (z^3 - 3z)K/24 - (2z^3 - 5z)S^2/36$ at $z = \Phi^{-1}(\text{confidence}) > 0$. Previously the $(z^2 - 1)S/6$ term had a positive sign, causing negative skewness to reduce VaR instead of increasing it. At `confidence=0.95`, `S=-1, K=0` moves `1.341814 -> 1.910328` (`S=+1, K=0` moves `1.910328 -> 1.341814`); on the `rets(13, 400)` golden fixture (`skewness=+0.088`), `cornish_fisher.z_adjusted` moves `1.653 -> 1.629` and `cornish_fisher.var_pct` moves `1.85 -> 1.82` while all pinned golden values (`parametric.var_pct = 1.84`) remain unchanged.
+
 ## [1.1.3] - 2026-10-26
 
 ### Fixed
