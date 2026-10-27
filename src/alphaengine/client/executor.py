@@ -1331,6 +1331,10 @@ class StepExecutor:
             breadth_kwargs["independent"] = bool(params["independent"])
         if params.get("mean_correlation") is not None:
             breadth_kwargs["mean_correlation"] = float(params["mean_correlation"])
+        if params.get("periods_per_year") is not None:
+            breadth_kwargs["periods_per_year"] = int(params["periods_per_year"])
+        if params.get("horizon") is not None:
+            breadth_kwargs["horizon"] = int(params["horizon"])
         return dict(
             breadth_ir(
                 ic=float(ic),

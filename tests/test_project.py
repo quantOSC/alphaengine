@@ -159,21 +159,21 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
     out2 = capsys.readouterr().out
     assert "trials (cumulative)" in out2 and "18" in out2
 
-    # Run 3: `ae process ou` on a different family accumulates into the project-wide ledger (18 + 80 = 98)
+    # Run 3: `ae process ou` (source='monte_carlo', 80 paths) adds 0 to project-wide trials (stays 18)
     assert cli.main(["process", "ou", "--family", "ou_stress"]) == 0
     out3 = capsys.readouterr().out
-    assert "cumulative trials 98" in out3
+    assert "cumulative trials 18" in out3
 
-    # Direct Python `sweep()` inside a project also records to ledger and accumulates trials (98 + 3 = 101)
+    # Direct Python `sweep()` inside a project also records to ledger and accumulates trials (18 + 3 = 21)
     r_py = sweep(
         lambda data=None, fast=5: [0.001 * ((i % 5) - 2) for i in range(40)],
         {"fast": [5, 10, 15]},
         data=[100.0 + i for i in range(45)],
     )
     assert r_py.run_id is not None
-    assert r_py.cumulative_trials == 101
-    assert r_py.verdict()["n_trials"] == 101
-    assert r_py.verdict()["cumulative_trials"] == 101
+    assert r_py.cumulative_trials == 21
+    assert r_py.verdict()["n_trials"] == 21
+    assert r_py.verdict()["cumulative_trials"] == 21
 
     # `ae log` with filters
     assert cli.main(["log", "--idea", "idea_1"]) == 0
@@ -742,8 +742,8 @@ def test_research_shell_tab_completion_status_line_inline_commands_and_agent_rec
     )
     assert run_shell(input_fn=lambda _prompt: next(script_lines)) == 0
     shell_out = capsys.readouterr().out
-    # Status line includes project name and cumulative trial count (1 + 80 = 81 trials)
-    assert "project:shell-os (81 trials)" in shell_out
+    # Status line includes project name and cumulative trial count (1 from diagnose; monte_carlo adds 0)
+    assert "project:shell-os (1 trials)" in shell_out
     assert r_a in shell_out and r_b in shell_out
     assert "Shell hypothesis" in shell_out
 

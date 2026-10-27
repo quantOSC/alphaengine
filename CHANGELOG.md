@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.9] - 2026-10-27
+
+### Fixed
+- **Ledger trial sources (`ledger.py`, `pipeline.py` — M8):** `n_trials_source="monte_carlo"` now adds `0` to cumulative trial counts (`18 + 80 -> 18` on `ae process ou`), and `n_trials_source="derived_from_universe"` (universe screening) counts `n_evaluated` only toward the screened `idea_id`/`family` (`family_trials`), not `project_trials`.
+- **Risk-free rate and frequency forwarding in `record_run` (`ledger.py` — M9):** `record_run` now forwards `risk_free_rate` and `periods_per_year` into the cumulative `deflated_sharpe` calculation so non-daily or zero-cash-rate runs match `deflated_sharpe(..., risk_free_rate=rf, periods_per_year=ppy)`.
+- **Harvey-Liu (2015) multiple-testing Sharpe haircut (`core/validation.py`, `core/backtest.py` — M13):** Added `harvey_liu_haircut` computing Bonferroni, Holm, and BHY adjusted p-values and haircutted annualized Sharpe ratios at both `n_trials` and `n_eff_participation` alongside `passes_harvey_liu` (`t > 3.0`) in `score_backtest`.
+- **Per-period vs. annualized ICIR (`core/signals.py` — M3):** Changed `signal_icir`'s `icir` from `mean / sd * sqrt(n_periods)` (which duplicated `ic_t_stat`) to per-period `mean / sd` (on `[0.02, 0.04, 0.00, 0.06]`: `2.323790 -> 1.161895`), added `icir_annualized = icir * sqrt(periods_per_year / horizon)`, and kept `ic_t_stat = 2.323790`.
+- **Per-period vs. annualized Grinold breadth IR (`core/active.py` — M4):** Added `periods_per_year` and `horizon` to `breadth_ir`, reporting both `implied_ir_per_period = TC * IC * sqrt(N_eff)` (`0.5` at `IC=0.05, N_eff=100`) and `implied_ir_annual = TC * IC * sqrt(N_eff * ppy / horizon)` (`1.732051` at monthly horizon).
+
 ## [1.1.8] - 2026-10-27
 
 ### Fixed

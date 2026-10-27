@@ -238,7 +238,7 @@ def run_pipeline(
             verdict: str | None = (
                 "positive" if float(figures.get("sharpe_q50") or 0.0) > 0 else "likely_noise"
             )
-            n_trials: int | None = int(figures.get("n_trials") or n_paths)
+            n_trials: int | None = 0
             source = "monte_carlo"
             returns_col, _ = returns_from_panel_or_series(series.tolist())
             trial_rows: list[dict[str, Any]] = []

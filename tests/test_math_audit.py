@@ -718,3 +718,132 @@ def test_vol_target_ewma_causality_hand_worked_and_garch_t_realized_vol() -> Non
         r_gt[t] = math.sqrt(s2) * z_t
     vt_gt = vol_target(r_gt, target=0.10, ewma_lambda=0.94, periods_per_year=252, warm=20)
     assert vt_gt["realized_vol"] == pytest.approx(0.10, abs=0.015)
+
+
+def test_m6_ledger_monte_carlo_rf_ppy_harvey_liu_icir_and_breadth_ir(tmp_path) -> None:
+    """Milestone 6 (M8, M9, M13, M3, M4):
+    - M8: source='monte_carlo' adds 0 to cumulative N; screen's n_evaluated counts
+      only toward its screened idea/family, not project_trials.
+    - M9: record_run forwards risk_free_rate and periods_per_year into cumulative deflated_sharpe.
+    - M13: harvey_liu_haircut reproduces Harvey & Liu (2015) 'Backtesting' JPM 42(1)
+      Exhibit 1 / Section 'An Illustration: How Much Should You Haircut?' (T=240 monthly obs,
+      20 years, SR_ann=0.92, M=100, and 5-strategy p-value vector [0.001, 0.008, 0.012, 0.035, 0.20])
+      at both N and n_eff_participation.
+    - M3: signal_icir on IC series [0.02, 0.04, 0.00, 0.06] gives per-period icir = 1.161895
+      and ic_t_stat = 2.323790 (to 1e-6).
+    - M4: breadth_ir(ic=0.05, n_names=100, independent=True, periods_per_year=12, horizon=1)
+      gives implied_ir_annual = 0.05 * sqrt(1200) = 1.732051 and implied_ir_per_period = 0.5.
+    """
+    from alphaengine.core import breadth_ir, deflated_sharpe, harvey_liu_haircut, score_backtest, signal_icir
+    from alphaengine.ledger import cumulative_trials_for, record_run
+    from alphaengine.pipeline import run_pipeline
+    from alphaengine.project import init_project
+
+    # 1. M8: one process step with 80 paths leaves project N unchanged; screen counts only for its family
+    proj = init_project(tmp_path / "m6_proj", name="m6")
+    rec_base = record_run(
+        proj,
+        command="validate_study",
+        params={"step": 0},
+        dataset_hashes=["h1"],
+        n_trials=5,
+        n_trials_source="derived_from_grid",
+        family="alpha_fam",
+    )
+    assert rec_base["project_trials"] == 5
+
+    pipe_file = tmp_path / "m6_proj" / "mc_pipe.yaml"
+    pipe_file.write_text(
+        "name: mc-pipe\nfamily: mc_fam\nsteps:\n"
+        "  - command: process\n    dgp: gbm\n    inputs:\n      n_paths: 80\n",
+        encoding="utf-8",
+    )
+    run_pipeline(pipe_file, proj=proj)
+    _, proj_after_mc = cumulative_trials_for(proj)
+    assert proj_after_mc == 5
+
+    rec_screen = record_run(
+        proj,
+        command="screen_universe",
+        params={"step": 1},
+        dataset_hashes=["h2"],
+        n_trials=60,
+        n_trials_source="derived_from_universe",
+        family="screen_fam",
+    )
+    assert rec_screen["family_trials"] == 60
+    assert rec_screen["project_trials"] == 5
+    fam_alpha, proj_total = cumulative_trials_for(proj, family="alpha_fam")
+    assert fam_alpha == 5 and proj_total == 5
+
+    # 2. M9: run with rf=0 on monthly data (periods_per_year=12) matches deflated_sharpe(..., rf=0, ppy=12)
+    monthly_rets = np.random.default_rng(12).normal(0.008, 0.04, 60).tolist()
+    proj_m9 = init_project(tmp_path / "m9_proj", name="m9")
+    rec_m9 = record_run(
+        proj_m9,
+        command="validate_study",
+        params={"risk_free_rate": 0.0, "periods_per_year": 12},
+        dataset_hashes=["m9_ds"],
+        n_trials=10,
+        n_trials_source="asserted",
+        returns_for_deflation=monthly_rets,
+        risk_free_rate=0.0,
+        periods_per_year=12,
+    )
+    expected_m9 = deflated_sharpe(monthly_rets, n_trials=10, risk_free_rate=0.0, periods_per_year=12)
+    assert rec_m9["figures"]["deflated_sharpe"] == expected_m9["deflated_sharpe"]
+    assert rec_m9["figures"]["sr0_expected_max"] == expected_m9["sr0_expected_max"]
+    assert rec_m9["figures"]["periods_per_year"] == 12
+    assert rec_m9["figures"]["risk_free_rate"] == 0.0
+
+    # 3. M13: Harvey & Liu (2015) "Backtesting", JPM 42(1), pp. 13-28
+    # Worked example (Section "An Illustration: How Much Should You Haircut?", Exhibit 2):
+    # T = 240 monthly observations (20 years, ppy=12), annualized Sharpe = 0.92, M = 100 trials:
+    #   t = (0.92 / sqrt(12)) * sqrt(240) = 4.114365
+    #   single-test two-sided p (df=239) = 0.000053
+    #   Bonferroni adjusted p (M=100) = 0.005348 -> t_adj = 2.8112 -> haircut Sharpe = 0.6286 (31.67% haircut)
+    hl_ex = harvey_liu_haircut(0.92, n_obs=240, n_trials=100, periods_per_year=12, n_eff_participation=25.0)
+    assert hl_ex["t_stat"] == pytest.approx(4.1144, abs=1e-4)
+    assert hl_ex["p_value_single"] == pytest.approx(0.000053, abs=1e-6)
+    assert hl_ex["bonferroni_p"] == pytest.approx(0.005348, abs=1e-5)
+    assert hl_ex["haircut_sharpe_bonferroni"] == pytest.approx(0.6286, abs=1e-4)
+    assert hl_ex["at_n_trials"]["bonferroni"]["haircut_pct"] == pytest.approx(31.67, abs=0.05)
+    assert (
+        hl_ex["at_n_eff"]["bonferroni"]["haircut_sharpe"]
+        > hl_ex["at_n_trials"]["bonferroni"]["haircut_sharpe"]
+    )
+
+    # Step-down Holm and step-up BHY on a 5-hypothesis p-value vector [0.001, 0.008, 0.012, 0.035, 0.20]
+    # at rank 2 (p_(2) = 0.008, c(5) = 1 + 1/2 + 1/3 + 1/4 + 1/5 = 137/60 = 2.283333):
+    #   Bonferroni: 5 * 0.008 = 0.040
+    #   Holm: max(5 * 0.001, 4 * 0.008) = 0.032
+    #   BHY: min_{j>=2} (5 * c(5) / j) * p_(j) = min(11.416667/2 * 0.008, 11.416667/3 * 0.012, ...) = 0.045667
+    p_vec = [0.001, 0.008, 0.012, 0.035, 0.20]
+    hl_vec = harvey_liu_haircut(
+        0.92,
+        n_obs=240,
+        n_trials=5,
+        periods_per_year=12,
+        trial_pvalues=p_vec,
+        trial_rank=2,
+    )
+    assert hl_vec["at_n_trials"]["holm"]["p_value"] == pytest.approx(0.032, abs=1e-6)
+    assert hl_vec["at_n_trials"]["bhy"]["p_value"] == pytest.approx(0.045667, abs=1e-6)
+
+    # Also verify score_backtest includes harvey_liu and keeps passes_harvey_liu
+    sb = score_backtest({"returns": monthly_rets}, n_trials=10, periods_per_year=12, risk_free_rate=0.0)
+    assert "passes_harvey_liu" in sb["validation"]
+    assert sb["validation"]["harvey_liu"] is not None
+    assert "haircut_sharpe_bonferroni" in sb["validation"]["harvey_liu"]
+
+    # 4. M3: IC series [0.02, 0.04, 0.00, 0.06] -> icir = 0.03 / 0.025819889 = 1.161895, t-stat = 2.323790
+    ic_res = signal_icir([0.02, 0.04, 0.00, 0.06], horizon=21, periods_per_year=252)
+    assert ic_res["mean_ic"] == pytest.approx(0.03, abs=1e-6)
+    assert ic_res["icir"] == pytest.approx(1.161895, abs=1e-6)
+    assert ic_res["ic_t_stat"] == pytest.approx(2.323790, abs=1e-6)
+    assert ic_res["icir_annualized"] == pytest.approx(1.16189500386 * math.sqrt(12.0), abs=1e-5)
+
+    # 5. M4: IC 0.05, N_eff 100, monthly (ppy=12, horizon=1), TC=1 -> annual IR = 0.05 * sqrt(1200) = 1.732051
+    br_res = breadth_ir(ic=0.05, n_names=100, independent=True, periods_per_year=12, horizon=1)
+    assert br_res["implied_ir_per_period"] == pytest.approx(0.5, abs=1e-6)
+    assert br_res["implied_ir_annual"] == pytest.approx(1.732051, abs=1e-6)

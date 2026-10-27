@@ -232,52 +232,62 @@ def information_coefficient(signal: dict, prices: dict, *, horizon: int = DEFAUL
 
 
 def signal_icir(
-    signal: dict,
-    prices: dict,
+    signal: dict | list[float] | np.ndarray,
+    prices: dict | None = None,
     *,
     horizon: int = DEFAULT_HORIZON,
     method: str = "spearman",
+    periods_per_year: int = 252,
 ) -> dict:
-    """Information coefficient, its ratio, and a Newey-West t-stat.
+    """Information coefficient, per-period ICIR, annualized ICIR, and t-stats.
 
-    ICIR = mean(IC) / std(IC) * sqrt(n_periods), on the SAME non-overlapping
-    dates `information_coefficient` uses. Overlapping windows would inflate the
-    t-stat in the direction that flatters, which is the failure this module
-    already refuses.
+    Per-period ``icir = mean(IC) / std(IC)`` and
+    ``icir_annualized = icir * sqrt(periods_per_year / horizon)``, on the SAME
+    non-overlapping dates ``information_coefficient`` uses. ``ic_t_stat`` is
+    ``mean(IC) / (std(IC) / sqrt(n_periods))``.
 
-    Spearman is the default so a ranking question stays a ranking question.
-    Pearson is available as `method="pearson"` and is a different measurement,
-    reported separately rather than mixed into the Spearman figures.
-
-    The original `information_coefficient` return shape is untouched.
+    Also accepts a 1-D sequence of period ICs as ``signal`` when ``prices`` is omitted.
     """
     horizon = max(1, int(horizon))
+    ppy = max(1, int(periods_per_year))
     method = str(method or "spearman").lower()
     if method not in ("spearman", "pearson"):
         raise PanelShapeError("method is 'spearman' or 'pearson'.")
-    S, P, names, skipped = _tail_panel(signal, prices, need=horizon + 1)
-    if names:
-        ics = _period_ics_pearson(S, P, horizon) if method == "pearson" else _period_ics(S, P, horizon)
+    if prices is None and not isinstance(signal, dict):
+        raw_ic = np.asarray(signal, dtype=float).reshape(-1)
+        ics = [float(v) for v in raw_ic if np.isfinite(v)]
+        names: list[str] = []
+        skipped: list[str] = []
     else:
-        ics = []
+        if not isinstance(signal, dict) or not isinstance(prices, dict):
+            raise PanelShapeError("signal_icir needs (signal: dict, prices: dict) or a 1-D IC series.")
+        S, P, names, skipped = _tail_panel(signal, prices, need=horizon + 1)
+        if names:
+            ics = _period_ics_pearson(S, P, horizon) if method == "pearson" else _period_ics(S, P, horizon)
+        else:
+            ics = []
 
     mean_ic: float | None = None
     t_stat: float | None = None
     t_stat_nw: float | None = None
     icir: float | None = None
+    icir_annualized: float | None = None
     if ics:
         arr = np.asarray(ics, dtype=float)
         mean_ic = round(float(arr.mean()), _RND)
         if len(ics) > 1 and float(arr.std(ddof=1)) > 0:
             sd = float(arr.std(ddof=1))
+            raw_icir = float(arr.mean() / sd)
+            icir = round(raw_icir, _RND)
+            icir_annualized = round(raw_icir * np.sqrt(ppy / horizon), _RND)
             t_stat = round(float(arr.mean() / (sd / np.sqrt(len(ics)))), _RND)
-            icir = round(float(arr.mean() / sd * np.sqrt(len(ics))), _RND)
         nw = newey_west_tstat(arr, lags=1)
         t_stat_nw = None if nw is None else round(float(nw), _RND)
 
     return {
         "mean_ic": mean_ic,
         "icir": icir,
+        "icir_annualized": icir_annualized,
         "ic_t_stat": t_stat,
         "ic_t_stat_nw": t_stat_nw,
         "n_periods": len(ics),
@@ -286,6 +296,7 @@ def signal_icir(
         "n_skipped": len(skipped),
         "skipped": skipped[:MAX_PERIODS],
         "horizon": horizon,
+        "periods_per_year": ppy,
         "method": method,
     }
 

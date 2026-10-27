@@ -22,12 +22,140 @@ from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike
-from scipy import stats
+from scipy import special, stats
 
 from .rates import cash_rate, rate_fields
 from .trace import record
 
 _EULER = 0.5772156649015329
+
+
+def _harmonic_number(m: float) -> float:
+    """Harmonic number H_M = sum_{k=1}^M 1/k, extended smoothly to real M >= 1 via digamma."""
+    m_f = max(float(m), 1.0)
+    if m_f.is_integer() and m_f <= 10000:
+        return float(sum(1.0 / k for k in range(1, int(m_f) + 1)))
+    return float(special.digamma(m_f + 1.0) + _EULER)
+
+
+def harvey_liu_haircut(
+    sharpe_annualized: float,
+    n_obs: int,
+    n_trials: int | float,
+    *,
+    periods_per_year: int = 252,
+    n_obs_effective: float | None = None,
+    n_eff_participation: float | None = None,
+    trial_pvalues: Sequence[float] | None = None,
+    trial_rank: int = 1,
+) -> dict[str, Any]:
+    """Harvey & Liu (2015) 'Backtesting' multiple-testing Sharpe ratio haircut.
+
+    Computes two-sided single-test p-value from the Student-t distribution with
+    ``df = n_obs - 1`` degrees of freedom, adjusts it under Bonferroni, Holm
+    (step-down), and BHY (Benjamini, Hochberg & Yekutieli 2001 step-up), and
+    converts each adjusted p-value back into an adjusted t-statistic and
+    haircutted annualized Sharpe ratio at both ``n_trials`` and
+    ``n_eff_participation``.
+    """
+    ppy = max(int(periods_per_year), 1)
+    t_obs = max(int(n_obs), 2)
+    df = max(t_obs - 1, 1)
+    n_eff_obs = (
+        float(n_obs_effective) if (n_obs_effective is not None and n_obs_effective > 0) else float(t_obs)
+    )
+    sr_ann = float(sharpe_annualized)
+    sr_pp = sr_ann / math.sqrt(ppy)
+    t_stat = sr_pp * math.sqrt(n_eff_obs)
+    p_single = float(2.0 * (1.0 - stats.t.cdf(abs(t_stat), df=df))) if t_stat != 0.0 else 1.0
+
+    def _at_multiplicity(m_val: float) -> dict[str, Any]:
+        m_f = max(float(m_val), 1.0)
+        c_m = _harmonic_number(m_f)
+
+        # Bonferroni: p^Bonf = min(1, M * p_single)
+        p_bonf = min(1.0, m_f * p_single)
+
+        if trial_pvalues is not None and len(trial_pvalues) >= 2:
+            p_sorted = sorted(max(0.0, min(1.0, float(p))) for p in trial_pvalues)
+            k_len = len(p_sorted)
+            # Locate the target p-value rank (0-indexed) in p_sorted
+            idx = max(0, min(int(trial_rank) - 1, k_len - 1))
+            if int(trial_rank) == 1:
+                diffs = [abs(p - p_single) for p in p_sorted]
+                idx = int(np.argmin(diffs))
+            # Step-down Holm and step-up BHY scaled to multiplicity m_f
+            holm_steps = []
+            for j in range(idx + 1):
+                mult_j = max(1.0, m_f - j * (m_f - 1.0) / max(k_len - 1, 1))
+                holm_steps.append(min(1.0, mult_j * p_sorted[j]))
+            p_holm = max(holm_steps) if holm_steps else p_bonf
+
+            bhy_steps = []
+            for j in range(idx, k_len):
+                rank_j = 1.0 + j * (m_f - 1.0) / max(k_len - 1, 1)
+                bhy_steps.append(min(1.0, (m_f * c_m / rank_j) * p_sorted[j]))
+            p_bhy = min(bhy_steps) if bhy_steps else min(1.0, m_f * c_m * p_single)
+        else:
+            # Single-strategy summary statistics: Harvey & Liu (2015) eqs. (10)-(14)
+            # Construct HL synthetic ordered p-value schedule across M tests when M >= 2
+            m_int = max(int(round(m_f)), 1)
+            if m_int <= 1:
+                p_holm = p_single
+                p_bhy = p_single
+            else:
+                # Synthetic uniform order-statistic p-values anchored at p_(1) = p_single
+                p_sched = [
+                    p_single if j == 0 else min(1.0, p_single + (j / m_f) * (1.0 - p_single))
+                    for j in range(m_int)
+                ]
+                r_idx = max(0, min(int(trial_rank) - 1, m_int - 1))
+                p_holm = min(1.0, max((m_f - j) * p_sched[j] for j in range(r_idx + 1)))
+                p_bhy = min(
+                    1.0,
+                    min((m_f * c_m / (j + 1.0)) * p_sched[j] for j in range(r_idx, m_int)),
+                )
+
+        def _method_entry(p_adj: float) -> dict[str, Any]:
+            if sr_ann <= 0.0 or t_stat <= 0.0 or p_adj >= 1.0:
+                t_adj = 0.0
+                sr_adj = 0.0
+                hc_pct = 100.0 if sr_ann > 0.0 else 0.0
+            else:
+                t_adj = float(max(0.0, stats.t.ppf(1.0 - p_adj / 2.0, df=df)))
+                sr_adj = float((t_adj / math.sqrt(n_eff_obs)) * math.sqrt(ppy))
+                hc_pct = float(max(0.0, (1.0 - sr_adj / sr_ann) * 100.0))
+            return {
+                "p_value": round(float(p_adj), 6),
+                "t_stat_adjusted": round(t_adj, 4),
+                "haircut_sharpe": round(sr_adj, 4),
+                "haircut_pct": round(hc_pct, 2),
+            }
+
+        m_out: int | float = int(m_f) if m_f.is_integer() else round(m_f, 4)
+        return {
+            "n_trials": m_out,
+            "bonferroni": _method_entry(p_bonf),
+            "holm": _method_entry(p_holm),
+            "bhy": _method_entry(p_bhy),
+        }
+
+    at_n = _at_multiplicity(float(n_trials))
+    neff_val = float(n_eff_participation) if n_eff_participation is not None else float(n_trials)
+    at_neff = _at_multiplicity(neff_val)
+    return {
+        "sharpe_annualized": round(sr_ann, 4),
+        "t_stat": round(t_stat, 4),
+        "p_value_single": round(p_single, 6),
+        "at_n_trials": at_n,
+        "at_n_eff": at_neff,
+        "bonferroni_p": at_n["bonferroni"]["p_value"],
+        "holm_p": at_n["holm"]["p_value"],
+        "bhy_p": at_n["bhy"]["p_value"],
+        "haircut_sharpe_bonferroni": at_n["bonferroni"]["haircut_sharpe"],
+        "haircut_sharpe_holm": at_n["holm"]["haircut_sharpe"],
+        "haircut_sharpe_bhy": at_n["bhy"]["haircut_sharpe"],
+    }
 
 
 def _as_1d_float(values: ArrayLike | Sequence[float] | None) -> np.ndarray:

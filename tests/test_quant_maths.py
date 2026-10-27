@@ -122,7 +122,8 @@ def test_icir_matches_the_ols_t_stat_and_adds_newey_west():
     signal, prices = _signal_prices()
     out = signal_icir(signal, prices, horizon=10)
     assert out["mean_ic"] is not None and out["mean_ic"] > 0.15
-    assert out["icir"] == out["ic_t_stat"]
+    assert out["ic_t_stat"] == pytest.approx(out["icir"] * float(np.sqrt(out["n_periods"])), abs=1e-4)
+    assert out["icir_annualized"] == pytest.approx(out["icir"] * float(np.sqrt(252.0 / 10.0)), abs=1e-4)
     assert out["ic_t_stat_nw"] is not None
     assert out["method"] == "spearman"
 

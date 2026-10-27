@@ -89,7 +89,12 @@ def cumulative_trials_for(
     idea_id: str | None = None,
     family: str | None = None,
 ) -> tuple[int, int]:
-    """Return `(family_or_idea_trials, project_cumulative_trials)` across distinct configs in the ledger."""
+    """Return `(family_or_idea_trials, project_cumulative_trials)` across distinct configs in the ledger.
+
+    - ``monte_carlo`` runs add 0 to both family and project trial counts.
+    - ``derived_from_universe`` (universe screening) counts toward the screened
+      idea or family only, not toward ``project_trials``.
+    """
     runs = proj.read_jsonl("ledger/runs.jsonl")
     family_total = 0
     project_total = 0
@@ -109,9 +114,13 @@ def cumulative_trials_for(
         if sig in seen_configs:
             continue
         seen_configs.add(sig)
+        src = str(row.get("n_trials_source") or "")
+        if src == "monte_carlo":
+            continue
         n = row.get("run_n_trials") if row.get("run_n_trials") is not None else row.get("n_trials")
         count = int(n) if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
-        project_total += count
+        if src != "derived_from_universe":
+            project_total += count
         if (
             target_idea
             and row.get("idea_id") == target_idea
@@ -166,6 +175,8 @@ def record_run(
     repro_spec: dict[str, Any] | None = None,
     returns_for_deflation: list[float] | None = None,
     trials_sharpe_std: float | None = None,
+    risk_free_rate: float | None = None,
+    periods_per_year: int | None = None,
     run_id: str | None = None,
     already_counted_in_ledger: bool = False,
 ) -> dict[str, Any]:
@@ -216,11 +227,24 @@ def record_run(
     this_trials = (
         int(n_trials) if isinstance(n_trials, int) and not isinstance(n_trials, bool) and n_trials > 0 else 0
     )
-    added_trials = 0 if (duplicate_of is not None or already_counted_in_ledger) else this_trials
-    # Project-wide cumulative trial ledger feeds every DSR (no per-run or per-family reset)
-    proj_trials = max(prior_proj + added_trials, this_trials if already_counted_in_ledger else 0)
-    fam_trials = max(prior_fam + added_trials, this_trials if already_counted_in_ledger else 0)
-    cum_trials = proj_trials
+    if duplicate_of is not None or already_counted_in_ledger or n_trials_source == "monte_carlo":
+        added_fam = 0
+        added_proj = 0
+    elif n_trials_source == "derived_from_universe":
+        added_fam = this_trials
+        added_proj = 0
+    else:
+        added_fam = this_trials
+        added_proj = this_trials
+
+    # Project-wide cumulative trial ledger feeds DSR, while monte_carlo adds 0
+    # and universe screens count only toward their idea/family.
+    proj_trials = prior_proj + added_proj
+    fam_trials = max(
+        prior_fam + added_fam,
+        this_trials if (already_counted_in_ledger and n_trials_source != "monte_carlo") else 0,
+    )
+    cum_trials = max(proj_trials, fam_trials)
 
     figs = dict(figures or {})
     if returns_for_deflation and len(returns_for_deflation) >= 8 and trials_sharpe_std is None:
@@ -228,6 +252,20 @@ def record_run(
         raw_std = figs.get("trials_sharpe_std")
         if isinstance(raw_std, (int, float)) and not isinstance(raw_std, bool) and float(raw_std) > 0:
             trials_sharpe_std = float(raw_std)
+
+    rf_eff = risk_free_rate
+    if rf_eff is None and "risk_free_rate" in clean_params and clean_params["risk_free_rate"] is not None:
+        rf_eff = float(clean_params["risk_free_rate"])
+    elif rf_eff is None and "risk_free_rate" in figs and figs["risk_free_rate"] is not None:
+        rf_eff = float(figs["risk_free_rate"])
+
+    ppy_eff = periods_per_year
+    if ppy_eff is None and clean_params.get("periods_per_year") is not None:
+        ppy_eff = int(clean_params["periods_per_year"])
+    elif ppy_eff is None and figs.get("periods_per_year") is not None:
+        ppy_eff = int(figs["periods_per_year"])
+    if ppy_eff is None:
+        ppy_eff = 252
 
     # Enforce verdict refusal when trial count is not_recorded on validation/sweep runs
     if n_trials_source == "not_recorded":
@@ -252,7 +290,7 @@ def record_run(
         returns_for_deflation
         and len(returns_for_deflation) >= 8
         and cum_trials > 0
-        and n_trials_source != "not_recorded"
+        and n_trials_source not in ("not_recorded", "monte_carlo")
     ):
         from .core import deflated_sharpe
 
@@ -260,12 +298,16 @@ def record_run(
             returns_for_deflation,
             n_trials=cum_trials,
             trials_sharpe_std=trials_sharpe_std,
+            risk_free_rate=rf_eff,
+            periods_per_year=ppy_eff,
         )
         if "deflated_sharpe" in cum_dsr:
             # Headline DSR, SR0, and verdict use the cumulative trial count everywhere
             figs["deflated_sharpe"] = cum_dsr["deflated_sharpe"]
             figs["sr0_expected_max"] = cum_dsr["sr0_expected_max"]
             figs["verdict"] = cum_dsr["verdict"]
+            figs["risk_free_rate"] = cum_dsr.get("risk_free_rate")
+            figs["periods_per_year"] = cum_dsr.get("periods_per_year")
             figs["cumulative_deflated_sharpe"] = cum_dsr["deflated_sharpe"]
             figs["cumulative_sr0_expected_max"] = cum_dsr["sr0_expected_max"]
             figs["cumulative_verdict"] = cum_dsr["verdict"]

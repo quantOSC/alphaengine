@@ -669,7 +669,7 @@ def score_backtest(
     psr_val = dsr.get("psr_vs_zero") if dsr_ok else None
     pbo_val = pbo.get("pbo") if pbo_ok else None
 
-    # A2, DSR honesty: AR(1)-effective N + the Harvey-Liu t > 3 hurdle.
+    # A2, DSR honesty: AR(1)-effective N + the Harvey-Liu t > 3 hurdle + HL (2015) haircut Sharpe.
     n_eff, r1 = _ar1_effective_n(returns)
     sr_pp = dsr.get("sharpe_per_period") if dsr_ok else None
     if sr_pp is None:
@@ -685,6 +685,40 @@ def score_backtest(
         )
     t_stat = float(sr_pp) * math.sqrt(n_eff)
 
+    from .validation import harvey_liu_haircut, n_eff_participation
+
+    n_eff_part: float | None = None
+    trial_pvals: list[float] | None = None
+    if pnl_matrix is not None:
+        import numpy as _np
+        from scipy import stats as _stats
+
+        mat_arr = _np.asarray(pnl_matrix, dtype=float)
+        if mat_arr.ndim == 2 and mat_arr.shape[1] >= 2 and mat_arr.shape[0] >= 2:
+            n_eff_part = round(n_eff_participation(mat_arr), 4)
+            df_mat = max(mat_arr.shape[0] - 1, 1)
+            trial_pvals = []
+            for j in range(mat_arr.shape[1]):
+                col_j = mat_arr[:, j]
+                sd_j = float(col_j.std(ddof=1))
+                t_j = float(col_j.mean() / sd_j * math.sqrt(mat_arr.shape[0])) if sd_j > 0 else 0.0
+                trial_pvals.append(float(2.0 * (1.0 - _stats.t.cdf(abs(t_j), df=df_mat))))
+
+    n_obs_val = int(dsr.get("n_obs") if dsr_ok else len([r for r in returns if r is not None]))
+    hl_haircut = (
+        harvey_liu_haircut(
+            float(sr_pp) * math.sqrt(max(int(periods_per_year), 1)),
+            n_obs_val,
+            n_trials_eff,
+            periods_per_year=periods_per_year,
+            n_obs_effective=n_eff,
+            n_eff_participation=n_eff_part if n_eff_part is not None else float(n_trials_eff),
+            trial_pvalues=trial_pvals,
+        )
+        if n_trials is not None and n_obs_val >= 2
+        else None
+    )
+
     validation = {
         "deflated_sharpe": dsr_val,
         "pbo": pbo_val,
@@ -693,14 +727,16 @@ def score_backtest(
         # fact from "I searched one configuration".
         "n_trials": (int(n_trials) if n_trials is not None else None),
         "n_trials_source": source,
+        "n_eff_participation": n_eff_part,
         "verdict": _verdict(dsr_val, pbo_val, source),
         # A2, autocorrelation-honest significance.
-        "n_obs": (dsr.get("n_obs") if dsr_ok else len([r for r in returns if r is not None])),
+        "n_obs": n_obs_val,
         "n_obs_effective": round(n_eff, 1),
         "autocorr_lag1": round(r1, 4),
         "sharpe_tstat": round(t_stat, 4),
         "harvey_liu_hurdle": 3.0,
         "passes_harvey_liu": bool(t_stat > 3.0),
+        "harvey_liu": hl_haircut,
         # A3, MinTRL: is the sample long enough to trust the Sharpe? (Bailey/LdP)
         "min_track_record_length": (mintrl.get("min_track_record_length") if mintrl_ok else None),
         "min_track_record_years": (mintrl.get("min_track_record_years") if mintrl_ok else None),

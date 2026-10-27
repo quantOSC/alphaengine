@@ -76,16 +76,23 @@ def breadth_ir(
     ideal: dict | None = None,
     independent: bool = False,
     mean_correlation: float | None = None,
+    periods_per_year: int = 252,
+    horizon: int = 21,
 ) -> dict[str, Any]:
-    """Implied IR = TC * IC * sqrt(breadth). TC is 1 when holdings are absent.
+    """Implied IR under the Fundamental Law of Active Management (Grinold & Kahn).
 
-    Breadth is the name count only when ``independent`` is set, or
-    ``N / (1 + (N - 1) * rho)`` when ``mean_correlation`` is supplied.
-    Omitting both leaves ``implied_ir`` empty rather than treating the names
-    as independent bets.
+    Reports both per-period ``implied_ir_per_period = TC * IC * sqrt(N_eff)``
+    (also aliased as ``implied_ir``) and annualized
+    ``implied_ir_annual = TC * IC * sqrt(N_eff * periods_per_year / horizon)``.
+    TC is 1 when holdings are absent. Breadth is the name count only when
+    ``independent`` is set, or ``N / (1 + (N - 1) * rho)`` when
+    ``mean_correlation`` is supplied. Omitting both leaves implied IR empty
+    rather than treating the names as independent bets.
     """
     ic_f = float(ic)
     br = max(int(n_names), 0)
+    ppy = max(int(periods_per_year), 1)
+    h_bars = max(int(horizon), 1)
     tc = 1.0
     if isinstance(holdings, dict) and isinstance(ideal, dict) and holdings and ideal:
         names = sorted(set(map(str, holdings)) & set(map(str, ideal)))
@@ -104,17 +111,20 @@ def breadth_ir(
             tc = 0.0
     breadth_used: float | None = None
     assumption = "not_assumed"
-    ir: float | None = None
+    ir_per_period: float | None = None
+    ir_annual: float | None = None
     if mean_correlation is not None and br:
         rho = float(mean_correlation)
         denom = 1.0 + (br - 1) * rho
         breadth_used = br / denom if denom > 0 else 0.0
         assumption = "mean_correlation"
-        ir = tc * ic_f * math.sqrt(breadth_used) if breadth_used > 0 else 0.0
+        ir_per_period = tc * ic_f * math.sqrt(breadth_used) if breadth_used > 0 else 0.0
+        ir_annual = tc * ic_f * math.sqrt(breadth_used * (ppy / h_bars)) if breadth_used > 0 else 0.0
     elif independent:
         breadth_used = float(br)
         assumption = "independent"
-        ir = tc * ic_f * math.sqrt(br) if br else 0.0
+        ir_per_period = tc * ic_f * math.sqrt(br) if br else 0.0
+        ir_annual = tc * ic_f * math.sqrt(br * (ppy / h_bars)) if br else 0.0
     return {
         "ic": round(ic_f, _RND),
         "breadth": br,
@@ -122,6 +132,10 @@ def breadth_ir(
         "breadth_assumption": assumption,
         "mean_correlation": None if mean_correlation is None else round(float(mean_correlation), _RND),
         "transfer_coefficient": round(tc, _RND),
-        "implied_ir": None if ir is None else round(ir, _RND),
+        "periods_per_year": ppy,
+        "horizon": h_bars,
+        "implied_ir_per_period": None if ir_per_period is None else round(ir_per_period, _RND),
+        "implied_ir_annual": None if ir_annual is None else round(ir_annual, _RND),
+        "implied_ir": None if ir_per_period is None else round(ir_per_period, _RND),
         "method": "fundamental_law",
     }
