@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.8] - 2026-10-27
+
+### Fixed
+- **Causal EWMA volatility targeting (`core/allocate.py` — H4):** Fixed same-day look-ahead in `vol_target(..., method="ewma")` by computing day-$i$ leverage `lev_i` from prior variance `var_{i-1}` before updating `var` with `r_i^2`, excluding the `n_warmup` warmup observations from `scaled`, `realized_vol`, `mean_leverage`, and `max_leverage`, and reporting `n_warmup`. On the 5-point hand-worked fixture (`\lambda=0.5, warm=2, r=[0.01, -0.02, 0.03, -0.01, 0.02]`), post-warmup leverages move from `[0.262703, 0.342896, 0.327969]` (with look-ahead) to `[0.398410, 0.262703, 0.342896]`; on the seeded GARCH-$t(6)$ fixture (`target=0.10`), `realized_vol` moves `0.0953 -> 0.104356`.
+
 ## [1.1.7] - 2026-10-27
 
 ### Fixed

@@ -654,3 +654,67 @@ def test_engle_granger_mackinnon_coint_pvalues_and_false_positive_rate() -> None
     )
     assert sig["cointegration"]["pvalue_method"] == "mackinnon_coint"
     assert sig["cointegration"]["p_value"] < 0.01
+
+
+def test_vol_target_ewma_causality_hand_worked_and_garch_t_realized_vol() -> None:
+    """Milestone 5 (H4): causal EWMA vol-targeting without same-day look-ahead.
+
+    Hand-worked 5-point case:
+      r = [0.01, -0.02, 0.03, -0.01, 0.02], warm = 2, lambda = 0.5, target = 0.10, ppy = 252
+      Warmup slice r[:2] = [0.01, -0.02]:
+        var_1 = (0.01^2 + (-0.02)^2) / 2 = (0.0001 + 0.0004) / 2 = 0.00025
+      Step 0 (r[2] = 0.03):
+        lev[0] = 0.10 / sqrt(0.00025 * 252) = 0.10 / sqrt(0.063) = 0.39840953644479793
+        var_2  = 0.5 * 0.00025 + 0.5 * (0.03^2) = 0.000125 + 0.00045 = 0.000575
+      Step 1 (r[3] = -0.01):
+        lev[1] = 0.10 / sqrt(0.000575 * 252) = 0.10 / sqrt(0.1449) = 0.26270346874636685
+        var_3  = 0.5 * 0.000575 + 0.5 * ((-0.01)^2) = 0.0002875 + 0.00005 = 0.0003375
+      Step 2 (r[4] = 0.02):
+        lev[2] = 0.10 / sqrt(0.0003375 * 252) = 0.10 / sqrt(0.08505) = 0.34289633324909313
+    """
+    from alphaengine.core import vol_target
+
+    # 1. Hand-worked 5-point case to 1e-12
+    r5 = [0.01, -0.02, 0.03, -0.01, 0.02]
+    res5 = vol_target(r5, target=0.10, ewma_lambda=0.5, periods_per_year=252, warm=2)
+    assert res5["n_warmup"] == 2
+    expected_levs = np.array(
+        [
+            0.39840953644479793,
+            0.26270346874636685,
+            0.34289633324909313,
+        ],
+        dtype=float,
+    )
+    np.testing.assert_allclose(res5["leverages"], expected_levs, rtol=0.0, atol=1e-12)
+    assert res5["mean_leverage"] == round(float(expected_levs.mean()), 6)
+
+    # 2. Causality: mutating r[warm + k:] (scaling by 10 or shuffling) leaves leverages[:k+1] identical
+    rng = np.random.default_rng(19)
+    r_base = rng.normal(0.0, 0.012, 120)
+    warm = 20
+    k = 35
+    base_levs = vol_target(r_base, target=0.10, warm=warm)["leverages"]
+
+    r_scaled = r_base.copy()
+    r_scaled[warm + k :] *= 10.0
+    scaled_levs = vol_target(r_scaled, target=0.10, warm=warm)["leverages"]
+    np.testing.assert_allclose(scaled_levs[: k + 1], base_levs[: k + 1], rtol=0.0, atol=1e-12)
+
+    r_shuffled = r_base.copy()
+    rng.shuffle(r_shuffled[warm + k :])
+    shuffled_levs = vol_target(r_shuffled, target=0.10, warm=warm)["leverages"]
+    np.testing.assert_allclose(shuffled_levs[: k + 1], base_levs[: k + 1], rtol=0.0, atol=1e-12)
+
+    # 3. GARCH-t seeded series with a 10% target: causal realized vol within +/-1.5% of 10%
+    rng_gt = np.random.default_rng(7)
+    n_gt = 2000
+    omega_gt, alpha_gt, beta_gt = 2e-6, 0.08, 0.90
+    r_gt = np.empty(n_gt, dtype=float)
+    s2 = omega_gt / (1.0 - alpha_gt - beta_gt)
+    for t in range(n_gt):
+        s2 = omega_gt + alpha_gt * (r_gt[t - 1] ** 2 if t else s2) + beta_gt * s2
+        z_t = rng_gt.standard_t(df=6) / math.sqrt(6.0 / 4.0)
+        r_gt[t] = math.sqrt(s2) * z_t
+    vt_gt = vol_target(r_gt, target=0.10, ewma_lambda=0.94, periods_per_year=252, warm=20)
+    assert vt_gt["realized_vol"] == pytest.approx(0.10, abs=0.015)

@@ -1189,7 +1189,7 @@ class StepExecutor:
         how = str(params.get("method") or "ewma").lower()
         gvar = ws.get("garch_var")
         gconv = ws.get("garch_converged")
-        return dict(
+        out = dict(
             vol_target(
                 returns,
                 target=float(params.get("target") or 0.10),
@@ -1200,6 +1200,9 @@ class StepExecutor:
                 garch_converged=gconv,
             )
         )
+        ws["vol_target_leverages"] = out.pop("leverages", None)
+        ws["vol_target_scaled"] = out.pop("scaled", None)
+        return out
 
     def _series_or_refuse(self, why: str) -> list[float]:
         returns = _as_returns(self.data)

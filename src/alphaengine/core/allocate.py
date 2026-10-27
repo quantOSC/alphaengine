@@ -167,6 +167,7 @@ def vol_target(
     ewma_lambda: float = 0.94,
     periods_per_year: int = 252,
     method: str = "ewma",
+    warm: int = 20,
     garch_var: np.ndarray | list[float] | dict[str, Any] | None = None,
     garch_converged: bool | None = None,
 ) -> dict[str, Any]:
@@ -184,6 +185,7 @@ def vol_target(
         out_short: dict[str, Any] = {
             "target": float(target),
             "n_obs": n,
+            "n_warmup": n,
             "mean_leverage": None,
             "realized_vol": None,
             "ewma_lambda": float(ewma_lambda),
@@ -224,6 +226,7 @@ def vol_target(
         return {
             "target": tgt,
             "n_obs": n,
+            "n_warmup": 0,
             "mean_leverage": round(float(leverages.mean()), _RND),
             "realized_vol": None if realized is None else round(realized, _RND),
             "ewma_lambda": float(ewma_lambda),
@@ -231,28 +234,34 @@ def vol_target(
             "max_leverage": round(float(leverages.max()), _RND),
             "method": "garch",
             "converged": True,
+            "leverages": leverages,
+            "scaled": scaled,
         }
     lam = min(max(float(ewma_lambda), 1e-6), 0.999999)
-    warm = min(20, n)
-    var = float(np.mean(r[:warm] ** 2))
-    scaled = np.empty(n)
-    leverages = np.empty(n)
-    for i, x in enumerate(r):
-        var = lam * var + (1.0 - lam) * x * x
+    n_warmup = min(max(int(warm), 1), n - 1)
+    var = float(np.mean(r[:n_warmup] ** 2))
+    n_post = n - n_warmup
+    scaled = np.empty(n_post, dtype=float)
+    leverages = np.empty(n_post, dtype=float)
+    for i, x in enumerate(r[n_warmup:]):
         vol_ann = math.sqrt(max(var, 0.0) * ppy)
         lev = 0.0 if vol_ann <= 1e-12 else tgt / vol_ann
         leverages[i] = lev
         scaled[i] = x * lev
-    realized = float(scaled.std(ddof=1) * math.sqrt(ppy)) if n > 1 else None
+        var = lam * var + (1.0 - lam) * x * x
+    realized = float(scaled.std(ddof=1) * math.sqrt(ppy)) if n_post > 1 else None
     out_ewma: dict[str, Any] = {
         "target": tgt,
         "n_obs": n,
+        "n_warmup": n_warmup,
         "mean_leverage": round(float(leverages.mean()), _RND),
         "realized_vol": None if realized is None else round(realized, _RND),
         "ewma_lambda": lam,
         "periods_per_year": ppy,
         "max_leverage": round(float(leverages.max()), _RND),
         "method": "ewma" if how != "garch" else "ewma",
+        "leverages": leverages,
+        "scaled": scaled,
     }
     if how == "garch":
         out_ewma["converged"] = False
