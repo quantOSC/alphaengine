@@ -467,3 +467,78 @@ def test_cornish_fisher_loss_z_known_answers_and_skew_direction() -> None:
     # On the mirrored series (-r), positive skewness lowers CF VaR below Gaussian VaR
     res_mirrored = compute_var_cvar(-r, confidence=0.95)
     assert res_mirrored["cornish_fisher"]["var_pct"] < res_mirrored["parametric"]["var_pct"]
+
+
+def test_correlated_trials_dsr_luck_bar_audit_case_and_n_eff_participation() -> None:
+    """Milestone 2a (H5): correlated-trial DSR without Lo SE floor + n_eff_participation.
+
+    1. Luck bar: seed=7, N=100 noise trials, T=1260 daily obs.
+       - rho=0.8: sr0_expected_max * sqrt(252) within +/-0.06 of 0.51 and < 0.60
+       - rho=0.0: sr0_expected_max * sqrt(252) within +/-0.08 of 1.13
+    2. Audit case: N=50, rho=0.95, T=1000. Per-period sr0_expected_max drops ~4x
+       from the floored ~0.072 to ~0.017 (+/-20%).
+    3. Exact equicorrelated N=100, rho=0.8 matrix: n_eff_participation equals
+       100^2 / ((1 + 99*0.8)^2 + 99*0.2^2) to 1e-9.
+    4. Failed trials do not count toward N in SweepResult.verdict().
+    """
+    from alphaengine.core import n_eff_participation
+    from alphaengine.sweep import sweep
+
+    # 1. Luck bar (seed 7, N=100, T=1260)
+    n_trials_luck, t_luck = 100, 1260
+    z_raw = np.random.default_rng(7).standard_normal((n_trials_luck, t_luck)).T
+
+    c_corr = np.full((n_trials_luck, n_trials_luck), 0.8)
+    np.fill_diagonal(c_corr, 1.0)
+    mat_corr = (z_raw @ np.linalg.cholesky(c_corr).T) * 0.01
+    sharpes_corr = [float(mat_corr[:, j].mean() / mat_corr[:, j].std(ddof=1)) for j in range(n_trials_luck)]
+    std_corr = float(np.std(sharpes_corr, ddof=1))
+    dsr_corr = deflated_sharpe(mat_corr[:, 0], n_trials=n_trials_luck, trials_sharpe_std=std_corr)
+    sr0_ann_corr = dsr_corr["sr0_expected_max"] * math.sqrt(252)
+    assert sr0_ann_corr == pytest.approx(0.51, abs=0.06)
+    assert sr0_ann_corr < 0.60
+
+    mat_indep = z_raw * 0.01
+    sharpes_indep = [
+        float(mat_indep[:, j].mean() / mat_indep[:, j].std(ddof=1)) for j in range(n_trials_luck)
+    ]
+    std_indep = float(np.std(sharpes_indep, ddof=1))
+    dsr_indep = deflated_sharpe(mat_indep[:, 0], n_trials=n_trials_luck, trials_sharpe_std=std_indep)
+    sr0_ann_indep = dsr_indep["sr0_expected_max"] * math.sqrt(252)
+    assert sr0_ann_indep == pytest.approx(1.13, abs=0.08)
+
+    # 2. Audit case: N=50, rho=0.95, T=1000
+    rng_audit = np.random.default_rng(7)
+    n_audit, t_audit, rho_audit = 50, 1000, 0.95
+    common_a = rng_audit.normal(0.0, 0.01, size=(t_audit, 1))
+    idio_a = rng_audit.normal(0.0, 0.01, size=(t_audit, n_audit))
+    mat_audit = math.sqrt(rho_audit) * common_a + math.sqrt(1.0 - rho_audit) * idio_a
+    sharpes_audit = [float(mat_audit[:, j].mean() / mat_audit[:, j].std(ddof=1)) for j in range(n_audit)]
+    std_audit = float(np.std(sharpes_audit, ddof=1))
+    dsr_audit = deflated_sharpe(mat_audit[:, 0], n_trials=n_audit, trials_sharpe_std=std_audit)
+    floored_audit = deflated_sharpe(mat_audit[:, 0], n_trials=n_audit, trials_sharpe_std=None)
+    assert floored_audit["sr0_expected_max"] == pytest.approx(0.072, rel=0.10)
+    assert dsr_audit["sr0_expected_max"] == pytest.approx(0.017, rel=0.20)
+
+    # 3. Exact equicorrelated N=100, rho=0.8 correlation matrix -> n_eff_participation
+    n_eq, rho_eq = 100, 0.8
+    corr_eq = np.full((n_eq, n_eq), rho_eq, dtype=float)
+    np.fill_diagonal(corr_eq, 1.0)
+    expected_neff = (100.0**2) / ((1.0 + 99.0 * 0.8) ** 2 + 99.0 * (0.2**2))
+    assert n_eff_participation(corr_eq) == pytest.approx(expected_neff, abs=1e-9)
+
+    # 4. Sweep verdict excludes failed trials from N and reports n_eff_participation
+    base_series = np.random.default_rng(7).normal(0.0005, 0.01, 200)
+
+    def bt_with_failure(data=None, k: int = 0):
+        if k == 0:
+            raise ValueError("failed trial 0")
+        return (np.asarray(data, dtype=float) + k * 0.0001).tolist()
+
+    sr = sweep(bt_with_failure, {"k": [0, 1, 2, 3]}, data=base_series)
+    assert sr.n_trials == 4
+    v = sr.verdict()
+    assert v["n_trials"] == 3
+    assert v["run_n_trials"] == 3
+    assert "n_eff_participation" in v and v["n_eff_participation"] >= 1.0
+    assert "deflated_sharpe_at_n_eff" in v and isinstance(v["deflated_sharpe_at_n_eff"], float)

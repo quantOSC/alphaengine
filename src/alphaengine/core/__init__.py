@@ -60,6 +60,7 @@ from .validation import (
     deflated_sharpe,
     expected_max_sharpe,
     min_track_record_length,
+    n_eff_participation,
     pbo_cscv,
     probabilistic_sharpe_ratio,
 )
@@ -70,6 +71,7 @@ __all__ = [
     "probabilistic_sharpe_ratio",
     "expected_max_sharpe",
     "min_track_record_length",
+    "n_eff_participation",
     "pbo_cscv",
     "combinatorial_oos_stability",
     "cpcv_score",

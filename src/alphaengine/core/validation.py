@@ -80,23 +80,60 @@ def probabilistic_sharpe_ratio(
     return float(stats.norm.cdf(z))
 
 
-def expected_max_sharpe(n_trials: int, trials_sharpe_std: float) -> float:
+def n_eff_participation(matrix_or_corr: ArrayLike) -> float:
+    """Effective number of trials via the eigenvalue participation ratio.
+
+    Computes ``(sum(lambda_i))^2 / sum(lambda_i^2)`` over the eigenvalues of
+    the trial-return correlation matrix ``C``. Accepts either an ``(N, N)``
+    correlation matrix directly (symmetric with unit diagonal) or a ``(T, N)``
+    matrix of per-period trial returns.
+    """
+    arr = np.asarray(matrix_or_corr, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] < 2:
+        return 1.0
+    if (
+        arr.shape[0] == arr.shape[1]
+        and np.all(np.isfinite(arr))
+        and np.allclose(arr, arr.T, atol=1e-8)
+        and np.allclose(np.diag(arr), 1.0, atol=1e-6)
+    ):
+        corr = arr
+    else:
+        if arr.shape[0] < 2:
+            return 1.0
+        stds = arr.std(axis=0, ddof=1)
+        valid = np.isfinite(stds) & (stds > 1e-15)
+        n_valid = int(np.sum(valid))
+        if n_valid < 2:
+            return 1.0
+        corr = np.corrcoef(arr[:, valid], rowvar=False)
+        corr = np.nan_to_num(corr, nan=0.0, posinf=0.0, neginf=0.0)
+        np.fill_diagonal(corr, 1.0)
+    eigs = np.clip(np.linalg.eigvalsh(corr), 0.0, None)
+    denom = float(np.sum(eigs**2))
+    if denom <= 0.0:
+        return 1.0
+    return float((float(np.sum(eigs)) ** 2) / denom)
+
+
+def expected_max_sharpe(n_trials: int | float, trials_sharpe_std: float) -> float:
     """E[max Sharpe] over N independent trials of noise (per-period units).
 
     SR0 = σ_SR · [ (1-γ)·Φ⁻¹(1 − 1/N) + γ·Φ⁻¹(1 − 1/(N·e)) ].
     The benchmark a *real* strategy must beat to be non-spurious.
     """
-    if n_trials < 2 or trials_sharpe_std <= 0:
+    n_f = float(n_trials)
+    if n_f <= 1.0 or trials_sharpe_std <= 0:
         return 0.0
-    a = stats.norm.ppf(1.0 - 1.0 / n_trials)
-    b = stats.norm.ppf(1.0 - 1.0 / (n_trials * math.e))
+    a = stats.norm.ppf(1.0 - 1.0 / n_f)
+    b = stats.norm.ppf(1.0 - 1.0 / (n_f * math.e))
     return float(trials_sharpe_std * ((1.0 - _EULER) * a + _EULER * b))
 
 
 def deflated_sharpe(
     returns: ArrayLike | Sequence[float],
     *,
-    n_trials: int,
+    n_trials: int | float,
     trials_sharpe_std: float | None = None,
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
@@ -122,30 +159,32 @@ def deflated_sharpe(
     kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
     psr0 = probabilistic_sharpe_ratio(sr, n, skew, kurt, 0.0)
 
-    # Sampling SD of the Sharpe estimator under the null (Lo, 2002), a floor
-    # for trial-Sharpe dispersion when the caller doesn't supply one (or when
-    # the empirical cross-trial dispersion is narrower than single-series
-    # sampling noise).
+    # Sampling SD of the Sharpe estimator under the null (Lo, 2002), used as
+    # fallback only when cross-trial Sharpe dispersion is not supplied (e.g.
+    # fewer than 2 valid trials). When trials_sharpe_std > 0 is supplied, use
+    # it directly so correlated trials are not over-penalized by the single-series SE floor.
     sr_est_sd = math.sqrt((1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) / (n - 1)) if n > 1 else 0.0
     std_for_max = (
-        max(float(trials_sharpe_std), sr_est_sd)
-        if (trials_sharpe_std and trials_sharpe_std > 0)
+        float(trials_sharpe_std)
+        if (trials_sharpe_std is not None and float(trials_sharpe_std) > 0)
         else sr_est_sd
     )
-    if int(n_trials) <= 1:
+    n_f = float(n_trials)
+    if n_f <= 1.0:
         sr0 = 0.0
         dsr = psr0
         no_deflation_note: str | None = (
             "n_trials=1: no multiple-testing deflation applies; deflated_sharpe equals psr_vs_zero."
         )
     else:
-        sr0 = expected_max_sharpe(int(n_trials), std_for_max)
+        sr0 = expected_max_sharpe(n_f, std_for_max)
         dsr = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0)
         no_deflation_note = None
 
+    trials_out: int | float = int(n_f) if n_f.is_integer() else round(n_f, 4)
     out = {
         "n_obs": int(n),
-        "n_trials": int(n_trials),
+        "n_trials": trials_out,
         "sharpe_per_period": round(sr, 4),
         "sharpe_annualized": round(sr * math.sqrt(ppy), 4),
         **rate_fields(risk_free_rate),
@@ -164,7 +203,7 @@ def deflated_sharpe(
     record(
         "deflated_sharpe",
         "PSR(SR*) where SR* is the expected maximum Sharpe across n_trials",
-        inputs={"n_obs": int(n), "n_trials": int(n_trials), "sharpe_per_period": round(sr, 4)},
+        inputs={"n_obs": int(n), "n_trials": trials_out, "sharpe_per_period": round(sr, 4)},
         series={"returns": arr},
         result=round(dsr, 4),
     )
@@ -178,7 +217,7 @@ def deflated_sharpe(
     record(
         "sr0_expected_max",
         "sigma_SR * ((1-gamma)*Phi^{-1}(1-1/N) + gamma*Phi^{-1}(1-1/(N*e)))",
-        inputs={"n_trials": int(n_trials), "trials_sharpe_std": round(std_for_max, 4)},
+        inputs={"n_trials": trials_out, "trials_sharpe_std": round(std_for_max, 4)},
         series={"returns": arr},
         result=round(sr0, 4),
     )

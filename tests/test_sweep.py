@@ -51,7 +51,7 @@ def test_there_is_no_way_to_assert_a_trial_count():
 
 def test_larger_grid_deflates_harder():
     p = prices()
-    small = sweep(ma_cross, {"fast": [10], "slow": [50]}, data=p)
+    small = sweep(ma_cross, {"fast": [10, 15], "slow": [50, 200]}, data=p)
     large = sweep(ma_cross, {"fast": [5, 8, 10, 12, 15, 20], "slow": [40, 50, 80, 100, 150, 200]}, data=p)
     assert large.n_trials > small.n_trials
     # Same underlying rule family, more search, so the honest verdict cannot be

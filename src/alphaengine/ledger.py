@@ -502,8 +502,14 @@ def execute_local_workflow(
                 sweep_res = ex.workspace.get("sweep")
                 if sweep_res is not None:
                     best = sweep_res.best
-                    returns_col = sweep_res.matrix[:, best.index].tolist()
+                    ok_trials = [t for t in sweep_res.trials if t.failed is None]
+                    returns_col = sweep_res.matrix[:, ok_trials.index(best)].tolist()
                     trial_rows = sweep_res.ledger()
+                    sv = sweep_res.verdict()
+                    figures["n_eff_participation"] = sv.get("n_eff_participation")
+                    figures["deflated_sharpe_at_n_eff"] = sv.get("deflated_sharpe_at_n_eff")
+                    figures["n_eff_diagnostic_note"] = sv.get("n_eff_diagnostic_note")
+                    n_trials = len(ok_trials)
             else:
                 perf = ex.execute("compute.performance_report", no_trials_inp)
                 mintrl = ex.execute("compute.min_track_record_length", no_trials_inp)

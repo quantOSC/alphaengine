@@ -25,7 +25,13 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
-from ..core import deflated_sharpe, min_track_record_length, pbo_cscv, performance_report
+from ..core import (
+    deflated_sharpe,
+    min_track_record_length,
+    n_eff_participation,
+    pbo_cscv,
+    performance_report,
+)
 
 __all__ = ["sweep", "SweepResult"]
 
@@ -127,31 +133,40 @@ class SweepResult:
         the same thing would be a mistake.
         """
         best = self.best
-        col = self.matrix[:, best.index]
         # Cross-trial variance of Sharpe ratios per Bailey & López de Prado (2014).
         # Fallback to single-series sampling error (trials_sharpe_std=None) only when fewer
-        # than 2 valid trials exist.
+        # than 2 valid trials exist. Failed trials do not count toward N.
         ok = [t for t in self.trials if t.failed is None]
+        col = self.matrix[:, ok.index(best)]
         trials_sharpe_std: float | None = None
         if len(ok) >= 2:
             dispersion = float(np.std([t.sharpe for t in ok], ddof=1))
             if math.isfinite(dispersion) and dispersion > 0:
                 trials_sharpe_std = dispersion
-        effective_n = (
-            max(self.n_trials, int(self.cumulative_trials))
-            if self.cumulative_trials is not None
-            else self.n_trials
-        )
+        n_ok = len(ok)
+        effective_n = max(n_ok, int(self.cumulative_trials)) if self.cumulative_trials is not None else n_ok
+        n_eff = round(n_eff_participation(self.matrix), 4)
         dsr = deflated_sharpe(
             col.tolist(),
             n_trials=effective_n,
             trials_sharpe_std=trials_sharpe_std,
             risk_free_rate=risk_free_rate,
         )
+        dsr_neff = deflated_sharpe(
+            col.tolist(),
+            n_trials=n_eff,
+            trials_sharpe_std=trials_sharpe_std,
+            risk_free_rate=risk_free_rate,
+        )
         out: dict[str, Any] = {
             "n_trials": effective_n,
-            "run_n_trials": self.n_trials,
+            "run_n_trials": n_ok,
             "n_trials_source": "derived_from_grid",
+            "n_eff_participation": n_eff,
+            "deflated_sharpe_at_n_eff": dsr_neff.get("deflated_sharpe"),
+            "n_eff_diagnostic_note": (
+                "diagnostic only; headline deflated_sharpe uses n_trials with cross-trial trials_sharpe_std"
+            ),
             "best_trial_index": best.index,
             "best_params_hash": best.params_hash,
             "data_hash": self.data_hash,
@@ -408,8 +423,8 @@ def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable
         grid_serializable = {str(k): list(v) for k, v in grid.items()}
         family = f"sweep:{','.join(result.grid_keys)}" if result.grid_keys else "sweep"
         best = result.best
-        best_col = result.matrix[:, best.index].tolist()
         ok = [t for t in result.trials if t.failed is None]
+        best_col = result.matrix[:, ok.index(best)].tolist()
         disp = float(np.std([t.sharpe for t in ok], ddof=1)) if len(ok) >= 2 else None
         trials_std = disp if (disp is not None and math.isfinite(disp) and disp > 0) else None
         v = result.verdict()
@@ -427,11 +442,14 @@ def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable
             command="sweep",
             params={"grid": grid_serializable, "grid_keys": result.grid_keys},
             dataset_hashes=[result.data_hash] if result.data_hash else [],
-            n_trials=result.n_trials,
+            n_trials=len(ok),
             n_trials_source="derived_from_grid",
             figures={
                 "n_trials": v["n_trials"],
                 "n_trials_source": v["n_trials_source"],
+                "n_eff_participation": v.get("n_eff_participation"),
+                "deflated_sharpe_at_n_eff": v.get("deflated_sharpe_at_n_eff"),
+                "n_eff_diagnostic_note": v.get("n_eff_diagnostic_note"),
                 "deflated_sharpe": v.get("deflated_sharpe"),
                 "psr_vs_zero": v.get("psr_vs_zero"),
                 "sr0_expected_max": v.get("sr0_expected_max"),

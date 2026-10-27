@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "alphaengine"
-version = "1.1.4"
+version = "1.1.5"
 description = "Validated research tooling for investment strategies: deflation, overfitting detection, and honest trial counts."
 readme = "README.md"
 license = "Apache-2.0"

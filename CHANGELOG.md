@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.5] - 2026-10-27
+
+### Fixed
+- **Correlated-trial DSR and failed-trial counting (`core/validation.py`, `sweep/runner.py`, `ledger.py` — H5):**
+  - Removed the `max(trials_sharpe_std, sr_est_sd)` floor in `deflated_sharpe` so supplied cross-trial Sharpe dispersion $\sigma_{\text{SR}} > 0$ is used directly without being overridden by single-series Lo (2002) sampling error when trials are positively correlated. On `N=100, T=1260, \rho=0.8` equicorrelated noise trials, annualized `sr0_expected_max` moves `~1.13 -> ~0.51`; on `N=50, T=1000, \rho=0.95`, per-period `sr0_expected_max` moves `0.072 -> ~0.017`. On the `alphaengine.demo` 9-trial MA grid, `sr0_expected_max` moves `0.0736 -> 0.0493` and `deflated_sharpe` moves `0.4004 -> 0.5625`. Pinned single-series `DSR_GOLDEN` values in `tests/test_goldens.py` are unchanged.
+  - Added `n_eff_participation(matrix_or_corr)` computing $(\sum \lambda_i)^2 / \sum \lambda_i^2$ over the eigenvalues of the trial-return correlation matrix, and reported `n_eff_participation` and diagnostic `deflated_sharpe_at_n_eff` in `SweepResult.verdict()` and ledger run figures.
+  - Excluded failed grid trials from the effective trial count `N` (`len(ok)`) and fixed `best` column indexing when earlier grid trials fail.
+
 ## [1.1.4] - 2026-10-27
 
 ### Fixed
