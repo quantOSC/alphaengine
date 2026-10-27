@@ -30,6 +30,7 @@ import json
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -98,26 +99,58 @@ def redact_secrets(text: str) -> str:
     return _SECRET_RE.sub(_mask, text)
 
 
+_KEYRING: Any = None
+_KEYRING_WAIT_S = 0.4
+
+
 def _keyring_module() -> Any | None:
+    """The OS vault is optional. A hung import must not delay the first line of output."""
+    global _KEYRING
     if os.environ.get("PYTEST_CURRENT_TEST") and not _ALLOW_KEYRING_IN_TEST:
         return None
-    try:
-        import importlib  # noqa: PLC0415
-
-        return importlib.import_module("keyring")
-    except Exception:  # noqa: BLE001
+    if _KEYRING is False:
         return None
+    if _KEYRING is not None:
+        return _KEYRING
+    box: dict[str, Any] = {}
+
+    def _load() -> None:
+        try:
+            import importlib  # noqa: PLC0415
+
+            box["mod"] = importlib.import_module("keyring")
+        except Exception:  # noqa: BLE001
+            box["mod"] = False
+
+    worker = threading.Thread(target=_load, name="ae-keyring", daemon=True)
+    worker.start()
+    worker.join(_KEYRING_WAIT_S)
+    if worker.is_alive() or "mod" not in box or box["mod"] is False:
+        _KEYRING = False
+        return None
+    _KEYRING = box["mod"]
+    return _KEYRING
 
 
 def _keyring_get(name: str) -> str | None:
     kr = _keyring_module()
     if kr is None:
         return None
-    try:
-        val = kr.get_password(_KEYRING_SERVICE, name)
-        return str(val) if isinstance(val, str) and val.strip() else None
-    except Exception:  # noqa: BLE001
+    box: dict[str, Any] = {}
+
+    def _read() -> None:
+        try:
+            box["val"] = kr.get_password(_KEYRING_SERVICE, name)
+        except Exception as exc:  # noqa: BLE001
+            box["err"] = exc
+
+    worker = threading.Thread(target=_read, name="ae-keyring-get", daemon=True)
+    worker.start()
+    worker.join(_KEYRING_WAIT_S)
+    if worker.is_alive() or "err" in box:
         return None
+    val = box.get("val")
+    return str(val) if isinstance(val, str) and val.strip() else None
 
 
 def _keyring_set(name: str, value: str) -> bool:

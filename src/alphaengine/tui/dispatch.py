@@ -26,6 +26,7 @@ from ..cli import (
     _repl_gap,
     _report,
     _split_run,
+    activity,
     dim,
     load_project,
     match_thesis,
@@ -860,6 +861,8 @@ def _overlap(desk: Desk, rest: str) -> None:
 
 
 def _scripted(desk: Desk, name: str, flags: list[str]) -> None:
+    activity(name)
+    say(dim(f"  {name}"))
     desk.matrix = None
     thesis_query, flags = pop_flag(flags, "--thesis")
     if thesis_query and not _pin_thesis(desk, thesis_query):
@@ -901,6 +904,7 @@ def _ensure_universe(desk: Desk, question: str = "", *, need_multi: bool = False
         return
     if need_multi and isinstance(desk.data, dict) and len(desk.data) >= 2:
         return
+    activity("loading data")
     if desk.keyed and desk.session is not None:
         from ..cli import _narrow_to_universe, _stored_universes
 
@@ -923,6 +927,8 @@ def _ensure_universe(desk: Desk, question: str = "", *, need_multi: bool = False
 
 def _sentence(desk: Desk, line: str) -> None:
     """A sentence is a stack of tool calls. A bakeoff is that stack's closed room."""
+    activity("starting")
+    say(dim("  starting"))
     think = _thinker(desk)
     if think is None:
         say("A scenario is a stack of tool calls. Enter a model key and the harness will choose them.")
@@ -942,7 +948,7 @@ def _sentence(desk: Desk, line: str) -> None:
         say(f"  {len(desk.trace_stack):02d}  {call.line()}")
 
     def invoke(name: str, args: dict[str, Any]) -> Any:
-        say(f"\x1f{name}")
+        activity(name)
         return _invoke_tool(desk, name, args)
 
     trace = run_tools(
@@ -1053,7 +1059,7 @@ def _record_agent_trace_in_project(desk: Desk, trace: Any) -> None:
 
 def _thinking(think: Callable[[str], str]) -> Callable[[str], str]:
     def wrapped(prompt: str) -> str:
-        say("\x1fmodel")
+        activity("model")
         return think(prompt)
 
     return wrapped
@@ -1064,6 +1070,7 @@ def _read(desk: Desk, trace: Any) -> None:
     from ..agent.brief import study_for
     from ..agent.sim import narrate
 
+    activity("writing the report")
     study = study_for(trace, deep=True)
     trace.study = study
     findings = str(study.get("findings") or "")

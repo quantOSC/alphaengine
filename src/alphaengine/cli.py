@@ -358,6 +358,19 @@ def say(*parts: str) -> None:
     print(*(redact_secrets(str(p)) for p in parts), flush=True)
 
 
+def activity(label: str) -> None:
+    """Status while work is in flight.
+
+    The session paints this on the spinner and leaves the transcript alone.
+    A plain terminal gets one line, because there is no spinner to update.
+    """
+    sink = _SINK.get()
+    if sink is not None:
+        sink("\x1f" + label)
+        return
+    say(dim(f"  {label}"))
+
+
 #: Spinner frames. Braille where the stream takes it, ASCII where it does not —
 #: the same degradation `DOT` and `ARROW` get, for the same reason: a Windows
 #: cp1252 console rendered the pretty version as mojibake.
@@ -1828,13 +1841,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     from .project import find_project
 
     wf_str = str(getattr(args, "workflow", "") or "")
+    # The name is the first thing on screen. Key lookup and data load used to
+    # run before any line, so a job looked like it had not started.
     if (
-        getattr(args, "url", None)
-        and not getattr(args, "json_out", False)
-        and not wf_str.lower().endswith((".yaml", ".yml"))
+        not getattr(args, "json_out", False)
+        and not getattr(args, "quiet", False)
         and not getattr(args, "_header_printed", False)
+        and not wf_str.lower().endswith((".yaml", ".yml"))
     ):
-        say(f"{bold(args.workflow)} {dim(DOT + ' ' + resolve_api_url(args.url))}")
+        where = resolve_api_url(args.url) if getattr(args, "url", None) else "local"
+        say(f"{bold(args.workflow)} {dim(DOT + ' ' + where)}")
         args._header_printed = True
 
     try:
@@ -2110,14 +2126,29 @@ def _run_local_in_project(
         say(yellow(gap))
         return 2
 
+    quiet = bool(getattr(args, "quiet", False))
+    show_live = not json_out and not quiet
+    if show_live and not getattr(args, "_header_printed", False):
+        say(f"{bold(wf)} {dim(DOT + ' local')}")
+        args._header_printed = True
     try:
-        figures, verdict, n_trials, source, returns_col, trial_rows = execute_local_workflow(
-            wf,
-            data=data,
-            backtest_fn=backtest_fn,
-            grid=inputs.get("grid"),
-            inputs=inputs,
-        )
+        if show_live:
+            with Working(bold(wf), plain=wf):
+                figures, verdict, n_trials, source, returns_col, trial_rows = execute_local_workflow(
+                    wf,
+                    data=data,
+                    backtest_fn=backtest_fn,
+                    grid=inputs.get("grid"),
+                    inputs=inputs,
+                )
+        else:
+            figures, verdict, n_trials, source, returns_col, trial_rows = execute_local_workflow(
+                wf,
+                data=data,
+                backtest_fn=backtest_fn,
+                grid=inputs.get("grid"),
+                inputs=inputs,
+            )
     except Exception as exc:  # noqa: BLE001
         say(red(str(exc)))
         return 2
@@ -2175,6 +2206,8 @@ def _run_local_in_project(
                 + dim(f"(family {p0['family']}, cumulative trials {p0['cumulative_trials']})")
             )
 
+    if not json_out and not getattr(args, "quiet", False):
+        activity("recording")
     ds_hashes = hash_dataset_any(data)
     raw_data_flag = getattr(args, "data", None)
     if raw_data_flag and proj is not None:
@@ -3887,8 +3920,10 @@ def _ask(
     # The lesson generalises: stream a call whose output is PROSE, never one
     # whose output is a wire format. `on_thought` already narrates this one, in
     # the words a person wrote it in.
+    activity("starting")
     label = "your model"
     if think is None:
+        activity("model")
         try:
             think, label = build_think()
         except NoModelConfigured as exc:
@@ -3898,6 +3933,7 @@ def _ask(
     provider, _, model_name = label.partition("/")
     sink = EventSink(session=session if os.environ.get(_ENV_KEY) else None)
 
+    activity("reading the catalogue")
     try:
         catalogue = session.workflows()
     except Offline:

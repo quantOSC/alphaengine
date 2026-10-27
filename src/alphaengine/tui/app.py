@@ -281,6 +281,18 @@ class QuantOSApp(App[None]):
         if not (self.desk.pending_secret or self.desk.pending_provider or self.desk.pending_url):
             prompt.placeholder = "Ask"
 
+    def _project_trials(self, proj: Any) -> int:
+        """Ledger size is read off the UI tick. Cache it so the spinner is not blocked on disk."""
+        now = time.monotonic()
+        cached = getattr(self, "_trials_cache", None)
+        if isinstance(cached, tuple) and cached[0] == proj.root and now - float(cached[1]) < 2.0:
+            return int(cached[2])
+        from ..ledger import cumulative_trials_for
+
+        _family, total = cumulative_trials_for(proj)
+        self._trials_cache = (proj.root, now, int(total))
+        return int(total)
+
     def _paint_status(self, *, working: bool = False) -> None:
         from ..model import available_models
 
@@ -298,10 +310,7 @@ class QuantOSApp(App[None]):
 
         proj = find_project()
         if proj is not None:
-            from ..ledger import cumulative_trials_for
-
-            _ft, proj_trials = cumulative_trials_for(proj)
-            parts.append((f"project:{proj.name} · {proj_trials} trials", "#7ec8c4"))
+            parts.append((f"project:{proj.name} · {self._project_trials(proj)} trials", "#7ec8c4"))
         if models:
             parts.append((models[0][0], "#8b949e"))
         if self.loading and not self.busy:
