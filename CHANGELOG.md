@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [1.1.7] - 2026-10-27
+
+### Fixed
+- **Engle-Granger MacKinnon cointegration p-values (`core/pairs.py` — H3):** Updated `engle_granger_test(log_a, log_b)` and `compute_spread_signal` (`analyze_pair`) to use `statsmodels.tsa.stattools.coint(log_a, log_b, trend="c")` (`pvalue_method="mackinnon_coint"`) while keeping the TLS hedge ratio for spread construction and sizing. Previously running univariate `adfuller` on the estimated-hedge residual inflated the false-positive rate on 400 independent random-walk pairs (`n=500`) from the nominal `5%` to `~22%` (`0.22 -> 0.0475`).
+
 ## [1.1.6] - 2026-10-27
 
 ### Fixed

@@ -32,7 +32,7 @@ import warnings
 from typing import Any
 
 import numpy as np
-from statsmodels.tsa.stattools import adfuller
+from statsmodels.tsa.stattools import coint
 
 from .trace import record
 
@@ -214,30 +214,60 @@ def compute_spread(a_closes: np.ndarray, b_closes: np.ndarray, hedge_ratio: floa
     return np.log(a) - hedge_ratio * np.log(b)
 
 
-def engle_granger_test(spread: np.ndarray) -> dict:
-    """ADF on the spread. Null: unit root (NOT cointegrated). Reject at p<0.05."""
-    spread_clean = np.asarray(spread, dtype=float)
-    spread_clean = spread_clean[np.isfinite(spread_clean)]
-    if len(spread_clean) < 30:
+def engle_granger_test(log_a: np.ndarray, log_b: np.ndarray) -> dict[str, Any]:
+    """Two-step Engle-Granger cointegration test using MacKinnon p-values (`coint`).
+
+    Null: no cointegration (unit root in the first-stage OLS residual). Reject at p < 0.05.
+    """
+    a_arr = np.asarray(log_a, dtype=float).reshape(-1)
+    b_arr = np.asarray(log_b, dtype=float).reshape(-1)
+    n = min(len(a_arr), len(b_arr))
+    a_arr = a_arr[:n]
+    b_arr = b_arr[:n]
+    mask = np.isfinite(a_arr) & np.isfinite(b_arr)
+    a_clean = a_arr[mask]
+    b_clean = b_arr[mask]
+    if len(a_clean) < 30:
         return {
             "p_value": None,
             "test_statistic": None,
+            "critical_values": None,
+            "n_lags": None,
             "method": "engle_granger",
+            "pvalue_method": "mackinnon_coint",
             "error": "insufficient_data",
         }
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
-            result = adfuller(spread_clean, regression="c", autolag="AIC")
+            coint_t, pvalue, crit_vals = coint(a_clean, b_clean, trend="c")
+        crit_dict = (
+            {
+                "1%": float(crit_vals[0]),
+                "5%": float(crit_vals[1]),
+                "10%": float(crit_vals[2]),
+            }
+            if len(crit_vals) >= 3
+            else {}
+        )
         return {
-            "p_value": float(result[1]),
-            "test_statistic": float(result[0]),
-            "critical_values": {k: float(v) for k, v in result[4].items()},
-            "n_lags": int(result[2]),
+            "p_value": float(pvalue),
+            "test_statistic": float(coint_t),
+            "critical_values": crit_dict,
+            "n_lags": None,
             "method": "engle_granger",
+            "pvalue_method": "mackinnon_coint",
         }
     except Exception as e:  # noqa: BLE001
-        return {"p_value": None, "test_statistic": None, "method": "engle_granger", "error": str(e)}
+        return {
+            "p_value": None,
+            "test_statistic": None,
+            "critical_values": None,
+            "n_lags": None,
+            "method": "engle_granger",
+            "pvalue_method": "mackinnon_coint",
+            "error": str(e),
+        }
 
 
 def compute_spread_signal(
@@ -319,7 +349,7 @@ def compute_spread_signal(
             "cointegrated": False,
         }
 
-    eg = engle_granger_test(spread)
+    eg = engle_granger_test(log_a, log_b)
     p_value = eg.get("p_value")
 
     recent_spread = spread[-zscore_window:]
@@ -428,6 +458,7 @@ def compute_spread_signal(
             "critical_values": eg.get("critical_values"),
             "n_lags": eg.get("n_lags"),
             "method": eg.get("method"),
+            "pvalue_method": eg.get("pvalue_method"),
             "significant_at_5pct": bool(p_ok),
         },
         "half_life_days": _clean(round(half_life, 2)) if half_life is not None else None,
@@ -459,6 +490,9 @@ def compute_spread_signal(
         "trade_signal": trade_signal,
         "reasons": reasons,
     }
+
+
+analyze_pair = compute_spread_signal
 
 
 def _benjamini_hochberg(p_values: list[float], alpha: float) -> list[bool]:

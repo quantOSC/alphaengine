@@ -601,3 +601,56 @@ def test_garch_calibrate_matches_live_arch_package() -> None:
     assert cal["converged"] is True
     assert cal["alpha"] == pytest.approx(float(am.params["alpha[1]"]), abs=0.01)
     assert cal["beta"] == pytest.approx(float(am.params["beta[1]"]), abs=0.01)
+
+
+def test_engle_granger_mackinnon_coint_pvalues_and_false_positive_rate() -> None:
+    """Milestone 4 (H3): Engle-Granger uses statsmodels coint MacKinnon p-values.
+
+    1. 400 seeded pairs of independent random walks (n=500): share with p<0.05
+       is in [0.02, 0.08] (univariate ADF on estimated residual gave ~0.22).
+    2. Fixed pair p-value matches coint(log_a, log_b, trend='c')[1] to 1e-10.
+    3. Constructed cointegrated pair (b = RW, a = 1.5*b + AR(0.5) noise) gives p < 0.01.
+    """
+    pytest.importorskip("statsmodels")
+    from statsmodels.tsa.stattools import coint
+
+    from alphaengine.core.pairs import compute_spread_signal, engle_granger_test
+
+    rng = np.random.default_rng(2026)
+    n_pairs = 400
+    n_obs = 500
+    false_pos = 0
+    for _ in range(n_pairs):
+        rw_a = np.cumsum(rng.normal(0.0, 0.01, n_obs))
+        rw_b = np.cumsum(rng.normal(0.0, 0.01, n_obs))
+        eg = engle_granger_test(rw_a, rw_b)
+        assert eg["pvalue_method"] == "mackinnon_coint"
+        if eg["p_value"] is not None and eg["p_value"] < 0.05:
+            false_pos += 1
+    fp_share = false_pos / n_pairs
+    assert 0.02 <= fp_share <= 0.08
+
+    # Fixed pair matches coint(log_a, log_b, trend="c")[1] to 1e-10
+    rng_fixed = np.random.default_rng(99)
+    fixed_a = np.cumsum(rng_fixed.normal(0.0, 0.01, n_obs))
+    fixed_b = np.cumsum(rng_fixed.normal(0.0, 0.01, n_obs))
+    expected_p = float(coint(fixed_a, fixed_b, trend="c")[1])
+    got_eg = engle_granger_test(fixed_a, fixed_b)
+    assert got_eg["p_value"] == pytest.approx(expected_p, abs=1e-10)
+
+    # Constructed cointegrated pair: b = random walk, a = 1.5*b + AR(0.5) noise
+    rng_coint = np.random.default_rng(7)
+    b_log = 4.0 + np.cumsum(rng_coint.normal(0.0, 0.01, n_obs))
+    ar_noise = np.empty(n_obs, dtype=float)
+    ar_noise[0] = 0.0
+    for t in range(1, n_obs):
+        ar_noise[t] = 0.5 * ar_noise[t - 1] + rng_coint.normal(0.0, 0.005)
+    a_log = 1.5 * b_log + ar_noise
+    eg_coint = engle_granger_test(a_log, b_log)
+    assert eg_coint["p_value"] is not None and eg_coint["p_value"] < 0.01
+
+    sig = compute_spread_signal(
+        np.exp(a_log).tolist(), np.exp(b_log).tolist(), symbol_a="AAA", symbol_b="BBB"
+    )
+    assert sig["cointegration"]["pvalue_method"] == "mackinnon_coint"
+    assert sig["cointegration"]["p_value"] < 0.01
