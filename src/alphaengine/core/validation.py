@@ -173,9 +173,10 @@ def _as_1d_float(values: ArrayLike | Sequence[float] | None) -> np.ndarray:
 
 # ── Sharpe statistics ───────────────────────────────────────────────────
 
-# Sample volatility at or below this is zero for a Sharpe. A constant series
-# is not always ``std == 0`` in float64, and dividing by that residual prints
-# a ratio with no economic meaning. Same tolerance in ``core.performance``.
+# Sample volatility below this is zero for a Sharpe. Exactly 1e-6 still
+# divides. A constant series is not always ``std == 0`` in float64, and
+# dividing by that residual prints a ratio with no economic meaning. Same
+# tolerance in ``core.performance``.
 _ZERO_VOL = 1e-6
 
 
@@ -185,11 +186,11 @@ def _per_period_sharpe(returns: np.ndarray, *, risk_free_per_period: float = 0.0
     An explicit 0 is excess of zero. The bill, when one is used, is subtracted
     by the caller before this function sees the series. Vol is the sample
     standard deviation of the returns (ddof=1); subtracting a constant does
-    not change it, or the skew, or the kurtosis. Vol at or below ``1e-6`` is
-    treated as zero and the Sharpe is 0.
+    not change it, or the skew, or the kurtosis. Vol below ``1e-6`` is treated
+    as zero and the Sharpe is 0. Exactly ``1e-6`` still divides.
     """
     sd = returns.std(ddof=1)
-    if not math.isfinite(sd) or sd <= _ZERO_VOL:
+    if not math.isfinite(sd) or sd < _ZERO_VOL:
         return 0.0
     return float((returns.mean() - float(risk_free_per_period)) / sd)
 
@@ -429,7 +430,7 @@ def _block_sharpe(sums: np.ndarray, sqs: np.ndarray, counts: np.ndarray, blocks:
     var = q / c - mean**2
     sd = np.sqrt(np.maximum(var, 0.0))
     with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(sd > _ZERO_VOL, mean / sd, 0.0)
+        return np.where(sd >= _ZERO_VOL, mean / sd, 0.0)
 
 
 def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:

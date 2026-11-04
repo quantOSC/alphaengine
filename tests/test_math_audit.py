@@ -141,10 +141,10 @@ def test_residual_close_completes_the_trade_log_and_not_the_equity() -> None:
 
 
 def test_zero_vol_tolerance_keeps_sharpe_at_zero() -> None:
-    """Sample vol at or below 1e-6 is zero for Sharpe, in performance and validation.
+    """Sample vol below 1e-6 is zero for Sharpe, in performance and validation.
 
     A constant series plus a shift of ``d`` has sample std ``|d| / sqrt(n)``.
-    Below the tolerance the ratio is 0; above it the division still happens.
+    Below the tolerance the ratio is 0. Exactly 1e-6 still divides.
     """
     n = 40
     level = 0.01
@@ -156,7 +156,7 @@ def test_zero_vol_tolerance_keeps_sharpe_at_zero() -> None:
 
     below = series(0.5e-6)
     above = series(2e-6)
-    assert 0 < float(below.std(ddof=1)) <= 1e-6
+    assert 0 < float(below.std(ddof=1)) < 1e-6
     assert float(above.std(ddof=1)) > 1e-6
 
     quiet = performance_report(below, risk_free_rate=0.0)
@@ -211,6 +211,39 @@ def test_final_close_charges_transaction_cost() -> None:
     )
     assert free["final_equity"] == 100_000.0
     assert free["cost_breakdown"]["total"] == 0.0
+
+
+def test_zero_or_missing_final_close_skips_the_position() -> None:
+    """A zero or missing final close is not a fill. The open position is left alone."""
+    dates = ["2020-03-02", "2020-03-03"]
+    signals = {"AAA": [{"date": dates[0], "target_weight": 1.0}]}
+
+    zero_close = run_backtest(
+        signals,
+        {"AAA": [{"date": dates[0], "close": 100.0}, {"date": dates[1], "close": 0.0}]},
+        slippage_bps=10,
+        commission_bps=10,
+        fill_timing="close",
+        initial_capital=100_000,
+    )
+    assert "error" not in zero_close
+    assert zero_close["trades"] == []
+    assert zero_close["n_bars"] == 2
+
+    missing_close = run_backtest(
+        signals,
+        {
+            "AAA": [{"date": dates[0], "close": 100.0}, {"date": dates[1]}],
+            "BBB": [{"date": dates[0], "close": 50.0}, {"date": dates[1], "close": 51.0}],
+        },
+        slippage_bps=10,
+        commission_bps=10,
+        fill_timing="close",
+        initial_capital=100_000,
+    )
+    assert "error" not in missing_close
+    assert missing_close["trades"] == []
+    assert missing_close["n_bars"] == 2
 
 
 def test_missing_or_one_trial_is_inconclusive_without_deflation() -> None:

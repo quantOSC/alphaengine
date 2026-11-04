@@ -294,6 +294,8 @@ def run_backtest(
     for tk in tickers:
         if pos[tk]["shares"] != 0.0 and prices_n[tk].get(last):
             fillp = prices_n[tk][last]["close"]
+            if not fillp or fillp <= 0:
+                continue
             delta = -pos[tk]["shares"]
             exec_price = fillp * (1 + slip) if delta > 0 else fillp * (1 - slip)
             adv_tk = _adv.get(tk)
@@ -314,6 +316,7 @@ def run_backtest(
             _apply_fill(pos[tk], tk, delta, exec_price, last, trades)
     if equity_curve:
         equity_curve[-1] = round(_mark_equity(last), 2)
+    if costs_per_bar:
         costs_per_bar[-1] = round(costs_per_bar[-1] + close_cost, 6)
 
     returns = []
