@@ -140,6 +140,144 @@ def test_residual_close_completes_the_trade_log_and_not_the_equity() -> None:
     assert bt["trades"][-1]["side"] == "long"
 
 
+def test_zero_vol_tolerance_keeps_sharpe_at_zero() -> None:
+    """Sample vol below 1e-6 is zero for Sharpe, in performance and validation.
+
+    A constant series plus a shift of ``d`` has sample std ``|d| / sqrt(n)``.
+    Below the tolerance the ratio is 0. Exactly 1e-6 still divides.
+    """
+    n = 40
+    level = 0.01
+
+    def series(sd: float) -> np.ndarray:
+        out = np.full(n, level)
+        out[-1] = level + sd * math.sqrt(n)
+        return out
+
+    below = series(0.5e-6)
+    above = series(2e-6)
+    assert 0 < float(below.std(ddof=1)) < 1e-6
+    assert float(above.std(ddof=1)) > 1e-6
+
+    quiet = performance_report(below, risk_free_rate=0.0)
+    loud = performance_report(above, risk_free_rate=0.0)
+    assert quiet["sharpe_ratio"] == 0.0
+    assert quiet["sharpe_annualized"] == 0.0
+    assert loud["sharpe_annualized"] != 0.0
+
+    assert _per_period_sharpe(below, risk_free_per_period=0.0) == 0.0
+    assert _per_period_sharpe(above, risk_free_per_period=0.0) != 0.0
+    dsr = deflated_sharpe(below, n_trials=5, risk_free_rate=0.0)
+    assert dsr["sharpe_per_period"] == 0.0
+
+
+def test_final_close_charges_transaction_cost() -> None:
+    """A position still open on the last bar pays slippage and commission to close.
+
+    Flat prices, so the only equity drop after the entry is the closing fill.
+    10 bps slippage and 10 bps commission on 1,000 shares at 100:
+    entry 200.10, close 199.90, last mark 99,600.
+    """
+    dates = ["2020-03-02", "2020-03-03"]
+    prices = {"AAA": [{"date": date, "close": 100.0} for date in dates]}
+    signals = {"AAA": [{"date": dates[0], "target_weight": 1.0}]}
+    bt = run_backtest(
+        signals,
+        prices,
+        slippage_bps=10,
+        commission_bps=10,
+        fill_timing="close",
+        initial_capital=100_000,
+    )
+
+    assert bt["trades"][-1]["exit_date"] == dates[-1]
+    assert bt["trades"][-1]["exit_price"] == 99.9
+    assert bt["equity_curve"] == [99799.9, 99600.0]
+    assert bt["final_equity"] == 99600.0
+    assert bt["costs_per_bar"] == [200.1, 199.9]
+    assert bt["cost_breakdown"] == {
+        "slippage": 200.0,
+        "commission": 200.0,
+        "impact": 0.0,
+        "total": 400.0,
+    }
+    free = run_backtest(
+        signals,
+        prices,
+        slippage_bps=0,
+        commission_bps=0,
+        fill_timing="close",
+        initial_capital=100_000,
+    )
+    assert free["final_equity"] == 100_000.0
+    assert free["cost_breakdown"]["total"] == 0.0
+
+
+def test_zero_or_missing_final_close_skips_the_position() -> None:
+    """A zero or missing final close is not a fill. The open position is left alone."""
+    dates = ["2020-03-02", "2020-03-03"]
+    signals = {"AAA": [{"date": dates[0], "target_weight": 1.0}]}
+
+    zero_close = run_backtest(
+        signals,
+        {"AAA": [{"date": dates[0], "close": 100.0}, {"date": dates[1], "close": 0.0}]},
+        slippage_bps=10,
+        commission_bps=10,
+        fill_timing="close",
+        initial_capital=100_000,
+    )
+    assert "error" not in zero_close
+    assert zero_close["trades"] == []
+    assert zero_close["n_bars"] == 2
+
+    missing_close = run_backtest(
+        signals,
+        {
+            "AAA": [{"date": dates[0], "close": 100.0}, {"date": dates[1]}],
+            "BBB": [{"date": dates[0], "close": 50.0}, {"date": dates[1], "close": 51.0}],
+        },
+        slippage_bps=10,
+        commission_bps=10,
+        fill_timing="close",
+        initial_capital=100_000,
+    )
+    assert "error" not in missing_close
+    assert missing_close["trades"] == []
+    assert missing_close["n_bars"] == 2
+
+
+def test_missing_or_one_trial_is_inconclusive_without_deflation() -> None:
+    """A missing trial count or a count of 1 does not deflate and cannot be edge.
+
+    The same stream at 5 trials keeps the previous gate: deflation is applied
+    and `deflation_applied` is not written onto that result.
+    """
+    returns = np.random.default_rng(0).normal(0.004, 0.01, 80)
+    bt = {"returns": returns.tolist(), "trades": [], "equity_curve": None}
+    missing = score_backtest(bt, n_trials=None, risk_free_rate=0.0)
+    one = score_backtest(bt, n_trials=1, risk_free_rate=0.0)
+    five = score_backtest(bt, n_trials=5, risk_free_rate=0.0)
+
+    assert missing["validation"]["n_trials"] is None
+    assert missing["validation"]["n_trials_source"] == "not_recorded"
+    assert missing["validation"]["deflation_applied"] is False
+    assert missing["validation"]["verdict"] == "inconclusive"
+    assert missing["validation"]["deflated_sharpe"] >= 0.9
+
+    assert one["validation"]["n_trials"] == 1
+    assert one["validation"]["n_trials_source"] == "asserted"
+    assert one["validation"]["deflation_applied"] is False
+    assert one["validation"]["verdict"] == "inconclusive"
+    assert one["validation"]["deflated_sharpe"] >= 0.9
+
+    assert five["validation"]["n_trials"] == 5
+    assert "deflation_applied" not in five["validation"]
+    assert five["dsr_detail"]["sr0_expected_max"] > 0
+    assert five["validation"]["deflated_sharpe"] < one["validation"]["deflated_sharpe"]
+    assert five["validation"]["deflated_sharpe"] >= 0.9
+    assert five["validation"]["verdict"] == "edge"
+
+
 def test_unrecorded_trial_count_cannot_reach_edge() -> None:
     returns = np.random.default_rng(1).normal(0.002, 0.005, 80)
     bt = {

@@ -23,7 +23,7 @@ from numpy.typing import ArrayLike
 
 from .rates import cash_rate, rate_fields
 from .trace import record
-from .validation import _as_1d_float
+from .validation import _ZERO_VOL, _as_1d_float
 
 _PPY = 252  # trading periods per year
 
@@ -73,7 +73,10 @@ def performance_report(
     excess = arr - rf_per
     sd = float(arr.std(ddof=1))
 
-    sharpe = float(excess.mean() / sd) if sd > 0 else 0.0
+    # Vol below 1e-6 is zero. Exactly 1e-6 still divides. Exact ``sd > 0``
+    # divides by float noise on a constant series and reports a Sharpe with
+    # no meaning.
+    sharpe = float(excess.mean() / sd) if math.isfinite(sd) and sd >= _ZERO_VOL else 0.0
     sharpe_ann = sharpe * math.sqrt(ppy)
 
     # Downside deviation is the TARGET SEMIDEVIATION: RMS of below-target
