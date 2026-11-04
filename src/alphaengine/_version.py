@@ -159,6 +159,12 @@ is what a changed figure costs. The API may still move underneath it.
 # prior-work warnings, export `[run_id]`-cited committee memos, discover
 # `alphaengine.plugins` entry points, watch datasets, monitor live drift, and
 # sync with quantOS on opt-in (`ae push` / `ae pull`).
+#
+# 1.1.11 charges the residual close (slippage, commission, impact) and folds
+# that cost into the last mark. Sample vol at or below 1e-6 is zero for Sharpe
+# in performance_report and in validation. A missing trial count or a count of
+# 1 cannot clear `edge`; that result carries deflation_applied false. A
+# recorded count above 1 is unchanged. Pinned goldens do not move.
 from importlib.metadata import version as _pkg_version
 
 __version__ = _pkg_version("alphaengine")

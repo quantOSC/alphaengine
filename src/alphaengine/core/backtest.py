@@ -286,17 +286,35 @@ def run_backtest(
         dates_out.append(d)
         costs_per_bar.append(round(bar_cost, 6))
 
-    # Close residual positions at the final close so every trade completes. This
-    # completes the trade LOG only (it does not touch cash/equity, see the module
-    # docstring); we still count its notional toward turnover.
+    # Close residual positions at the final close so every trade completes, and
+    # charge the same slippage, commission, and impact as any other fill. The
+    # last mark includes that cost.
     last = all_dates[-1]
+    close_cost = 0.0
     for tk in tickers:
         if pos[tk]["shares"] != 0.0 and prices_n[tk].get(last):
             fillp = prices_n[tk][last]["close"]
             delta = -pos[tk]["shares"]
             exec_price = fillp * (1 + slip) if delta > 0 else fillp * (1 - slip)
+            adv_tk = _adv.get(tk)
+            slip_cost = abs(delta) * fillp * slip
+            comm_cost = abs(delta) * exec_price * comm
+            impact_cost = 0.0
+            if adv_tk and _icoef:
+                notional = abs(delta) * exec_price
+                impact_cost = notional * _icoef * math.sqrt(notional / adv_tk)
+            cash -= delta * exec_price
+            cash -= comm_cost
+            cash -= impact_cost
+            slip_cost_total += slip_cost
+            comm_cost_total += comm_cost
+            impact_cost_total += impact_cost
             gross_notional += abs(delta) * exec_price
+            close_cost += slip_cost + comm_cost + impact_cost
             _apply_fill(pos[tk], tk, delta, exec_price, last, trades)
+    if equity_curve:
+        equity_curve[-1] = round(_mark_equity(last), 2)
+        costs_per_bar[-1] = round(costs_per_bar[-1] + close_cost, 6)
 
     returns = []
     for i in range(1, len(equity_curve)):
@@ -308,7 +326,7 @@ def run_backtest(
 
     record(
         "equity",
-        "marked equity after each bar; the residual close updates the trade log only",
+        "marked equity after each bar; the residual close is filled at the final close and its cost is in the last mark",
         inputs={
             "n_bars": len(dates_out),
             "fill_timing": "next_open" if fill_open else "close",
@@ -360,8 +378,20 @@ def run_backtest(
 # _edge_requires_validation rule, which a test cross-checks.
 
 
-def _verdict(dsr: float | None, pbo: float | None, n_trials_source: str = "asserted") -> str:
-    """The moat. `edge` requires BOTH a rigor figure and a recorded denominator.
+def _deflation_applied(n_trials: int | None, n_trials_source: str) -> bool:
+    """True only when a recorded count above 1 was actually used as N."""
+    if n_trials_source == "not_recorded" or n_trials is None:
+        return False
+    return int(n_trials) > 1
+
+
+def _verdict(
+    dsr: float | None,
+    pbo: float | None,
+    n_trials_source: str = "asserted",
+    n_trials: int | None = None,
+) -> str:
+    """The moat. `edge` requires a rigor figure and a recorded count above 1.
 
     THE HOLE THIS CLOSES (0.2.0). `score_backtest` declared `n_trials: int = 1`,
     so a caller who simply omitted the argument got the most generous deflation
@@ -370,14 +400,15 @@ def _verdict(dsr: float | None, pbo: float | None, n_trials_source: str = "asser
     trial count was the easiest path to `edge`**, in the function whose own
     docstring advertises deflation as the overfitting moat.
 
-    A deflated Sharpe is a ratio and `n_trials` is its denominator. Deflating by
-    an unrecorded denominator does not produce a weaker claim; it produces a
-    claim about nothing. So an unrecorded count caps the verdict at
-    `inconclusive`. The figure is still computed and returned, because the
-    undeflated number is informative -- it just cannot clear the gate alone.
+    A deflated Sharpe is a ratio and `n_trials` is its denominator. An unrecorded
+    count, and a count of 1, apply no multiple-testing deflation (SR0 = 0). That
+    result stays `inconclusive` whenever it is not already `likely_noise` on the
+    figure itself, and it is flagged `deflation_applied: false`. The figure is
+    still computed and returned, because the undeflated number is informative --
+    it just cannot clear the gate alone.
 
-    `sweep()` is unaffected: it derives `n_trials` as a property with no setter,
-    so its source is always `derived_from_grid`.
+    `sweep()` is unaffected when the grid has more than one trial: it derives
+    `n_trials` as a property with no setter, so its source is `derived_from_grid`.
     """
     if dsr is None:
         return "inconclusive"  # no rigor figure -> never 'edge'
@@ -385,8 +416,8 @@ def _verdict(dsr: float | None, pbo: float | None, n_trials_source: str = "asser
         return "likely_noise"  # overfit by PBO
     if dsr < 0.5:
         return "likely_noise"  # weak on its own terms, denominator or not
-    if n_trials_source == "not_recorded":
-        return "inconclusive"  # no denominator -> never 'edge'
+    if not _deflation_applied(n_trials, n_trials_source):
+        return "inconclusive"  # missing or one trial -> never 'edge'
     if dsr >= 0.9 and (pbo is None or pbo <= 0.2):
         return "edge"
     return "inconclusive"
@@ -607,11 +638,12 @@ def score_backtest(
     **IT DEFAULTS TO `None`, NOT TO 1** (changed in 0.2.0). The old default made
     omission the most generous possible answer -- no deflation, a populated
     `deflated_sharpe`, and therefore the easiest available route to an `edge`
-    verdict. `None` now means NOT RECORDED, which is a different claim from "I
-    searched one configuration" and is reported as such: `n_trials` comes back
-    `null` rather than 1, and `edge` is unreachable. The DSR itself is still
-    computed at an effective denominator of 1 and returned, because the
-    undeflated figure is informative -- it just cannot clear a gate on its own.
+    verdict. `None` means NOT RECORDED and is reported as `null`, not as 1.
+    A missing count and a count of 1 both apply no multiple-testing deflation:
+    the verdict is `inconclusive` (unless the figure is already `likely_noise`)
+    and `validation.deflation_applied` is false. The DSR itself is still
+    computed and returned, because the undeflated figure is informative -- it
+    just cannot clear a gate on its own. A recorded count above 1 is unchanged.
 
     `n_trials_source` is one of `derived_from_grid`, `asserted`, `not_recorded`.
     A count that was COUNTED and a count that was CLAIMED are different claims,
@@ -620,7 +652,8 @@ def score_backtest(
     `n_trials` when omitted.
 
     The 'edge' verdict is structurally unreachable unless a deflated_sharpe
-    figure is populated AND its denominator was recorded (the moat).
+    figure is populated AND its denominator was recorded as a count above 1
+    (the moat). A missing count or a count of 1 sets `deflation_applied` false.
 
     The validation block always surfaces the AR(1)-honest effective sample size
     (`n_obs_effective`) and the Harvey-Liu multiple-testing hurdle (`sharpe_tstat`
@@ -728,7 +761,7 @@ def score_backtest(
         "n_trials": (int(n_trials) if n_trials is not None else None),
         "n_trials_source": source,
         "n_eff_participation": n_eff_part,
-        "verdict": _verdict(dsr_val, pbo_val, source),
+        "verdict": _verdict(dsr_val, pbo_val, source, n_trials),
         # A2, autocorrelation-honest significance.
         "n_obs": n_obs_val,
         "n_obs_effective": round(n_eff, 1),
@@ -743,6 +776,8 @@ def score_backtest(
         "track_length_sufficient": (mintrl.get("sufficient") if mintrl_ok else None),
         "track_record_shortfall_obs": (mintrl.get("shortfall_obs") if mintrl_ok else None),
     }
+    if not _deflation_applied(n_trials, source):
+        validation["deflation_applied"] = False
 
     not_computed: dict = {}
     if not (isinstance(perf, dict) and "error" not in perf):
@@ -789,7 +824,7 @@ def score_backtest(
 
     record(
         "verdict",
-        "edge requires a recorded n_trials, dsr >= 0.9, and pbo <= 0.2 when pbo is present",
+        "edge requires a recorded n_trials > 1, dsr >= 0.9, and pbo <= 0.2 when pbo is present",
         inputs={
             "n_trials": validation["n_trials"],
             "n_trials_source": source,
