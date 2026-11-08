@@ -8,7 +8,7 @@ This document provides the authoritative architectural specification and referen
 
 - **Server Name:** `alphaengine`
 - **Host / Deployment Endpoint:** `aemcp`
-- **Engine Version:** `2.0.0`
+- **Engine Version:** `2.0.1`
 - **Protocol:** Model Context Protocol (MCP) JSON-RPC over `stdio`, `sse`, or HTTP streaming.
 - **Authentication:**
   - Deterministic calculations: 100% free, local, and keyless.
@@ -70,7 +70,7 @@ Contrary to outdated documentation claiming the entire gateway is "stateless":
 
 Every tool output returning numeric or qualitative evaluation conforms to AlphaEngine 2.0 standards:
 
-1. **Live Engine Version Stamp:** Every figure and response object includes `"engine_version": "2.0.0"`.
+1. **Live Engine Version Stamp:** Every figure and response object includes `"engine_version": "2.0.1"`.
 2. **Unified Verdict Vocabulary:** Overfitting and validation tools emit the canonical 2.0 `Verdict` enum:
    - `robust` (DSR \(\ge 0.90\), PBO \(\le 0.20\), \(N > 1\))
    - `marginal` (\(0.50 \le \text{DSR} < 0.90\) or unassisted \(N \le 1\))

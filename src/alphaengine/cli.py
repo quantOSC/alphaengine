@@ -2699,9 +2699,13 @@ def _cmd_run_coded_signal(
             f"  {dim('trials (cumulative)')}   {env['cumulative_trials']}  "
             f"{dim('(' + env['n_trials_source'] + ', this run ' + str(res.get('run_n_trials')) + ')')}"
         )
+        verd_txt = str(env.get("verdict") or "")
+        reason = env["figures"].get("verdict_reason") or res.get("verdict_reason")
+        if reason:
+            verd_txt = f"{verd_txt}: {reason}"
         say(
             f"  {dim('dsr_probability')}       {env['figures'].get('dsr_probability')}  "
-            f"{dim('(' + str(env.get('verdict') or '') + ')')}"
+            f"{dim('(' + verd_txt + ')')}"
         )
     return 0
 
@@ -5567,9 +5571,14 @@ def cmd_show(args: argparse.Namespace) -> int:
     cum_t = r.get("cumulative_trials")
     proj_t = r.get("project_trials")
     say(f"    {dim('trials (cumulative)')} {cum_t} (project total: {proj_t})")
-    say(f"    {dim('verdict')}            {r.get('verdict')}")
-    say(f"    {dim('engine_version')}     {r.get('engine_version')}")
+    verd = r.get("verdict")
     figs = r.get("figures") or {}
+    reason = (figs.get("verdict_reason") if isinstance(figs, dict) else None) or r.get("verdict_reason")
+    if reason:
+        say(f"    {dim('verdict')}            {verd} ({reason})")
+    else:
+        say(f"    {dim('verdict')}            {verd}")
+    say(f"    {dim('engine_version')}     {r.get('engine_version')}")
     if isinstance(figs, dict) and figs:
         say("")
         say("  " + bold("figures"))

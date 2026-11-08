@@ -2,15 +2,16 @@
 
 ── PRODUCT BOUNDARY ───────────────────────────────────────────────────────────
 
-The open-source Python library (`import alphaengine`), `alphaengine demo`,
-`alphaengine process`, `ae verify` on sealed studies, and diagnostic commands
-(`ae version`, `ae whoami`, `ae doctor`) run without an account or key.
+All local commands run free with no key: `init`, `log`, `show`, `diff`,
+`rerun`, `data`, `idea`, `seal`, `verify`, `sweep`, `validate`, `run` (local),
+`demo`, `process`, `watch`, `shell`, `plugin`, `report memo`, and the rest of
+the offline Research OS, plus `import alphaengine` and keyless diagnostics
+(`ae version`, `ae whoami`, `ae doctor`).
 
-CLI workflows (`run`, `diagnose`, `screen`, `signal`, `validate`, `stress`,
-`overlap`, `size`, `monitor`, `watch`) and workspace commands (`init`, `log`,
-`show`, `diff`, `rerun`, `data`, `idea`, `seal`, `report`, `remote`, `push`,
-`pull`, `plugin`, `shell`) require a firm-issued `ae_live_` key from Connect in
-the quantOS portal, checked at `require_firm_key` and verified server-side.
+The firm `ae_live_` key is checked server-side only, for `push` / `pull` /
+`sync`, the shared ledger, remote run (`--url`), hosted MCP, import, AI, and
+the network-gated commands (`workflows`, `runs`, `gaps`, `tonight`). See
+`docs/free-vs-firm.md`.
 
 ── CREDENTIAL STORAGE (`QOS-155`) ─────────────────────────────────────────────
 

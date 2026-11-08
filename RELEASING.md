@@ -41,11 +41,11 @@ All commands must exit 0 with zero warnings or errors.
 
 1. Update `src/alphaengine/_version.py`:
    ```python
-   __version__ = "2.0.0"  # or "2.0.0rc1", "2.1.0", etc.
+   __version__ = "2.0.1"  # or "2.0.1rc1", "2.1.0", etc.
    ```
 2. Update `CHANGELOG.md`:
-   - Ensure the topmost header matches the target version: `## [2.0.0] - YYYY-MM-DD`.
-   - Ensure all output changes and breaking modifications are documented under `### 2.0.0: output changes`.
+   - Ensure the topmost header matches the target version: `## [2.0.1] - YYYY-MM-DD`.
+   - Ensure all output changes and breaking modifications are documented under `### 2.0.1: output changes`.
 3. Validate version synchronization:
    ```bash
    python scripts/check_version_sync.py
@@ -66,12 +66,12 @@ Check the built artifacts:
 python -m twine check dist/*
 ```
 
-### Canonical 2.0.0 Built Artifact Digests (`QOS-173`, `QOS-175`)
+### Canonical 2.0.1 Built Artifact Digests (`QOS-173`, `QOS-175`)
 
-- **Wheel (`dist/alphaengine-2.0.0-py3-none-any.whl`):**
-  `sha256:91a4f699dc5d2a95cc603f8f1f6bfb343e3280e66e0ffddcc13e048b83222aca`
-- **Source Distribution (`dist/alphaengine-2.0.0.tar.gz`):**
-  `sha256:5424564fb8e8bd8f4170ab89527ee217a8ebefecd9733689642440a639496b81`
+- **Wheel (`dist/alphaengine-2.0.1-py3-none-any.whl`):**
+  `sha256:e1d1fed6380dbbd65e32efde71c82474300a25d633920a41af312a17be8178bf`
+- **Source Distribution (`dist/alphaengine-2.0.1.tar.gz`):**
+  `sha256:b17d0641c9a7a9d9cee7d91b5b24a434ac27e70296497ec2322cd3d50cc40fdd`
 
 These digests are pinned in `constraints/engine.txt` and verified across backend, runner, and MCP consumers via `scripts/check_engine_version.py`.
 
@@ -88,11 +88,11 @@ Upon receiving William's explicit sign-off:
    ```
 2. Tag the release commit:
    ```bash
-   git tag -a v2.0.0 -m "AlphaEngine 2.0.0 release"
+   git tag -a v2.0.1 -m "AlphaEngine 2.0.1 release"
    ```
 3. Push to upstream:
    ```bash
    git push origin main
-   git push origin v2.0.0
+   git push origin v2.0.1
    ```
 4. CI on GitHub Actions will run the test matrix, golden wheel verification, and publish the release to PyPI.

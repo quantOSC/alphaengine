@@ -112,7 +112,7 @@ def test_sync_v2_payload_schema_share_series_and_json_schema_export(
     # Default `share_series=False`: series (>512) stripped, forbidden v1 keys absent!
     payload_no_series = build_sync_payload(proj, share_series=False)
     assert payload_no_series["sync_contract"] == SYNC_CONTRACT_VERSION == 2
-    assert payload_no_series["engine_version"] == "2.0.0"
+    assert payload_no_series["engine_version"] == "2.0.1"
     assert len(payload_no_series["studies"]) == 1
     assert len(payload_no_series["runs"]) == 1
     assert len(payload_no_series["ideas"]) == 1
@@ -163,7 +163,7 @@ def test_push_per_item_acks_exit_codes_and_no_silent_404_fallback(
         return _FakeHTTPResponse(
             {
                 "sync_contract": 2,
-                "engine_version": "2.0.0",
+                "engine_version": "2.0.1",
                 "items": [
                     {"type": "idea", "id": idea["idea_id"], "status": "accepted"},
                     {
@@ -250,7 +250,7 @@ def test_pull_cursor_pagination_idea_upsert_and_optional_none_metrics(
     pages = [
         {
             "sync_contract": 2,
-            "engine_version": "2.0.0",
+            "engine_version": "2.0.1",
             "runs": [
                 {
                     "run_id": "run_remote_1",
@@ -283,7 +283,7 @@ def test_pull_cursor_pagination_idea_upsert_and_optional_none_metrics(
         },
         {
             "sync_contract": 2,
-            "engine_version": "2.0.0",
+            "engine_version": "2.0.1",
             "runs": [],
             "ideas": [
                 {

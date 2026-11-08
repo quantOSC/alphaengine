@@ -211,13 +211,65 @@ def test_cli_run_with_signal_and_rerun_reproducibility(
     assert env["manifest"]["costs_model"]["slippage_bps"] == 5.0
     assert env["manifest"]["costs_model"]["commission_bps"] == 1.0
 
-    # Rerun reproduces figures and verifies provenance!
+    # Rerun reproduces figures and verifies provenance (and counts as 1 trial)!
     assert cli.main(["rerun", "HEAD", "--json"]) == 0
     rerun_out = json.loads(capsys.readouterr().out)
     assert rerun_out["hash_verified"] is True
     assert rerun_out["figures_reproduced"] is True
     assert rerun_out["provenance_verified"] is True
+    assert rerun_out["n_trials_added"] == 1
 
     proj = find_project(tmp_path)
     assert proj is not None
-    assert cumulative_trials_for(proj) == (0, 2)
+    assert cumulative_trials_for(proj) == (0, 3)
+
+
+def test_short_with_zero_borrow_withholds_verdict_and_refuses_seal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Short strategy with --borrow-bps 0 → unverified + seal refused."""
+    from alphaengine.memo import seal_from_project
+
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["init", "--name", "short-borrow-zero"]) == 0
+    capsys.readouterr()
+
+    csv_path = tmp_path / "prices.csv"
+    lines = ["date,AAPL,MSFT"] + [
+        f"2025-{(i // 28) + 1:02d}-{(i % 28) + 1:02d},{100.0 + i:.2f},{200.0 - 0.3 * i:.2f}"
+        for i in range(40)
+    ]
+    csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    sig_path = tmp_path / "short_sig.py"
+    sig_path.write_text(
+        "def signal(*, data_asof, params):\n    return {'AAPL': -0.5, 'MSFT': 0.2}\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        cli.main(
+            [
+                "validate",
+                "--signal",
+                str(sig_path),
+                "--data",
+                str(csv_path),
+                "--borrow-bps",
+                "0",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    env = json.loads(capsys.readouterr().out)
+    assert env["verdict"] == "unverified"
+    assert env["verdict"] not in {"robust", "fragile", "edge", "marginal", "likely_noise"}
+    reason = env["figures"].get("verdict_reason") or env.get("verdict_reason")
+    assert reason == "borrow not supplied for short positions"
+    assert env["figures"].get("sealable") is False
+    assert env.get("can_seal") is False or env["figures"].get("can_seal") is False
+
+    with pytest.raises(ValueError, match="cannot be sealed"):
+        seal_from_project(find_project(tmp_path), "HEAD")

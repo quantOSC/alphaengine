@@ -1065,21 +1065,38 @@ def run_signal(
         n_eff = round(n_eff_participation(mat), 4)
         selection = pbo_cscv(mat.tolist())
 
-    final_verdict = (
-        Verdict.UNVERIFIED.value
-        if allow_zero_costs_unverified
-        else str(dsr.get("verdict") or scored["validation"].get("verdict") or Verdict.MARGINAL.value)
+    scored_sealable = bool(scored.get("sealable", True))
+    validation = scored.get("validation") if isinstance(scored.get("validation"), dict) else {}
+    scored_reason = validation.get("verdict_reason")
+    borrow_withheld = (not scored_sealable) or (
+        str(scored_reason or "") == "borrow not supplied for short positions"
+    )
+    if allow_zero_costs_unverified or borrow_withheld:
+        final_verdict = Verdict.UNVERIFIED.value
+    else:
+        final_verdict = str(dsr.get("verdict") or validation.get("verdict") or Verdict.MARGINAL.value)
+    can_seal = (not allow_zero_costs_unverified) and scored_sealable
+    verdict_reason = (
+        "borrow not supplied for short positions"
+        if borrow_withheld
+        else ("zero costs unverified" if allow_zero_costs_unverified else None)
+    )
+    deflation_applied = (
+        False if (allow_zero_costs_unverified or borrow_withheld) else dsr.get("deflation_applied")
     )
 
     figures: dict[str, Any] = {
         "engine_verified": not allow_zero_costs_unverified,
-        "can_seal": not allow_zero_costs_unverified,
+        "can_seal": can_seal,
+        "sealable": scored_sealable and not allow_zero_costs_unverified,
+        "had_short_positions": bool(scored.get("had_short_positions")),
+        "verdict_reason": verdict_reason,
         "n_trials": total_attempted,
         "run_n_trials": total_attempted,
         "n_ok_trials": len(ok_indices),
         "n_failed_trials": total_attempted - len(ok_indices),
         "n_trials_source": n_source,
-        "deflation_applied": False if allow_zero_costs_unverified else dsr.get("deflation_applied"),
+        "deflation_applied": deflation_applied,
         "dsr_probability": dsr.get("dsr_probability"),
         "deflated_sharpe": dsr.get("deflated_sharpe"),
         "psr_vs_zero": dsr.get("psr_vs_zero"),
@@ -1128,7 +1145,7 @@ def run_signal(
                 if repro_target
                 else None
             ),
-            returns_for_deflation=None if allow_zero_costs_unverified else best_rets,
+            returns_for_deflation=None if (allow_zero_costs_unverified or borrow_withheld) else best_rets,
             trials_sharpe_std=trials_std,
             risk_free_rate=risk_free_rate,
             periods_per_year=ppy,
@@ -1140,7 +1157,7 @@ def run_signal(
             run_id = str(rec["run_id"])
             cum_trials = int(rec["cumulative_trials"])
             proj_trials = int(rec["project_trials"])
-            if not allow_zero_costs_unverified:
+            if not allow_zero_costs_unverified and not borrow_withheld:
                 final_verdict = str(rec.get("verdict") or final_verdict)
                 figures = dict(rec.get("figures") or figures)
 
@@ -1150,8 +1167,9 @@ def run_signal(
         "idea_id": clean_idea,
         "family": resolved_family,
         "verdict": final_verdict,
+        "verdict_reason": verdict_reason,
         "engine_verified": not allow_zero_costs_unverified,
-        "can_seal": not allow_zero_costs_unverified,
+        "can_seal": can_seal,
         "code_sha256": code_sha256,
         "dataset_hashes": [data_hash],
         "n_trials": cum_trials,

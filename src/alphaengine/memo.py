@@ -368,7 +368,16 @@ def generate_memo(
         title = f"Research Committee Memo: {run_one['run_id']}"
         thesis = f"Run {run_one['run_id']} ({run_one.get('command')})"
         family = str(run_one.get("family") or "")
-        status = str(run_one.get("verdict") or "recorded")
+        run_figs = run_one.get("figures") or {}
+        if (
+            run_one.get("sealable") is False
+            or (isinstance(run_figs, dict) and run_figs.get("sealable") is False)
+            or str((run_figs.get("verdict_reason") if isinstance(run_figs, dict) else None) or "")
+            == "borrow not supplied for short positions"
+        ):
+            status = "unverified"
+        else:
+            status = str(run_one.get("verdict") or "recorded")
         kill_rule = "(none)"
         kill_eval = {}
         runs = [run_one]
@@ -399,19 +408,32 @@ def generate_memo(
             rid = str(r.get("run_id") or "")
             cmd = str(r.get("command") or "")
             ts = str(r.get("timestamp") or "")[:19].replace("T", " ")
+            figs = r.get("figures") or {}
             verd = str(r.get("verdict") or "unscored")
+            reason = (figs.get("verdict_reason") if isinstance(figs, dict) else None) or r.get(
+                "verdict_reason"
+            )
+            if (
+                (isinstance(figs, dict) and figs.get("sealable") is False)
+                or r.get("sealable") is False
+                or str(reason or "") == "borrow not supplied for short positions"
+            ):
+                verd = "unverified"
+                reason = reason or "borrow not supplied for short positions"
             nt = r.get("n_trials")
             ct = r.get("cumulative_trials")
             src = str(r.get("n_trials_source") or "")
             run_eng = str(r.get("engine_version") or eng_ver)
             ds_hashes = ", ".join(str(h)[:16] for h in (r.get("dataset_hashes") or [])) or "none"
             lines.append(f"### Run `{rid}` — `{cmd}` ({ts})")
-            lines.append(f"- **Verdict:** `{verd}` `[{rid}]`")
+            if reason:
+                lines.append(f"- **Verdict:** `{verd}` ({reason}) `[{rid}]`")
+            else:
+                lines.append(f"- **Verdict:** `{verd}` `[{rid}]`")
             lines.append(f"- **Engine Version:** `{run_eng}` `[{rid}]`")
             lines.append(f"- **Trials (this run):** `{nt}` (`{src}`) `[{rid}]`")
             lines.append(f"- **Trials (cumulative):** `{ct}` `[{rid}]`")
             lines.append(f"- **Dataset SHA-256:** `{ds_hashes}` `[{rid}]`")
-            figs = r.get("figures") or {}
             if isinstance(figs, dict):
                 for fk, fv in sorted(figs.items()):
                     if isinstance(fv, (int, float, str)) and not isinstance(fv, bool):
