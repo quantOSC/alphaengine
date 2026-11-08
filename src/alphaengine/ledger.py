@@ -187,6 +187,25 @@ def cumulative_trials_for(
             and row.get("family") == target_family
         ):
             family_total += count
+
+    # `ae rerun` records attempts only in trials.jsonl (source="rerun"); fold them in.
+    for t in _read_ledger_jsonl(proj, "ledger/trials.jsonl"):
+        if str(t.get("source") or "") != "rerun":
+            continue
+        aid = str(t.get("attempt_id") or "").strip()
+        if aid:
+            if aid in seen_attempt_ids:
+                continue
+            seen_attempt_ids.add(aid)
+        project_total += 1
+        if (
+            target_idea
+            and t.get("idea_id") == target_idea
+            or not target_idea
+            and target_family
+            and t.get("family") == target_family
+        ):
+            family_total += 1
     return family_total, project_total
 
 
@@ -227,7 +246,9 @@ def record_trials(
             "family": family,
             "index": t.get("index"),
             "params_hash": t.get("params_hash"),
+            "dataset_hashes": t.get("dataset_hashes"),
             "status": status,
+            "source": t.get("source"),
             "n_obs": t.get("n_obs"),
             "sharpe": t.get("sharpe"),
             "sharpe_annualized": t.get("sharpe_annualized"),
@@ -378,11 +399,24 @@ def record_run(
     figs["project_trials"] = proj_trials
     figs["duplicate_of"] = duplicate_of
 
+    borrow_verdict_withheld = (
+        figs.get("sealable") is False
+        or str(figs.get("verdict_reason") or "") == "borrow not supplied for short positions"
+    )
+    if borrow_verdict_withheld:
+        # Shorts without borrow cannot claim a statistical verdict; keep unverified.
+        verdict = Verdict.UNVERIFIED.value
+        figs["verdict"] = Verdict.UNVERIFIED.value
+        figs["cumulative_verdict"] = Verdict.UNVERIFIED.value
+        figs.setdefault("verdict_reason", "borrow not supplied for short positions")
+        figs["sealable"] = False
+
     if (
         returns_for_deflation
         and len(returns_for_deflation) >= 8
         and cum_trials > 0
         and n_trials_source not in ("not_recorded", "monte_carlo")
+        and not borrow_verdict_withheld
     ):
         from .core import deflated_sharpe
 
@@ -993,6 +1027,26 @@ def rerun_record_report(proj: Project, run_rec: dict[str, Any]) -> dict[str, Any
     )
     prov_ok, prov_diag = check_manifest_provenance(rec_manifest, current=cur_manifest)
 
+    # William's 2.0.1 decision: every `ae rerun` is a new trial attempt.
+    family = str(run_rec.get("family") or "default")
+    ds_hashes_trial = list(run_rec.get("dataset_hashes") or ds_hashes or [])
+    added = record_trials(
+        proj,
+        run_id=str(run_rec.get("run_id") or ""),
+        trials=[
+            {
+                "attempt_id": str(uuid.uuid4()),
+                "params_hash": run_rec.get("params_hash"),
+                "dataset_hashes": ds_hashes_trial,
+                "status": "ok" if (hash_ok and figures_ok) else "failed",
+                "source": "rerun",
+                "failed": None if (hash_ok and figures_ok) else "rerun_mismatch",
+            }
+        ],
+        idea_id=run_rec.get("idea_id") if isinstance(run_rec.get("idea_id"), str) else None,
+        family=family,
+    )
+
     return {
         "run_id": run_rec.get("run_id"),
         "command": run_rec.get("command"),
@@ -1003,6 +1057,7 @@ def rerun_record_report(proj: Project, run_rec: dict[str, Any]) -> dict[str, Any
         "provenance": prov_diag,
         "reproduced_figures": repro_figs,
         "mismatches": mismatches,
+        "n_trials_added": len(added),
     }
 
 

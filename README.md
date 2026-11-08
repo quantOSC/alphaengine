@@ -123,15 +123,13 @@ Each is useful without the one above it. `login` lights the next one.
 
 | Rung | What you need | What you get |
 |---|---|---|
-| **The maths** | nothing | `alphaengine demo`, `alphaengine process`, `ae verify`, and the full Python API (`import alphaengine`, `sweep`, `core`), offline, forever. No account. |
-| **Firm workflows & CLI OS** | a firm `ae_live_` key from **Connect** in your firm's quantOS portal (`login` or `QUANTOS_API_KEY`; see [docs/free-vs-firm.md](docs/free-vs-firm.md)) | The eight workflow commands (`diagnose`, `screen`, `signal`, `validate`, `stress`, `overlap`, `size`, `monitor`), `workflows`, `runs`, `gaps`, `tonight`, `run <workflow>`, and the Research OS (`init`, `log`, `show`, `diff`, `rerun`, `watch`, `data`, `idea`, `seal`, `report`, `remote`, `push`, `pull`, `plugin`, `shell`). |
+| **The maths & local Research OS** | nothing | `import alphaengine`, `alphaengine demo` / `process`, and every local command (`init`, `log`, `show`, `diff`, `rerun`, `data`, `idea`, `seal`, `verify`, `sweep`, `validate`, `run`, …), offline, forever. No account. |
+| **Firm network paths** | a firm `ae_live_` key from **Connect** in your firm's quantOS portal (`login` or `QUANTOS_API_KEY`; see [docs/free-vs-firm.md](docs/free-vs-firm.md)) | `push` / `pull` / sync, the shared ledger, remote run (`--url`), hosted MCP, import, AI, and the network-gated commands (`workflows`, `runs`, `gaps`, `tonight`). |
 | **Ask anything** | your OWN model key (`login anthropic`) | Plain English in. Runs under your account, not ours. |
 
-The workflow commands and Research OS require a firm `ae_live_` key issued through
-**Connect** in your firm's quantOS portal (see [docs/free-vs-firm.md](docs/free-vs-firm.md)).
-There is no retail CLI key. `alphaengine demo`, `alphaengine process`, `ae verify`,
-and the Python library (`import alphaengine`) work completely offline without an
-account or key.
+All local commands are free with no key. The firm `ae_live_` key is checked
+server-side only on network paths (see [docs/free-vs-firm.md](docs/free-vs-firm.md)).
+There is no retail CLI key.
 
 **How credentials are handled.** QuantOS never receives your LLM provider key:
 it goes directly from this process to your chosen provider. By default, keys can
@@ -262,7 +260,7 @@ ae report memo HEAD --format md
 ## What's new in 2.0.0
 
 - **Single canonical engine (`2.0.0`):** Unified version source across the library, CLI (`ae`), quantOS backend, and MCP server. Pinned version and drift checks guarantee zero divergence across consumers.
-- **William's trial counting rule:** Every executed trial attempt counts toward project cumulative trials. Identical re-runs record lineage via `duplicate_of` while continuing to increment cumulative trials (`9 -> 18`), eliminating silent trial count deflation. Failed sweep parameter points also remain in the trial denominator (`n_trials = len(self.trials)`).
+- **William's trial counting rule:** Every executed trial attempt counts toward project cumulative trials. Identical re-runs record lineage via `duplicate_of` while continuing to increment cumulative trials (`9 -> 18`), eliminating silent trial count deflation. Failed sweep parameter points also remain in the trial denominator (`n_trials = len(self.trials)`). As of 2.0.1, `ae rerun` also records one new trial per invocation.
 - **Keyring-first credentials & zero plaintext leakage:** Credentials are saved directly to the OS keychain (`keyring`) when available. The fallback file (`~/.config/alphaengine/credentials.json`, `0600`) is used only when no supported keyring backend exists or when `--no-keyring` is specified, accompanied by an explicit disclosure notice. Keyless diagnostics (`ae version`, `ae whoami`, `ae doctor`) inspect your environment without requiring or exposing API keys.
 - **Coded target-weights adapter (`alphaengine.coded`):** Write signal functions taking `data_asof` and `params` and returning ticker target weights. `run_signal()` guarantees zero look-ahead leak with strict bar slicing, next-open execution, mandatory transaction costs (`5 bps` slippage, `1 bps` commission), and an execution safety cap of 400 parameter combinations.
 - **Unified canonical `Verdict` enum:** All statistical outputs throughout the engine, CLI, and APIs standardize on four canonical verdicts: `Verdict.ROBUST` (`"robust"`), `Verdict.MARGINAL` (`"marginal"`), `Verdict.LIKELY_NOISE` (`"likely_noise"`), and `Verdict.UNVERIFIED` (`"unverified"`), with backwards-compatible alias normalization for legacy 1.x strings (`edge`, `inconclusive`, `acceptable`, `overfit`, `not_recorded`).

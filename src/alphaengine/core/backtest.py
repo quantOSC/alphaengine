@@ -877,10 +877,13 @@ def score_backtest(
         b_rate_raw = bt_cfg.get("borrow_bps")
     b_rate_f = float(b_rate_raw or 0.0)
     sealable = bool(bt.get("sealable", True))
+    verdict_reason: str | None = None
     if had_short and b_rate_f <= 0.0:
+        # Short positions without a supplied borrow rate cannot carry a statistical
+        # claim: withhold robust/marginal/likely_noise and force unverified.
         sealable = False
-        if verdict_val == Verdict.ROBUST.value:
-            verdict_val = Verdict.MARGINAL.value
+        verdict_val = Verdict.UNVERIFIED.value
+        verdict_reason = "borrow not supplied for short positions"
     costs_model = (
         dict(bt["costs_model"])
         if isinstance(bt.get("costs_model"), dict)
@@ -906,6 +909,7 @@ def score_backtest(
         "n_trials_source": source,
         "n_eff_participation": n_eff_part,
         "verdict": verdict_val,
+        "verdict_reason": verdict_reason,
         "n_obs": n_obs_val,
         "n_obs_effective": round(n_eff, 1),
         "autocorr_lag1": round(r1, 4),

@@ -15,7 +15,7 @@ ae screen --data prices.csv --json | ae validate --stdin --json | ae size --stdi
 ```json
 {
   "schema_version": "1.0",
-  "engine_version": "2.0.0",
+  "engine_version": "2.0.1",
   "run_id": "run_a1b2c3d4e5f6",
   "timestamp": "2026-10-24T18:30:00+00:00",
   "command": "screen_universe",
