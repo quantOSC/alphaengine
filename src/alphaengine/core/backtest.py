@@ -30,6 +30,7 @@ from typing import Any
 
 from .._version import current_engine_version
 from .conventions import (
+    Verdict,
     build_annualization_spec,
     build_costs_model_spec,
     build_risk_free_spec,
@@ -307,13 +308,14 @@ def run_backtest(
                 eq += pos[tk]["shares"] * bar["close"]
         return eq
 
+    had_short_positions = False
     for idx, d in enumerate(all_dates):
         bar_cost = 0.0
-        # Short borrow accrues on short positions carried into bar `d` (`idx >= 1`).
-        if borrow_per_bar > 0.0 and idx > 0:
-            for tk in tickers:
-                sh = pos[tk]["shares"]
-                if sh < 0.0:
+        for tk in tickers:
+            sh = pos[tk]["shares"]
+            if sh < 0.0:
+                had_short_positions = True
+                if borrow_per_bar > 0.0 and idx > 0:
                     bar_b = prices_n[tk].get(d)
                     if bar_b and bar_b["close"] > 0:
                         b_cost = abs(sh) * bar_b["close"] * borrow_per_bar
@@ -427,6 +429,7 @@ def run_backtest(
         adv_source=adv_source,
         liquidate_final=bool(liquidate_final),
     )
+    costs_model["had_short_positions"] = had_short_positions
 
     record(
         "equity",
@@ -470,6 +473,8 @@ def run_backtest(
             if (_maxpart or has_adv)
             else None
         ),
+        "had_short_positions": had_short_positions,
+        "sealable": not (had_short_positions and float(borrow_bps) <= 0.0),
         "costs_model": costs_model,
         "annualization": build_annualization_spec(ppy),
         "config": {
@@ -859,7 +864,23 @@ def score_backtest(
         n_trials=resolved_trials,
         n_trials_source=source,
     )
+    had_short = bool(
+        bt.get("had_short_positions")
+        or (isinstance(bt.get("costs_model"), dict) and bt["costs_model"].get("had_short_positions"))
+        or any(float(t.get("shares", 0.0)) < 0 for t in (bt.get("trades") or []))
+    )
     bt_cfg = bt.get("config") if isinstance(bt.get("config"), dict) else {}
+    b_rate_raw = (
+        bt.get("costs_model", {}).get("borrow_bps") if isinstance(bt.get("costs_model"), dict) else None
+    )
+    if b_rate_raw is None:
+        b_rate_raw = bt_cfg.get("borrow_bps")
+    b_rate_f = float(b_rate_raw or 0.0)
+    sealable = bool(bt.get("sealable", True))
+    if had_short and b_rate_f <= 0.0:
+        sealable = False
+        if verdict_val == Verdict.ROBUST.value:
+            verdict_val = Verdict.MARGINAL.value
     costs_model = (
         dict(bt["costs_model"])
         if isinstance(bt.get("costs_model"), dict)
@@ -953,6 +974,9 @@ def score_backtest(
     )
     return {
         "engine_version": current_engine_version(),
+        "sealable": sealable,
+        "had_short_positions": had_short,
+        "short_borrow_cost_applied": (not had_short or b_rate_f > 0.0),
         "annualization": build_annualization_spec(ppy),
         "risk_free": build_risk_free_spec(risk_free_rate, ppy),
         "costs_model": costs_model,

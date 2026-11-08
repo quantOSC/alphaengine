@@ -53,6 +53,7 @@ from .sweep.runner import Trial, _expand, _hash_data, _hash_params, _sharpe
 MAX_CODED_GRID = 400
 DEFAULT_CODED_SLIPPAGE_BPS = 5.0
 DEFAULT_CODED_COMMISSION_BPS = 1.0
+DEFAULT_CODED_BORROW_BPS = 50.0
 
 ALLOWED_SIGNAL_IMPORTS: frozenset[str] = frozenset(
     {
@@ -76,6 +77,9 @@ ALLOWED_SIGNAL_IMPORTS: frozenset[str] = frozenset(
         "numpy",
         "scipy",
         "pandas",
+        "statsmodels",
+        "sklearn",
+        "scikit_learn",
         "alphaengine",
     }
 )
@@ -102,6 +106,7 @@ FORBIDDEN_BUILTINS: frozenset[str] = frozenset(
 __all__ = [
     "ALLOWED_SIGNAL_IMPORTS",
     "CodedSignalError",
+    "DEFAULT_CODED_BORROW_BPS",
     "DEFAULT_CODED_COMMISSION_BPS",
     "DEFAULT_CODED_SLIPPAGE_BPS",
     "MAX_CODED_GRID",
@@ -185,14 +190,18 @@ def _check_import_allowed(mod_name: str) -> tuple[bool, str]:
             f"Import `{clean}` is not allowed in coded signals "
             "(network, filesystem, and OS modules are blocked).",
         )
-    if (
-        top == "alphaengine"
-        and clean != "alphaengine"
-        and not any(clean == p or clean.startswith(p + ".") for p in _ALLOWED_ALPHAENGINE_PREFIXES)
+    if top == "alphaengine" and (
+        clean in ("alphaengine", "alphaengine.auth")
+        or not any(clean == p or clean.startswith(p + ".") for p in _ALLOWED_ALPHAENGINE_PREFIXES)
     ):
         return (
             False,
-            f"Import `{clean}` is outside `alphaengine.core` / `alphaengine.validation`.",
+            (
+                f"Import `{clean}` is blocked in coded signals. "
+                "Bare `import alphaengine` and `alphaengine.auth` are forbidden "
+                "(credentials security guard); import helpers from "
+                "`alphaengine.core` or `alphaengine.validation` only."
+            ),
         )
     return True, ""
 
@@ -365,6 +374,50 @@ def check_signal_source(
                         ),
                     )
                 )
+            elif called_name in (
+                "read_csv",
+                "read_table",
+                "read_parquet",
+                "read_json",
+                "read_excel",
+                "read_sql",
+            ):
+                for arg_node in list(node.args) + [kw.value for kw in node.keywords]:
+                    if isinstance(arg_node, ast.Constant) and isinstance(arg_node.value, str):
+                        s_val = arg_node.value.lower().strip()
+                        if s_val.startswith(("http://", "https://", "ftp://", "s3://", "gs://")):
+                            diags.append(
+                                StaticCheckDiagnostic(
+                                    code="forbidden_io_url",
+                                    what=(
+                                        f"Loading data from remote URL {arg_node.value!r} in "
+                                        f"`{called_name}()` is blocked. "
+                                        "Coded signals must be pure and offline."
+                                    ),
+                                    line=node.lineno,
+                                    col=node.col_offset,
+                                    remediation=(
+                                        "Signals must be pure offline functions of `data_asof` and `params`."
+                                    ),
+                                )
+                            )
+                    elif isinstance(arg_node, ast.Name) and any(
+                        u in arg_node.id.lower() for u in ("url", "http", "ftp")
+                    ):
+                        diags.append(
+                            StaticCheckDiagnostic(
+                                code="forbidden_io_url",
+                                what=(
+                                    f"URL variable `{arg_node.id}` in "
+                                    f"`{called_name}()` is blocked in coded signals."
+                                ),
+                                line=node.lineno,
+                                col=node.col_offset,
+                                remediation=(
+                                    "Signals must be pure offline functions of `data_asof` and `params`."
+                                ),
+                            )
+                        )
 
     return StaticCheckResult(
         ok=len(diags) == 0,
@@ -584,13 +637,20 @@ def _extract_bar_weights(
             row_map = dict(last_row.to_dict())
             for k, v in row_map.items():
                 sk = str(k)
-                if sk in ticker_set:
-                    extracted[sk] = float(v)
+                if sk not in ticker_set:
+                    allowed_t = sorted(ticker_set)
+                    raise CodedSignalError(
+                        f"Unknown ticker {sk!r} in signal output. Allowed universe tickers are: {allowed_t}"
+                    )
+                extracted[sk] = float(v)
     elif isinstance(raw_out, Mapping):
         for k, v in raw_out.items():
             sk = str(k)
             if sk not in ticker_set:
-                continue
+                allowed_t = sorted(ticker_set)
+                raise CodedSignalError(
+                    f"Unknown ticker {sk!r} in signal output. Allowed universe tickers are: {allowed_t}"
+                )
             if isinstance(v, Mapping):
                 # `{ticker: {date: weight}}`
                 d_keys = sorted(str(dk) for dk in v)
@@ -747,7 +807,7 @@ def run_signal(
     rebalance_every: int = 1,
     slippage_bps: float = DEFAULT_CODED_SLIPPAGE_BPS,
     commission_bps: float = DEFAULT_CODED_COMMISSION_BPS,
-    borrow_bps: float = 0.0,
+    borrow_bps: float = DEFAULT_CODED_BORROW_BPS,
     initial_capital: float = 1_000_000.0,
     adv: Mapping[str, float] | float | None = None,
     adv_series: Mapping[str, Any] | None = None,

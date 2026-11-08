@@ -468,6 +468,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | Flag | Does |
 |---|---|
 | `--url URL` | workflow server (default $ALPHAENGINE_API_URL or public API) |
+| `--borrow-bps BPS` | annual borrow rate in basis points accrued on short positions (default: 50.0 bps) |
 | `--signal PATH_OR_MOD` | coded signal module or .py file exposing signal(data_asof=..., params=...) |
 | `--project MODULE` | a module exposing `data` and `backtest_fn` (user-owned P&L, not engine-verified) |
 | `--data FILE` | a local CSV or Parquet file: wide, long, or a single series |

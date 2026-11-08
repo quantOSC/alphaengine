@@ -195,6 +195,8 @@ def build_sync_payload(proj: Project, *, share_series: bool = False) -> dict[str
     studies_out: list[dict[str, Any]] = []
     if proj.studies_dir.is_dir():
         for sp in sorted(proj.studies_dir.glob("*.json")):
+            if sp.name == "HEAD.json":
+                continue
             st = load(sp)
             wire_study = SealedStudyWire.from_study(st)
             studies_out.append(wire_study.to_dict())

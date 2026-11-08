@@ -412,6 +412,7 @@ def compute_all_golden_cases(tmp_root: Path) -> dict[str, dict[str, Any]]:
         grid={"lookback": [1, 2, 3]},
         slippage_bps=5.0,
         commission_bps=2.0,
+        borrow_bps=0.0,
     )
     v14 = sr14["verdict"]
     figs14 = sr14["figures"]

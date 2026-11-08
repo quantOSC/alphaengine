@@ -10,8 +10,10 @@ Every tool is audited for:
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -180,34 +182,124 @@ def _handle_jump_process(returns: Any, **kwargs: Any) -> dict[str, Any]:
 
 
 # Account tool handlers (delegating to workspace/firm backend)
-def _handle_my_universe(tickers: list[str] | None = None, **kwargs: Any) -> dict[str, Any]:
+def _handle_my_universe(
+    tickers: list[str] | None = None, name: str = "default", **kwargs: Any
+) -> dict[str, Any]:
+    import json
+    from pathlib import Path
+
+    from ..project import find_project
+
+    proj = find_project()
+    root = proj.root if proj is not None else Path.cwd()
+    uni_dir = root / ".alphaengine" / "universes"
+    uni_dir.mkdir(parents=True, exist_ok=True)
+    uni_file = uni_dir / f"{name}.json"
+
+    if tickers is not None:
+        clean_tickers = sorted({str(t).upper().strip() for t in tickers if str(t).strip()})
+        data = {
+            "name": name,
+            "tickers": clean_tickers,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        uni_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        out_tickers = clean_tickers
+    else:
+        if uni_file.is_file():
+            try:
+                loaded = json.loads(uni_file.read_text(encoding="utf-8"))
+                out_tickers = list(loaded.get("tickers") or [])
+            except Exception:
+                out_tickers = []
+        else:
+            out_tickers = []
+
     return {
         "engine_version": current_engine_version(),
         "status": "ok",
-        "tickers": list(tickers or []),
-        "stored": "persisted in researcher's workspace (.alphaengine/universes/)",
+        "universe": name,
+        "tickers": out_tickers,
+        "stored": f"persisted in researcher's workspace ({uni_file})",
     }
 
 
 def _handle_deliver_run(run_id: str, summary: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    import hashlib
+    import json
+    from pathlib import Path
+
+    from ..project import find_project
+
+    proj = find_project()
+    root = proj.root if proj is not None else Path.cwd()
+    runs_dir = root / ".alphaengine" / "ledger" / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_file = runs_dir / f"{run_id}.json"
+
+    payload = {
+        "engine_version": current_engine_version(),
+        "run_id": run_id,
+        "summary": summary,
+        "delivered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    content_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+    run_sha = hashlib.sha256(content_bytes).hexdigest()
+    payload["content_sha256"] = run_sha
+    run_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    cas_sha = summary.get("manifest_sha256") or summary.get("object_sha256")
+    if cas_sha and proj is not None:
+        with contextlib.suppress(Exception):
+            proj.put_object({"run_id": run_id, "summary": summary})
+
     return {
         "engine_version": current_engine_version(),
         "status": "delivered",
         "run_id": run_id,
-        "content_sha256": summary.get("manifest_sha256") or summary.get("content_sha256", ""),
-        "stored": "persisted in firm research ledger and audit trail",
+        "content_sha256": run_sha,
+        "stored": f"persisted in firm research ledger and audit trail ({run_file})",
     }
 
 
 def _handle_run_workflow(
     workflow: str, params: dict[str, Any] | None = None, **kwargs: Any
 ) -> dict[str, Any]:
+    import json
+    import uuid
+    from pathlib import Path
+
+    from ..project import find_project
+
+    proj = find_project()
+    root = proj.root if proj is not None else Path.cwd()
+    queue_dir = root / ".alphaengine" / "queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    job_id = f"job_{workflow}_{uuid.uuid4().hex[:12]}"
+    job_file = queue_dir / f"{job_id}.json"
+
+    submitted_at = datetime.now(timezone.utc).isoformat()
+    job_record = {
+        "engine_version": current_engine_version(),
+        "job_id": job_id,
+        "workflow": workflow,
+        "params": dict(params or {}),
+        "status": "submitted",
+        "submitted_at": submitted_at,
+    }
+    job_file.write_text(json.dumps(job_record, indent=2), encoding="utf-8")
+
+    hist_file = root / ".alphaengine" / "run_history.jsonl"
+    with open(hist_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(job_record) + "\n")
+
     return {
         "engine_version": current_engine_version(),
         "status": "submitted",
         "workflow": workflow,
-        "job_id": f"job_{workflow}_{current_engine_version()}",
-        "stored": "persisted in firm execution queue and run history",
+        "job_id": job_id,
+        "submitted_at": submitted_at,
+        "stored": f"persisted in firm execution queue and run history ({job_file})",
     }
 
 
@@ -216,7 +308,7 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="backtest",
         kind="deterministic",
-        inputs_summary="signals, prices, slippage_bps=5.0, commission_bps=1.0, borrow_bps=0.0, fill_timing='close'",
+        inputs_summary="signals, prices, slippage_bps=5.0, commission_bps=1.0, borrow_bps=50.0, fill_timing='close'",
         outputs_summary="dates, equity_curve, returns, trades, final_equity, total_return_pct, cost_breakdown",
         storage="stateless (in-memory compute)",
         description="Deterministic weight-target portfolio simulator net of slippage, commission, borrow, and liquidation.",
@@ -457,7 +549,7 @@ def list_mcp_tools() -> list[dict[str, Any]]:
     return [t.to_dict() for t in _MCP_TOOLS]
 
 
-def call_mcp_tool(name: str, **kwargs: Any) -> dict[str, Any]:
+def call_mcp_tool(name: str, /, **kwargs: Any) -> dict[str, Any]:
     """Execute the named MCP tool with unified conventions and engine_version stamp."""
     tool = get_mcp_tool(name)
     if tool.handler is None:

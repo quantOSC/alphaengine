@@ -28,3 +28,5 @@ credentials.json
 # staged for the next `git add .`.
 study.json
 *.study.json
+.alphaengine/
+.tmp_golden/

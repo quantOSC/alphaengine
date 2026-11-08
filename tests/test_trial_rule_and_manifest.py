@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from alphaengine import LedgerError, RunManifest, build_run_manifest, cli, sweep
+from alphaengine import LedgerError, RunManifest, build_run_manifest, cli, load, save, sweep
 from alphaengine.ledger import (
     cumulative_trials_for,
     record_run,
@@ -120,16 +120,20 @@ def test_run_manifest_cas_and_three_status_verification_and_drift(
     assert proj.get_object(man_sha)["engine_version"] == "2.0.0"
 
     # Rerun checks all 3 statuses: hash_verified, figures_reproduced, provenance_verified
+    prior_fam, prior_proj = cumulative_trials_for(proj)
     rep = rerun_record_report(proj, head)
     assert rep["hash_verified"] is True
     assert rep["figures_reproduced"] is True
     assert rep["provenance_verified"] is True
 
+    # ae rerun re-executes without adding a trial!
     assert cli.main(["rerun", "HEAD", "--json"]) == 0
     cli_rep = json.loads(capsys.readouterr().out)
     assert cli_rep["hash_verified"] is True
     assert cli_rep["figures_reproduced"] is True
     assert cli_rep["provenance_verified"] is True
+    after_rerun_fam, after_rerun_proj = cumulative_trials_for(proj)
+    assert after_rerun_proj == prior_proj, "ae rerun must NOT add a trial to project cumulative trials"
 
     # Seal study from run and verify 3 statuses via `verify_study_file` and `ae verify`
     study, study_path = seal_from_project(proj, "HEAD")
@@ -157,6 +161,18 @@ def test_run_manifest_cas_and_three_status_verification_and_drift(
     assert drift_rep["figures_reproduced"] is True
     assert drift_rep["provenance_verified"] is False
     assert "engine_version" in drift_rep["provenance"]["drift"]
+
+    # When provenance check fails, ae verify MUST report failure and NOT print "Verified."
+    drifted_study = load(study_path)
+    drifted_study.manifest["engine_version"] = "1.8.0"
+    drifted_study.seal()
+    drifted_study_path = proj.studies_dir / "drifted_study.json"
+    save(drifted_study, drifted_study_path)
+    assert cli.main(["verify", str(drifted_study_path)]) == 1
+    drift_out = capsys.readouterr().out
+    assert "Verified." not in drift_out
+    assert "Verification failed" in drift_out
+    assert "provenance drift" in drift_out
 
     # Standalone `build_run_manifest` helper works cleanly outside any project
     standalone = build_run_manifest(params={"lookback": 20}, dataset_hashes=["deadbeef"])

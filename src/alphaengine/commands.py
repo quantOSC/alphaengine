@@ -64,6 +64,11 @@ FLAGS: dict[str, Flag] = {
         "deprecated: exposes key in process list; use login or $QUANTOS_API_KEY",
         deprecated=True,
     ),
+    "borrow_bps": Flag(
+        "--borrow-bps",
+        "BPS",
+        "annual borrow rate in basis points accrued on short positions (default: 50.0 bps)",
+    ),
     "signal": Flag(
         "--signal",
         "PATH_OR_MOD",

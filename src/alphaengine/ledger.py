@@ -696,7 +696,7 @@ def execute_local_workflow(
         dd = ex.execute("compute.drawdown_anatomy", no_trials_inp)
         figures = {**cl, **sub, **dd}
         worst_sr = float(sub.get("worst_segment_sharpe") or 0.0)
-        verdict = "robust" if worst_sr > 0 else "fragile"
+        verdict = Verdict.MARGINAL.value if worst_sr > 0 else Verdict.LIKELY_NOISE.value
         n_trials = int(inp.get("n_trials") or 1)
         source = "asserted" if "n_trials" in inp else "stress_test"
     elif wf in ("overlap", "check_overlap"):
@@ -934,12 +934,29 @@ def rerun_record_report(proj: Project, run_rec: dict[str, Any]) -> dict[str, Any
             grid=grid,
             inputs=spec.get("inputs"),
         )
+        if _src is not None and "n_trials_source" not in repro_figs:
+            repro_figs["n_trials_source"] = _src
+        if _nt is not None and "run_n_trials" not in repro_figs:
+            repro_figs["run_n_trials"] = _nt
+        if "n_trials" in (run_rec.get("figures") or {}) and "n_trials" not in repro_figs:
+            repro_figs["n_trials"] = (run_rec.get("figures") or {}).get("n_trials")
         ds_hashes = hash_dataset_any(data)
 
+    ledger_meta_keys = {
+        "cumulative_trials",
+        "family_trials",
+        "project_trials",
+        "duplicate_of",
+        "run_id",
+        "attempt_id",
+        "timestamp",
+    }
     orig_flat = _flatten_figures(run_rec.get("figures") or {})
     repro_flat = _flatten_figures(repro_figs)
     mismatches: dict[str, dict[str, Any]] = {}
     for k, orig_v in orig_flat.items():
+        if k in ledger_meta_keys:
+            continue
         if k not in repro_flat:
             mismatches[k] = {
                 "recorded": orig_v,

@@ -13,9 +13,11 @@ from pathlib import Path
 
 import pytest
 
-from scripts.check_public_boundary import main as run_boundary_check
-
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from scripts.check_public_boundary import main as run_boundary_check  # noqa: E402
 
 
 def test_public_boundary_guard_clean():

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from ._version import current_engine_version
-from .manifest import build_run_manifest, check_manifest_provenance
+from .manifest import check_manifest_provenance
 from .project import Project
 from .study import Study, compute_content_sha256, load, save, verify_study_mode
 
@@ -68,6 +68,23 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
         file_stem = rid
 
     figs = dict((run_rec or {}).get("figures") or {})
+    if run_rec is not None:
+        if run_rec.get("sealable") is False or figs.get("sealable") is False:
+            raise ValueError(f"Run {run_rec.get('run_id')} is flagged as not sealable and cannot be sealed.")
+        had_short = bool(
+            run_rec.get("had_short_positions")
+            or figs.get("had_short_positions")
+            or ((run_rec.get("costs_model") or {}).get("had_short_positions"))
+        )
+        b_bps = float(
+            (run_rec.get("costs_model") or {}).get("borrow_bps")
+            or figs.get("borrow_bps")
+            or (run_rec.get("config") or {}).get("borrow_bps")
+            or 0.0
+        )
+        if had_short and b_bps <= 0.0:
+            r_id = run_rec.get("run_id")
+            raise ValueError(f"Run {r_id} carried short positions with 0 borrow cost and cannot be sealed.")
     ds_hashes = list((run_rec or {}).get("dataset_hashes") or [])
     primary_hash = ds_hashes[0] if ds_hashes else ""
 
@@ -202,9 +219,14 @@ def verify_study_file(
     mode = verify_study_mode(raw) or verify_study_mode(study)
     hash_ok = mode is not None
 
-    prov_ok, prov_diag = check_manifest_provenance(
-        study.manifest if isinstance(study.manifest, Mapping) else None
-    )
+    if study.manifest:
+        p_ok, prov_diag = check_manifest_provenance(
+            study.manifest if isinstance(study.manifest, Mapping) else None
+        )
+        prov_ok = bool(p_ok)
+    else:
+        prov_ok = None
+        prov_diag = {"reason": "manifest_not_recorded", "drift": {}}
 
     report_info: dict[str, Any] = {
         "study_path": str(p),
@@ -273,17 +295,17 @@ def verify_study_file(
                     }
 
         figs_ok = len(mismatches) == 0
-        cur_man = build_run_manifest(dataset_hashes=panel_hashes)
         prov_ok_d, prov_diag_d = check_manifest_provenance(
-            study.manifest if isinstance(study.manifest, Mapping) else None,
-            current=cur_man,
+            study.manifest if isinstance(study.manifest, Mapping) else None
         )
+        has_drift_d = bool(prov_diag_d.get("drift"))
         report_info["figures_reproduced"] = figs_ok
         report_info["data_verified"] = figs_ok
-        report_info["provenance_verified"] = prov_ok_d
+        report_info["provenance_verified"] = prov_ok_d and not has_drift_d
         report_info["provenance"] = prov_diag_d
         report_info["mismatches"] = mismatches
-        return figs_ok, report_info
+        ok = bool(hash_ok and figs_ok and not has_drift_d)
+        return ok, report_info
 
     # 2. If inside a project and notes reference `run_id=...`, rerun that ledger record
     if proj is not None and "run_id=" in (study.notes or ""):
@@ -298,14 +320,19 @@ def verify_study_file(
             if run_rec is not None:
                 rerun_rep = rerun_record_report(proj, run_rec)
                 figs_ok = bool(rerun_rep["hash_verified"] and rerun_rep["figures_reproduced"])
+                prov_rep = rerun_rep.get("provenance") or {}
+                has_drift_r = bool(prov_diag.get("drift") or prov_rep.get("drift"))
                 report_info["figures_reproduced"] = figs_ok
                 report_info["data_verified"] = figs_ok
-                report_info["provenance_verified"] = bool(rerun_rep["provenance_verified"])
-                report_info["provenance"] = rerun_rep["provenance"]
+                prov_verified = bool(rerun_rep["provenance_verified"])
+                report_info["provenance_verified"] = not has_drift_r and prov_verified
+                report_info["provenance"] = prov_diag if prov_diag.get("drift") else prov_rep
                 report_info["mismatches"] = rerun_rep["mismatches"]
-                return figs_ok, report_info
+                ok = bool(hash_ok and figs_ok and not has_drift_r)
+                return ok, report_info
 
-    return True, report_info
+    has_drift_end = bool(prov_diag.get("drift"))
+    return bool(hash_ok and not has_drift_end), report_info
 
 
 def generate_memo(

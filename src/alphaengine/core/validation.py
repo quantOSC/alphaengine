@@ -667,13 +667,7 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
 
     logits_arr = np.asarray(logits)
     pbo = float(np.mean(logits_arr <= 0.0)) if logits_arr.size else float("nan")
-    verdict = (
-        Verdict.LIKELY_NOISE.value
-        if pbo > 0.5
-        else Verdict.MARGINAL.value
-        if pbo > 0.2
-        else Verdict.ROBUST.value
-    )
+    verdict = Verdict.LIKELY_NOISE.value if pbo > 0.5 else Verdict.MARGINAL.value
     n_eff = round(n_eff_participation(M), 4)
     out = {
         "engine_version": current_engine_version(),

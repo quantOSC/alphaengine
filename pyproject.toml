@@ -128,8 +128,14 @@ path = "src/alphaengine/_version.py"
 packages = ["src/alphaengine"]
 dev-mode-dirs = ["src"]
 
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/constraints",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]
 addopts = "-q --strict-markers"
 markers = [
     "golden: pins a computed value that is a public contract; changing it needs a major version bump",

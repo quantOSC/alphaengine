@@ -1664,12 +1664,43 @@ def _narrow_to_universe(session: Any, wanted: str, data: Any, rows: Any = None) 
     that is why fetching one moves no market data.
     """
     from .loaders import DataShapeError, coverage
+    from .project import find_project
+
+    proj = find_project()
+    if proj is not None:
+        local_u = proj.root / ".alphaengine" / "universes" / f"{wanted}.json"
+        if local_u.is_file():
+            try:
+                import json
+
+                u_obj = json.loads(local_u.read_text(encoding="utf-8"))
+                symbols = list(u_obj.get("tickers") or [])
+                if data is None and "prices" in u_obj:
+                    return u_obj["prices"]
+                if data is not None and symbols:
+                    return {k: v for k, v in data.items() if k in set(symbols)}
+            except Exception:
+                pass
+
+    if str(wanted).lower() in ("sp500", "s&p500", "sp500-sample") and session is None:
+        from .demo_universe import data as demo_u
+
+        if data is None:
+            return demo_u
+        return {k: v for k, v in data.items() if k in set(demo_u.keys())}
 
     if session is None:
-        raise DataShapeError("--universe needs a workflow server; none is configured.")
+        if data is not None:
+            return data
+        raise DataShapeError(
+            f"--universe {wanted!r} needs a workflow server or local universe; none is configured."
+        )
 
     if rows is None:
-        rows = session.universes()
+        try:
+            rows = session.universes()
+        except Exception:
+            rows = []
     match = next(
         (u for u in rows if wanted in (str(u.get("id")), str(u.get("name")))),
         None,
@@ -2168,11 +2199,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     if getattr(args, "signal", None):
         return _cmd_run_coded_signal(args, proj, data=data, inputs=inputs)
 
-    # Inside a local `.alphaengine/` project, or when `--json` / `--stdin` is passed
-    # and no remote `--url` was specified, execute locally after `require_firm_key()`.
-    if (proj is not None or getattr(args, "json_out", False) or getattr(args, "stdin_in", False)) and getattr(
-        args, "url", None
-    ) is None:
+    # Per QOS-180 Free/Firm policy, when no remote `--url` was specified, execute locally.
+    if getattr(args, "url", None) is None:
         return _run_local_in_project(args, proj, data=data, backtest_fn=backtest_fn, inputs=inputs)
 
     try:
@@ -2337,9 +2365,9 @@ def _run_local_in_project(
         ):
             inputs["n_trials"] = int(upstream_env["n_trials"])
 
-    # In `--json` or `--stdin` mode with no explicit data flag, provide the built-in demo data
-    # so `ae screen --json | ae validate --stdin | ae size --stdin` works out of the box.
-    if data is None and (json_out or stdin_in):
+    # When no explicit data flag is passed, provide the built-in demo data
+    # so `ae screen` / `ae diagnose` works out of the box offline.
+    if data is None:
         if wf in ("screen_universe", "diagnose_data"):
             from .demo_universe import data as demo_u
 
@@ -2617,7 +2645,10 @@ def _cmd_run_coded_signal(
     grid_in = inputs.get("grid") if isinstance(inputs.get("grid"), dict) else None
     slippage = float(inputs.get("slippage_bps", 5.0))
     commission = float(inputs.get("commission_bps", 1.0))
-    borrow = float(inputs.get("borrow_bps", 0.0))
+    raw_borrow = getattr(args, "borrow_bps", None)
+    if raw_borrow is None:
+        raw_borrow = inputs.get("borrow_bps", 50.0)
+    borrow = float(raw_borrow) if raw_borrow is not None else 50.0
 
     try:
         res = run_signal(
@@ -4639,6 +4670,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="one name out of a loaded universe; its closes become the return series sizing runs on",
     )
     common.add_argument(
+        "--borrow-bps",
+        type=float,
+        default=50.0,
+        help="annual borrow rate in basis points accrued per bar on short positions (default: 50.0 bps)",
+    )
+    common.add_argument(
         "--share-series",
         action="store_true",
         help="opt in to uploading full series on run/sync payloads (or set ALPHAENGINE_SHARE_SERIES=1)",
@@ -5005,7 +5042,7 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
     from .project import find_project
 
     proj = find_project()
-    verdict_val = "positive" if float(figures.get("sharpe_q50") or 0.0) > 0 else "likely_noise"
+    verdict_val = "marginal" if float(figures.get("sharpe_q50") or 0.0) > 0 else "likely_noise"
     rec: dict[str, Any] | None = None
     if proj is not None:
         from .ledger import hash_dataset_any, record_run
@@ -5294,13 +5331,27 @@ def cmd_verify(args: argparse.Namespace) -> int:
     from .memo import verify_study_file
     from .project import find_project
 
-    target = str(getattr(args, "study_path", "") or "")
+    target = str(getattr(args, "study_path", "") or "HEAD")
     path = pathlib.Path(target)
     proj = find_project()
     if not path.is_file() and proj is not None:
         cand = proj.studies_dir / (target if target.endswith(".json") else f"{target}.json")
         if cand.is_file():
             path = cand
+        elif (
+            target in ("HEAD", ".alphaengine/studies/HEAD.json", "HEAD.json")
+            or target.endswith("/HEAD.json")
+            or target.endswith("\\HEAD.json")
+        ):
+            studies = sorted(
+                [f for f in proj.studies_dir.glob("*.json") if f.name != "HEAD.json"],
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            if studies:
+                path = studies[0]
+            elif (proj.studies_dir / "HEAD.json").is_file():
+                path = proj.studies_dir / "HEAD.json"
     if not path.is_file():
         say(red(f"No study file at {path}."))
         return 2
@@ -5328,15 +5379,21 @@ def cmd_verify(args: argparse.Namespace) -> int:
         )
         return 1
 
-    if not ok:
-        say(red("Verification failed (figure/data mismatch).") + f"  {path}")
-        for k, m in sorted((info.get("mismatches") or {}).items()):
-            say(f"    {k}: recorded {m['recorded']} != reproduced {m['reproduced']}")
+    prov_status = info.get("provenance_verified")
+    if not ok or prov_status is False:
+        if prov_status is False:
+            say(red("Verification failed (provenance drift / environment mismatch).") + f"  {path}")
+            prov = info.get("provenance") or {}
+            for d_key, d_val in sorted((prov.get("drift") or {}).items()):
+                say(yellow(f"    provenance drift ({d_key}): {d_val}"))
+        else:
+            say(red("Verification failed (figure/data mismatch).") + f"  {path}")
+            for k, m in sorted((info.get("mismatches") or {}).items()):
+                say(f"    {k}: recorded {m['recorded']} != reproduced {m['reproduced']}")
         return 1
 
     mode_label = " (legacy)" if info.get("verification_mode") in ("legacy", "legacy_v1") else ""
     figs_status = info.get("figures_reproduced")
-    prov_status = info.get("provenance_verified")
     extra_parts: list[str] = ["hash_verified=true"]
     if figs_status is not None:
         extra_parts.append(f"figures_reproduced={str(bool(figs_status)).lower()}")
@@ -5349,10 +5406,6 @@ def cmd_verify(args: argparse.Namespace) -> int:
         green(f"Verified{mode_label}.")
         + f"  {info.get('stored_sha256') or info['computed_sha256']}  {dim(str(path) + extra)}"
     )
-    if prov_status is False:
-        prov = info.get("provenance") or {}
-        for d_key, d_val in sorted((prov.get("drift") or {}).items()):
-            say(yellow(f"    provenance drift ({d_key}): {d_val}"))
     return 0
 
 

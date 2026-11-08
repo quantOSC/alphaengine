@@ -651,7 +651,22 @@ class StepExecutor:
         `compute.technical_features` does on the same input, and that is the
         point — a feature table grows with the universe, a shortlist does not.
         """
-        return dict(screen_universe(self._universe(), **params))
+        screen_kwargs = {
+            k: v
+            for k, v in params.items()
+            if k
+            in {
+                "rank_by",
+                "descending",
+                "top_n",
+                "filters",
+                "rsi_window",
+                "sma_window",
+                "return_lookback",
+                "vol_lookback",
+            }
+        }
+        return dict(screen_universe(self._universe(), **screen_kwargs))
 
     # ── the modeling week beyond the sweep ─────────────────────────────────
 

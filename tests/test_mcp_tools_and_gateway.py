@@ -146,6 +146,47 @@ def test_account_tools_reporting_and_version_stamp() -> None:
     assert "queue" in wf["stored"]
 
 
+def test_account_tools_real_filesystem_persistence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify that the 3 MCP account tools perform real workspace and ledger persistence."""
+    import json
+
+    from alphaengine.project import init_project
+
+    init_project(tmp_path, name="test-mcp-persist")
+    monkeypatch.chdir(tmp_path)
+
+    # 1. my_universe writes and reads
+    call_mcp_tool("my_universe", tickers=["nvda", "tsla"], name="tech")
+    tech_json = tmp_path / ".alphaengine" / "universes" / "tech.json"
+    assert tech_json.is_file(), "Universe file was not written to disk"
+    saved_data = json.loads(tech_json.read_text(encoding="utf-8"))
+    assert saved_data["tickers"] == ["NVDA", "TSLA"]
+
+    readback = call_mcp_tool("my_universe", name="tech")
+    assert readback["tickers"] == ["NVDA", "TSLA"]
+
+    # 2. deliver_run writes to ledger/runs/
+    d_res = call_mcp_tool("deliver_run", run_id="run_mcp_test", summary={"manifest_sha256": "feedbeef"})
+    run_file = tmp_path / ".alphaengine" / "ledger" / "runs" / "run_mcp_test.json"
+    assert run_file.is_file(), "Run delivery record was not written to ledger/runs/"
+    run_data = json.loads(run_file.read_text(encoding="utf-8"))
+    assert run_data["run_id"] == "run_mcp_test"
+    assert d_res["content_sha256"] == run_data["content_sha256"]
+
+    # 3. run_workflow writes to queue/ and run_history.jsonl
+    w_res = call_mcp_tool("run_workflow", workflow="cpcv_eval", params={"n_groups": 10})
+    job_id = w_res["job_id"]
+    job_file = tmp_path / ".alphaengine" / "queue" / f"{job_id}.json"
+    assert job_file.is_file(), "Workflow job spec was not written to queue/"
+    job_data = json.loads(job_file.read_text(encoding="utf-8"))
+    assert job_data["params"]["n_groups"] == 10
+
+    hist_file = tmp_path / ".alphaengine" / "run_history.jsonl"
+    assert hist_file.is_file(), "Workflow run history was not appended"
+    lines = [json.loads(line) for line in hist_file.read_text(encoding="utf-8").strip().splitlines()]
+    assert any(item["job_id"] == job_id for item in lines)
+
+
 def test_gateway_doc_matches_registry_without_drift() -> None:
     """Verify scripts/gen_gateway_doc.py --check passes cleanly."""
     res = subprocess.run(
