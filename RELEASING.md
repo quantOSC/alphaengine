@@ -71,7 +71,7 @@ python -m twine check dist/*
 - **Wheel (`dist/alphaengine-2.0.1-py3-none-any.whl`):**
   `sha256:e1d1fed6380dbbd65e32efde71c82474300a25d633920a41af312a17be8178bf`
 - **Source Distribution (`dist/alphaengine-2.0.1.tar.gz`):**
-  `sha256:b17d0641c9a7a9d9cee7d91b5b24a434ac27e70296497ec2322cd3d50cc40fdd`
+  `sha256:afe2b95f5a118293ef79f2fddb7ab4dbbae3066eb589878fdee9a4091c5076f7`
 
 These digests are pinned in `constraints/engine.txt` and verified across backend, runner, and MCP consumers via `scripts/check_engine_version.py`.
 
