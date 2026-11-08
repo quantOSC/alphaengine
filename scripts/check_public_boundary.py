@@ -74,31 +74,16 @@ def _rel_path(path: Path) -> str:
         return path.name
 
 
-def _redact_for_log(text: str) -> str:
-    """Scrub credential-like tokens before any log/print sink (CodeQL clear-text logging).
+def _format_violation(path_label: str, line_no: int | None, kind: str, detail: str) -> str:
+    """Build a log line from safe labels only (never file contents / stderr / secrets).
 
-    Returns a freshly allocated string with known secret shapes replaced so the
-    print sink never receives clear-text credentials / JWTs / supabase URLs.
+    CodeQL ``py/clear-text-logging-sensitive-data`` flags sinks that receive
+    values derived from credential-bearing file buffers. Path labels, integer
+    line numbers, and constant ``detail`` strings from this module are safe.
     """
-    if not text:
-        return ""
-    # Copy into a new buffer first so later joins are not the original object.
-    chars = list(str(text))
-    out = "".join(chars)
-    out = re.sub(r"\bae_live_[0-9a-zA-Z]{16,}\b", "ae_live_[REDACTED]", out)
-    out = re.sub(
-        r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
-        "[JWT_REDACTED]",
-        out,
-    )
-    out = re.sub(
-        r"https?://[a-zA-Z0-9_-]+\.supabase\.co[^\s\"']*",
-        "[SUPABASE_URL_REDACTED]",
-        out,
-    )
-    out = re.sub(r"(?i)\b(authorization|bearer)\s+[^\s]+", r"\1 [REDACTED]", out)
-    # Final round-trip guarantees a new str identity for static analyzers.
-    return str(out)
+    if line_no is None:
+        return f"{path_label}: {kind}: {detail}"
+    return f"{path_label}:{line_no}: {kind}: {detail}"
 
 
 def check_forbidden_modules_and_secrets() -> list[str]:
@@ -106,30 +91,51 @@ def check_forbidden_modules_and_secrets() -> list[str]:
     violations: list[str] = []
 
     for path in sorted(SRC.rglob("*.py")):
+        path_label = _rel_path(path)
         # Check file name
         fname = path.name.lower()
         for pat in FORBIDDEN_SERVER_MODULE_PATTERNS:
             if re.search(pat, fname):
-                violations.append(f"{_rel_path(path)}: forbidden server module filename matching {pat}")
+                # ``pat`` is a module-level constant, not file content.
+                violations.append(
+                    _format_violation(
+                        path_label,
+                        None,
+                        "forbidden_module",
+                        f"server module filename matched forbidden pattern {pat}",
+                    )
+                )
 
         content = path.read_text(encoding="utf-8")
         lines = content.splitlines()
 
         for idx, line in enumerate(lines, 1):
-            # Check forbidden import statements
+            # Check forbidden import statements — never interpolate ``line`` into the message.
             stripped = line.strip()
             if stripped.startswith(("import ", "from ")):
                 for pat in FORBIDDEN_SERVER_MODULE_PATTERNS:
                     if re.search(pat, stripped):
+                        # ``pat`` is a module-level constant; never interpolate ``stripped``.
                         violations.append(
-                            f"{_rel_path(path)}:{idx}: forbidden server-only import "
-                            f"matching {pat}: {stripped}"
+                            _format_violation(
+                                path_label,
+                                idx,
+                                "forbidden_import",
+                                f"server-only import matched forbidden pattern {pat}",
+                            )
                         )
 
-            # Check secret patterns
+            # Check secret patterns — report only the constant description, never the match.
             for sec_pat, desc in SECRET_PATTERNS:
                 if re.search(sec_pat, line):
-                    violations.append(f"{_rel_path(path)}:{idx}: secret/credential pattern detected ({desc})")
+                    violations.append(
+                        _format_violation(
+                            path_label,
+                            idx,
+                            "secret_pattern",
+                            f"secret/credential pattern detected ({desc})",
+                        )
+                    )
 
     return violations
 
@@ -139,8 +145,9 @@ def check_local_commands_no_paid_gate() -> list[str]:
     violations: list[str] = []
     cli_file = SRC / "cli.py"
     if not cli_file.is_file():
-        return [f"Missing {cli_file}"]
+        return [_format_violation("cli.py", None, "missing", "cli.py not found")]
 
+    path_label = _rel_path(cli_file)
     tree = ast.parse(cli_file.read_text(encoding="utf-8"), filename=str(cli_file))
 
     class LocalCommandChecker(ast.NodeVisitor):
@@ -161,9 +168,15 @@ def check_local_commands_no_paid_gate() -> list[str]:
                 elif isinstance(node.func, ast.Attribute):
                     call_name = node.func.attr
                 if call_name == "require_firm_key":
+                    # Function name is an AST identifier from our allowlist, not file secret content.
+                    fname = self.current_func or "unknown"
                     violations.append(
-                        f"{_rel_path(cli_file)}:{node.lineno}: local-only command '{self.current_func}' "
-                        f"calls require_firm_key() (client-only paid gate violation; QOS-180/QOS-182)"
+                        _format_violation(
+                            path_label,
+                            int(node.lineno),
+                            "paid_gate",
+                            f"local-only command '{fname}' calls require_firm_key()",
+                        )
                     )
             self.generic_visit(node)
 
@@ -194,9 +207,14 @@ def check_import_no_networking() -> list[str]:
     )
     if res.returncode != 0:
         # Never echo raw stderr: it may carry env, paths, or credential-shaped text.
+        code = int(res.returncode)
         return [
-            "Network access attempted during `import alphaengine` "
-            f"(subprocess exit {res.returncode}; stderr redacted)"
+            _format_violation(
+                "import alphaengine",
+                None,
+                "network",
+                f"network access attempted during import (subprocess exit {code}; stderr omitted)",
+            )
         ]
     return []
 
@@ -216,9 +234,8 @@ def main() -> int:
     if all_violations:
         print("PUBLIC BOUNDARY VIOLATIONS DETECTED (QOS-182):", file=sys.stderr)
         for v in all_violations:
-            # Always redact before the logging sink (CodeQL py/clear-text-logging-sensitive-data).
-            safe_msg = _redact_for_log(v)
-            sys.stderr.write("  - " + safe_msg + "\n")
+            # ``v`` is constructed only from path labels, ints, and constant details.
+            print("  - " + v, file=sys.stderr)
         return 1
 
     print("public boundary guard ok: no server code, secrets, or paid local gates found")

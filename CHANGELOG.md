@@ -12,7 +12,7 @@ treated as part of the public contract).
 - **`ae rerun` counts as a trial:** `cmd_rerun` / `ledger.rerun_record_report` now record one trial in the run's family and project via `record_trials` (`n_added=1`, same config/data hashes as the original run, `source="rerun"`). Covered by `tests/test_trial_rule_and_manifest.py` (cumulative +1 after one rerun; +2 after two).
 - **Short with no borrow withholds verdict:** When a run had short positions and `borrow_bps <= 0` (`sealable=False`), statistical verdicts are withheld. Output is `verdict="unverified"` with `verdict_reason="borrow not supplied for short positions"` in the CLI, MCP `score_backtest`, and committee memo. Seal still refuses. Covered by `tests/test_coded_signal.py::test_short_with_zero_borrow_withholds_verdict_and_refuses_seal`.
 - **Auth product-boundary docstring:** `src/alphaengine/auth.py` now matches 2.0 policy — all local commands are free with no key; the firm `ae_live_` key is checked server-side only for push/pull/sync, shared ledger, remote run (`--url`), hosted MCP, import, AI, and network-gated commands (`workflows`, `runs`, `gaps`, `tonight`). README / CHANGELOG / `docs/free-vs-firm.md` aligned.
-- **Boundary-guard clear-text logging (CodeQL):** `scripts/check_public_boundary.py` redacts credential-shaped tokens before stderr logging and no longer echoes raw subprocess stderr on import-network failures.
+- **Boundary-guard clear-text logging (CodeQL):** `scripts/check_public_boundary.py` builds violation messages from path/line/constant labels only (never scanned source lines or subprocess stderr), so stderr logging cannot carry credential-shaped file content.
 
 ## [2.0.0] - 2026-11-08
 

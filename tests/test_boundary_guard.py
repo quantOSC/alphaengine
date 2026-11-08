@@ -38,6 +38,10 @@ def test_seeded_server_only_module_violation(tmp_path: Path, monkeypatch: pytest
     violations = guard.check_forbidden_modules_and_secrets()
     assert any("supabase" in v for v in violations)
     assert any("trial_ledger_db" in v for v in violations)
+    # Messages must never echo the scanned source line (CodeQL clear-text logging).
+    for v in violations:
+        assert "import supabase" not in v
+        assert "from trial_ledger_db" not in v
 
 
 def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -58,27 +62,12 @@ def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.Mon
     assert any("Supabase project URL" in v for v in violations)
     assert any("service_role" in v for v in violations)
     assert any("Live ae_live_* secret literal" in v for v in violations)
-    # Logged messages must never echo the raw credential (CodeQL clear-text logging).
+    # Logged messages are built from path/line/constant labels only — never the match.
     for v in violations:
-        logged = guard._redact_for_log(v)
-        assert live_key not in logged
-        assert "myproject.supabase.co" not in logged
-
-
-def test_redact_for_log_scrubs_credential_shaped_text() -> None:
-    import scripts.check_public_boundary as guard
-
-    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dGVzdHNpZ25hdHVyZQ"
-    raw = f"leak ae_live_0123456789abcdef0123456789 and https://abc123.supabase.co/rest plus Bearer {jwt}"
-    scrubbed = guard._redact_for_log(raw)
-    assert "ae_live_0123456789abcdef0123456789" not in scrubbed
-    assert "ae_live_[REDACTED]" in scrubbed
-    assert "supabase.co" not in scrubbed
-    assert "[SUPABASE_URL_REDACTED]" in scrubbed
-    assert jwt not in scrubbed
-    assert "Bearer [REDACTED]" in scrubbed
-    # Standalone JWT (no Bearer prefix) is also scrubbed.
-    assert "[JWT_REDACTED]" in guard._redact_for_log(f"token={jwt}")
+        assert live_key not in v
+        assert "myproject.supabase.co" not in v
+        assert "SUPABASE_URL" not in v
+        assert "LIVE_KEY" not in v
 
 
 def test_seeded_local_command_paid_gate_violation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -120,3 +109,21 @@ def test_seeded_import_network_violation(monkeypatch: pytest.MonkeyPatch):
     res = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert res.returncode == 1
     assert "Network socket call during import!" in res.stderr
+
+
+def test_import_network_check_omits_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Import-network failures must not echo subprocess stderr into violation text."""
+    import scripts.check_public_boundary as guard
+
+    class FakeResult:
+        returncode = 7
+        stdout = ""
+        stderr = "leak ae_live_0123456789abcdef0123456789 and password=supersecret"
+
+    monkeypatch.setattr(guard.subprocess, "run", lambda *a, **k: FakeResult())
+    violations = guard.check_import_no_networking()
+    assert len(violations) == 1
+    assert "exit 7" in violations[0]
+    assert "ae_live_" not in violations[0]
+    assert "supersecret" not in violations[0]
+    assert "stderr omitted" in violations[0]
