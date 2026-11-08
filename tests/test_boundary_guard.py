@@ -69,11 +69,7 @@ def test_redact_for_log_scrubs_credential_shaped_text() -> None:
     import scripts.check_public_boundary as guard
 
     jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dGVzdHNpZ25hdHVyZQ"
-    raw = (
-        "leak ae_live_0123456789abcdef0123456789 and "
-        "https://abc123.supabase.co/rest plus "
-        f"Bearer {jwt}"
-    )
+    raw = f"leak ae_live_0123456789abcdef0123456789 and https://abc123.supabase.co/rest plus Bearer {jwt}"
     scrubbed = guard._redact_for_log(raw)
     assert "ae_live_0123456789abcdef0123456789" not in scrubbed
     assert "ae_live_[REDACTED]" in scrubbed
