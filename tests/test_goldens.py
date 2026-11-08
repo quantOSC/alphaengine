@@ -90,7 +90,7 @@ def test_pbo_cscv_golden() -> None:
     assert got["n_configs"] == 6
     assert got["n_splits"] == 8
     assert got["logit_mean"] == -0.3963
-    assert got["verdict"] == "overfit"
+    assert got["verdict"] == "likely_noise"
 
 
 # ── performance ────────────────────────────────────────────────────────────

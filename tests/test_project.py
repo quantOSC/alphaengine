@@ -134,12 +134,12 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
     out1 = capsys.readouterr().out
     assert "trials (cumulative)" in out1 and "9" in out1
 
-    # Identical re-run: same config hash must NOT increase cumulative N (stays 9, not 18)
+    # Identical re-run (QOS-153): every executed attempt counts (9 + 9 = 18), while recording duplicate_of
     assert cli.main(["validate", "--project", "alphaengine.demo", "--family", "mom", "--idea", "idea_1"]) == 0
     out_dup = capsys.readouterr().out
-    assert "trials (cumulative)" in out_dup and "9" in out_dup
+    assert "trials (cumulative)" in out_dup and "18" in out_dup
 
-    # Distinct config on the same dataset: adds 9 new trials (9 + 9 = 18) and updates headline DSR
+    # Distinct config on the same dataset: adds 9 new trials (18 + 9 = 27) and updates headline DSR
     assert (
         cli.main(
             [
@@ -157,23 +157,23 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
         == 0
     )
     out2 = capsys.readouterr().out
-    assert "trials (cumulative)" in out2 and "18" in out2
+    assert "trials (cumulative)" in out2 and "27" in out2
 
-    # Run 3: `ae process ou` (source='monte_carlo', 80 paths) adds 0 to project-wide trials (stays 18)
+    # Run 3: `ae process ou` (source='monte_carlo', 80 paths) adds 0 to project-wide trials (stays 27)
     assert cli.main(["process", "ou", "--family", "ou_stress"]) == 0
     out3 = capsys.readouterr().out
-    assert "cumulative trials 18" in out3
+    assert "cumulative trials 27" in out3
 
-    # Direct Python `sweep()` inside a project also records to ledger and accumulates trials (18 + 3 = 21)
+    # Direct Python `sweep()` inside a project also records to ledger and accumulates trials (27 + 3 = 30)
     r_py = sweep(
         lambda data=None, fast=5: [0.001 * ((i % 5) - 2) for i in range(40)],
         {"fast": [5, 10, 15]},
         data=[100.0 + i for i in range(45)],
     )
     assert r_py.run_id is not None
-    assert r_py.cumulative_trials == 21
-    assert r_py.verdict()["n_trials"] == 21
-    assert r_py.verdict()["cumulative_trials"] == 21
+    assert r_py.cumulative_trials == 30
+    assert r_py.verdict()["n_trials"] == 30
+    assert r_py.verdict()["cumulative_trials"] == 30
 
     # `ae log` with filters
     assert cli.main(["log", "--idea", "idea_1"]) == 0
@@ -191,8 +191,8 @@ def test_project_ledger_accumulates_trials_and_supports_log_show_diff_rerun(
     runs = proj.read_jsonl("ledger/runs.jsonl")
     assert len(runs) == 5
     assert runs[1]["duplicate_of"] == runs[0]["run_id"]
-    assert runs[1]["cumulative_trials"] == 9
-    assert runs[2]["cumulative_trials"] == 18
+    assert runs[1]["cumulative_trials"] == 18
+    assert runs[2]["cumulative_trials"] == 27
     assert runs[2]["figures"]["deflated_sharpe"] == runs[2]["figures"]["cumulative_deflated_sharpe"]
     r1_id = str(runs[0]["run_id"])
     r3_id = str(runs[3]["run_id"])
@@ -455,7 +455,7 @@ def test_seal_run_or_idea_verify_study_with_data_and_export_memo_md_and_pdf(
     assert cli.main(["verify", str(study_path)]) == 0
     ver_out = capsys.readouterr().out
     assert "Verified." in ver_out
-    assert "figures reproduced" in ver_out
+    assert "figures_reproduced=true" in ver_out
 
     # 3. Also test `ae verify <study.json> --data <file>` on a returns CSV study
     rets_csv = tmp_path / "returns.csv"
@@ -530,14 +530,19 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     rem_out = capsys.readouterr().out
     assert rem_out.split()[-1] == "https://sync.example.invalid"
 
-    # 2. `ae push --dry-run` prints exact payload without touching network
+    # 2. `ae push --dry-run` prints preview offline; `--dry-run --json` emits structured payload
     assert cli.main(["push", "--dry-run"]) == 0
+    dry_preview = capsys.readouterr().out
+    assert "sync_contract" in dry_preview and "Code and raw datasets stay local." in dry_preview
+    assert cli.main(["push", "--dry-run", "--json"]) == 0
     dry_text = capsys.readouterr().out
-    dry_payload = json.loads(dry_text)
+    dry_payload = json.loads(dry_text)["payload"]
+    assert dry_payload["sync_contract"] == 2
     assert dry_payload["project"]["name"] == "sync-test"
     assert len(dry_payload["studies"]) == 1
     assert len(dry_payload["runs"]) == 1
     assert len(dry_payload["ideas"]) == 1
+    assert len(dry_payload["trial_events"]) == 9
     assert "9876.5432" not in dry_text
     assert "repro_spec" not in dry_text
     assert "datasets" not in dry_payload
@@ -561,7 +566,16 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
             def __exit__(self, *exc):
                 return False
 
-        return _Resp(b'{"ok": true}')
+        ack = {
+            "sync_contract": 2,
+            "engine_version": "2.0.0",
+            "items": [
+                {"type": "study", "local_id": "s1", "status": "accepted"},
+                {"type": "run", "local_id": "r1", "status": "accepted"},
+                {"type": "idea", "local_id": idea_id, "status": "accepted"},
+            ],
+        }
+        return _Resp(json.dumps(ack).encode("utf-8"))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_ok)
     assert cli.main(["push", "--key", "ae_live_test"]) == 0
@@ -570,31 +584,19 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     assert len(sent_requests) == 1
     assert sent_requests[0][0] == "https://sync.example.invalid/api/workspace/sync"
 
-    # 4. `ae push` when `/api/workspace/sync` returns 404 falls back to `/api/me/runs/ingest`
-    fallback_requests: list[str] = []
+    # 4. `ae push` when `/api/workspace/sync` returns 404 fails explicitly with exit 5
+    # (no silent 1.x fallback)
+    seen_404_requests: list[str] = []
 
     def fake_urlopen_404(req, timeout=None):
-        fallback_requests.append(req.full_url)
-        if req.full_url.endswith("/api/workspace/sync"):
-            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b""))
-
-        class _Resp(io.BytesIO):
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *exc):
-                return False
-
-        return _Resp(b'{"id": "ing_1"}')
+        seen_404_requests.append(req.full_url)
+        raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, io.BytesIO(b""))
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_404)
-    assert cli.main(["push", "--key", "ae_live_test"]) == 0
+    assert cli.main(["push", "--key", "ae_live_test"]) == 5
     fb_out = capsys.readouterr().out
-    assert "fell back to /api/me/runs/ingest" in fb_out
-    assert fallback_requests == [
-        "https://sync.example.invalid/api/workspace/sync",
-        "https://sync.example.invalid/api/me/runs/ingest",
-    ]
+    assert "404" in fb_out
+    assert seen_404_requests == ["https://sync.example.invalid/api/workspace/sync"]
 
     # 5. `ae pull` imports team runs and ideas marked `read_only: True`
     def fake_urlopen_pull(req, timeout=None):
@@ -606,6 +608,10 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
                 return False
 
         body = {
+            "sync_contract": 2,
+            "engine_version": "2.0.0",
+            "studies": [],
+            "next_cursor": None,
             "runs": [
                 {
                     "run_id": "run_team_99",
@@ -632,7 +638,7 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_pull)
     assert cli.main(["pull", "--key", "ae_live_test"]) == 0
     pull_out = capsys.readouterr().out
-    assert "1 runs, 1 ideas (marked read-only)" in pull_out
+    assert "runs (new=1," in pull_out and "ideas (new=1," in pull_out and "read_only" in pull_out
 
     proj = find_project(tmp_path)
     assert proj is not None
@@ -987,6 +993,8 @@ def test_require_firm_key_choke_point_keyring_and_no_key_leak(
     from alphaengine.study import Study, save
 
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
 
     # First create a sealed study file so we can verify `ae verify` works keyless
     sealed_path = tmp_path / "sealed.json"
@@ -1002,55 +1010,57 @@ def test_require_firm_key_choke_point_keyring_and_no_key_leak(
         require_firm_key()
     assert str(exc_info.value) == FIRM_KEY_ERROR_MESSAGE
 
-    # 1. Every gated command refuses without an `ae_live_` key, including `validate` against a dead host
-    gated_invocations = [
-        ["validate", "--url", "http://127.0.0.1:9"],
-        ["validate"],
-        ["screen"],
-        ["diagnose"],
-        ["signal"],
-        ["stress"],
-        ["overlap"],
-        ["size"],
-        ["monitor"],
+    # 1. Network portal commands refuse without an `ae_live_` key (QOS-180)
+    network_gated_invocations = [
         ["workflows"],
         ["runs"],
         ["gaps"],
         ["tonight"],
+        ["validate", "--url", "http://127.0.0.1:9"],
         ["run", "validate_study", "--url", "http://127.0.0.1:9"],
-        ["init"],
-        ["log"],
-        ["show", "HEAD"],
-        ["diff", "a", "b"],
-        ["rerun", "HEAD"],
-        ["watch", "pipe.yaml"],
-        ["data", "list"],
-        ["idea", "list"],
-        ["seal", str(sealed_path)],
         ["report", str(sealed_path)],
-        ["remote", "list"],
-        ["push", "--dry-run"],
-        ["pull"],
-        ["plugin", "list"],
-        ["shell"],
     ]
-    for argv in gated_invocations:
+    for argv in network_gated_invocations:
         rc = cli.main(argv)
         out = capsys.readouterr().out
         assert rc == 2, f"Expected exit 2 without key for {argv}, got {rc}"
         assert FIRM_KEY_ERROR_MESSAGE in out, f"Missing firm key error message for {argv}: {out}"
 
-    # 2. Free keyless commands (`demo`, `process`, `verify`) succeed without any key
+    # Sync live verbs (`push`, `pull`) refuse without firm key with exit code 4 (`EXIT_AUTH_ERROR`)
+    for sync_argv in (["push"], ["pull"]):
+        rc = cli.main(sync_argv)
+        out = capsys.readouterr().out
+        assert rc == 4, f"Expected exit 4 without key for {sync_argv}, got {rc}"
+        assert FIRM_KEY_ERROR_MESSAGE in out
+
+    # 2. All local commands are free and keyless (QOS-180: "Make everything local free in 2.0")
+    # init, version, whoami, doctor, verify, seal, log, remote, plugin, push --dry-run
+    assert cli.main(["init", "--name", "free-project"]) == 0
+    capsys.readouterr()
+    assert cli.main(["version"]) == 0
+    assert "2.0.0" in capsys.readouterr().out
+    assert cli.main(["whoami"]) == 0
+    capsys.readouterr()
+    assert cli.main(["doctor"]) == 0
+    capsys.readouterr()
     assert cli.main(["verify", str(sealed_path)]) == 0
     assert "Verified." in capsys.readouterr().out
+    assert cli.main(["log"]) == 0
+    capsys.readouterr()
+    assert cli.main(["push", "--dry-run"]) == 0
+    capsys.readouterr()
+    assert cli.main(["remote", "list"]) == 0
+    capsys.readouterr()
     assert cli.main(["process", "gbm"]) == 0
     capsys.readouterr()
     assert cli.main(["demo"]) == 0
     capsys.readouterr()
 
-    # 3. OS keychain (`keyring`) storage with 0600 fallback
+    # 3. OS keychain-first (`keyring`) storage: does NOT write plaintext credentials.json
+    # when usable (QOS-155)
     kr_store: dict[tuple[str, str], str] = {}
     fake_kr = types.ModuleType("keyring")
+    fake_kr.get_keyring = lambda: object()  # type: ignore[attr-defined]
     fake_kr.set_password = lambda svc, k, v: kr_store.__setitem__((svc, k), v)  # type: ignore[attr-defined]
     fake_kr.get_password = lambda svc, k: kr_store.get((svc, k))  # type: ignore[attr-defined]
     fake_kr.delete_password = lambda svc, k: kr_store.pop((svc, k), None)  # type: ignore[attr-defined]
@@ -1059,7 +1069,7 @@ def test_require_firm_key_choke_point_keyring_and_no_key_leak(
 
     auth.save_key("QUANTOS_API_KEY", "ae_live_keychain_secret_999")
     assert kr_store.get(("alphaengine", "QUANTOS_API_KEY")) == "ae_live_keychain_secret_999"
-    assert auth.config_path().is_file()
+    assert not auth.config_path().exists()
     assert require_firm_key() == "ae_live_keychain_secret_999"
     auth.remove_key("QUANTOS_API_KEY")
     assert ("alphaengine", "QUANTOS_API_KEY") not in kr_store
@@ -1126,7 +1136,9 @@ def test_end_to_end_signed_in_runs_sealed_portal_trace_and_rich_pdfs(
     from alphaengine import auth
 
     monkeypatch.chdir(tmp_path)
-    auth.save_key("QUANTOS_API_KEY", "ae_live_e2e_firm_key")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
+    auth.save_key("QUANTOS_API_KEY", "ae_live_e2e_firm_key", prefer_file=True)
     auth.apply_stored()
 
     # 1. Signed-in local Research OS workflow runs + sealing + verification
@@ -1162,7 +1174,11 @@ def test_end_to_end_signed_in_runs_sealed_portal_trace_and_rich_pdfs(
             def __exit__(self, *exc):
                 return False
 
-        return _Resp(b'{"ok": true, "id": "run_portal_1", "study_id": "st_portal_1"}')
+        resp_body = (
+            b'{"sync_contract": 2, "engine_version": "2.0.0", "items": [], '
+            b'"ok": true, "id": "run_portal_1", "study_id": "st_portal_1"}'
+        )
+        return _Resp(resp_body)
 
     monkeypatch.setattr(urllib.request, "urlopen", fake_portal_urlopen)
     assert cli.main(["remote", "add", "quantos", "https://portal.example.invalid"]) == 0

@@ -43,9 +43,14 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      - run: ruff check src tests
-      - run: ruff format --check src tests
+      - run: ruff check src tests scripts
+      - run: ruff format --check src tests scripts
       - run: mypy src
+      - run: python scripts/check_version_sync.py
+      - run: python scripts/check_engine_version.py
+      - run: python scripts/check_no_engine_copies.py
+      - run: python scripts/gen_gateway_doc.py --check
+      - run: python scripts/check_public_boundary.py
       # THE FIFTH COPY GUARD. The command list lived in three hand-maintained
       # places and none of them agreed: `--data` and `--universe` shipped and
       # appeared in one. It is generated from `commands.py` now, and this fails
@@ -54,10 +59,9 @@ jobs:
       - run: python scripts/gen_docs.py --check
 
   # The numbers this library returns are a public contract once published: a
-  # study written today has to reproduce in two years. This job exists to make
-  # a silent change to a computed value impossible — if a golden moves, the
-  # build fails and the change has to be argued for in the PR and carried by a
-  # major version bump.
+  # study written today has to reproduce in two years. In 2.0 (`QOS-157`), the
+  # golden job builds the actual `.whl` and runs the 14-case wheel golden suite
+  # plus `test_goldens.py` from an isolated directory outside the repository.
   goldens:
     runs-on: ubuntu-latest
     steps:
@@ -67,3 +71,4 @@ jobs:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
       - run: pytest tests -m golden -q
+      - run: python scripts/golden_wheel.py

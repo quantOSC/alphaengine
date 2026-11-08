@@ -150,7 +150,7 @@ def caveats_of(run: Any) -> tuple[list[str], str | None]:
                 "No trial count was recorded, so the Sharpe could not be deflated. "
                 "Nothing here can be called an edge."
             )
-            ceiling = "inconclusive"
+            ceiling = "marginal"
         elif source == "asserted":
             caveats.append("The trial count was stated rather than counted from a search that ran.")
             ceiling = ceiling or "marginal"

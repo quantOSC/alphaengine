@@ -76,6 +76,7 @@ from ..core import (
     signal_icir,
     subperiod_stability,
     technical_features,
+    trials_for_deflated_sharpe,
     variance_explained,
     vol_target,
 )
@@ -180,9 +181,9 @@ def _hash(data: Any) -> str:
 def _engine_version() -> str:
     """Which build produced the figures. Stamped so a consumer can reproduce or
     refuse, which is the whole reason the version is a public contract."""
-    from .._version import __version__
+    from .._version import current_engine_version
 
-    return f"alphaengine@{__version__}"
+    return f"alphaengine@{current_engine_version()}"
 
 
 def _schema_version() -> str:
@@ -530,23 +531,26 @@ class StepExecutor:
         currently unreachable is still wrong.
         """
         result = ws.get("sweep")
+        trials_std_from_grid: float | None = None
         if result is not None:
-            n_trials, source = int(result.n_trials), "derived_from_grid"
             ok = [t for t in result.trials if t.failed is None]
             if len(ok) >= 2:
                 disp = float(np.std([t.sharpe for t in ok], ddof=1))
-                trials_std_from_grid: float | None = disp if (math.isfinite(disp) and disp > 0) else None
-            else:
-                trials_std_from_grid = None
-        elif params.get("n_trials") is not None:
-            n_trials, source = int(params["n_trials"]), "asserted"
-            trials_std_from_grid = None
-        else:
-            # No count, so no deflation. Reported as absent-with-a-reason rather
-            # than as a number, because a DSR standing on an invented denominator
-            # looks exactly like one standing on a counted grid.
+                trials_std_from_grid = disp if (math.isfinite(disp) and disp > 0) else None
+
+        n_trials, source = trials_for_deflated_sharpe(
+            int(params["n_trials"]) if params.get("n_trials") is not None else None,
+            n_trials_source=params.get("n_trials_source"),
+            sweep_trials=int(result.n_trials) if result is not None else None,
+            ledger_trials=params.get("ledger_trials", ws.get("ledger_trials")),
+            ledger_runs=params.get("ledger_runs", ws.get("ledger_runs")),
+        )
+        if n_trials is None:
             figures: Figures = {
+                "engine_version": _engine_version().split("@", 1)[-1],
+                "dsr_probability": None,
                 "deflated_sharpe": None,
+                "deflation_applied": False,
                 "n_trials": None,
                 "n_trials_source": "not_recorded",
                 "verdict": None,
@@ -567,7 +571,10 @@ class StepExecutor:
             rf_kwargs["trials_sharpe_std"] = trials_std_from_grid
         out = deflated_sharpe(self._returns_column(ws), n_trials=n_trials, **rf_kwargs)
         figures = {
+            "engine_version": out.get("engine_version"),
+            "dsr_probability": out.get("dsr_probability"),
             "deflated_sharpe": out.get("deflated_sharpe"),
+            "deflation_applied": out.get("deflation_applied"),
             "psr_vs_zero": out.get("psr_vs_zero"),
             "sr0_expected_max": out.get("sr0_expected_max"),
             "verdict": out.get("verdict"),
@@ -577,9 +584,6 @@ class StepExecutor:
             "risk_free_rate_source": out.get("risk_free_rate_source"),
             "risk_free_rate_as_of": out.get("risk_free_rate_as_of"),
         }
-        # Kept so `emit.study` can carry the verdict this run actually produced
-        # rather than deriving it a second time. Two derivations of one figure
-        # can disagree, and the second is the one nobody looks at.
         ws["verdict"] = figures
         return figures
 
@@ -842,12 +846,16 @@ class StepExecutor:
             for k in (
                 "slippage_bps",
                 "commission_bps",
+                "borrow_bps",
                 "fill_timing",
                 "initial_capital",
                 "max_position_pct",
                 "adv",
+                "adv_series",
                 "impact_coef",
                 "max_participation",
+                "liquidate_final",
+                "periods_per_year",
             )
             if k in params
         }
@@ -856,6 +864,7 @@ class StepExecutor:
         if isinstance(bt.get("returns"), list):
             ws.setdefault("returns", bt["returns"])
         return {
+            "engine_version": bt.get("engine_version"),
             "n_bars": bt.get("n_bars"),
             "n_trades": bt.get("n_trades"),
             "final_equity": bt.get("final_equity"),
@@ -869,25 +878,31 @@ class StepExecutor:
         bt = ws.get("backtest")
         if bt is None:
             raise UnsupportedOp("compute.score_backtest needs compute.backtest first in this run.")
-        n_trials = params.get("n_trials")
-        source = params.get("n_trials_source")
         sweep = ws.get("sweep")
-        if sweep is not None and n_trials is None:
-            n_trials, source = int(sweep.n_trials), "derived_from_grid"
+        resolved_n, resolved_src = trials_for_deflated_sharpe(
+            int(params["n_trials"]) if params.get("n_trials") is not None else None,
+            n_trials_source=params.get("n_trials_source"),
+            sweep_trials=int(sweep.n_trials) if sweep is not None else None,
+            ledger_trials=params.get("ledger_trials", ws.get("ledger_trials")),
+            ledger_runs=params.get("ledger_runs", ws.get("ledger_runs")),
+        )
         score_kwargs: dict[str, Any] = {}
         if params.get("risk_free_rate") is not None:
             score_kwargs["risk_free_rate"] = float(params["risk_free_rate"])
         if params.get("periods_per_year") is not None:
             score_kwargs["periods_per_year"] = int(params["periods_per_year"])
+        if params.get("initial_capital") is not None:
+            score_kwargs["initial_capital"] = float(params["initial_capital"])
         scored = score_backtest(
             bt,
-            n_trials=None if n_trials is None else int(n_trials),
-            n_trials_source=source,
+            n_trials=resolved_n,
+            n_trials_source=resolved_src if resolved_n is not None else None,
             cpcv=bool(params.get("cpcv")),
             **score_kwargs,
         )
         ws["score"] = scored
         return {
+            "engine_version": scored.get("engine_version"),
             "performance": scored.get("performance"),
             "validation": scored.get("validation"),
             "trade_summary": scored.get("trade_summary"),
@@ -1001,6 +1016,12 @@ class StepExecutor:
             data=self.data,
             n_windows=int(params.get("n_windows") or 4),
             oos_fraction=float(params.get("oos_fraction") or 0.25),
+            purge_bars=int(params.get("purge_bars") or 0),
+            on_window=params.get("on_window"),
+            risk_free_rate=float(params["risk_free_rate"])
+            if params.get("risk_free_rate") is not None
+            else None,
+            periods_per_year=int(params.get("periods_per_year") or 252),
         )
         ws["walk_forward"] = out
         return out

@@ -527,7 +527,7 @@ def test_correlated_trials_dsr_luck_bar_audit_case_and_n_eff_participation() -> 
     expected_neff = (100.0**2) / ((1.0 + 99.0 * 0.8) ** 2 + 99.0 * (0.2**2))
     assert n_eff_participation(corr_eq) == pytest.approx(expected_neff, abs=1e-9)
 
-    # 4. Sweep verdict excludes failed trials from N and reports n_eff_participation
+    # 4. Sweep verdict includes failed grid combinations in N (QOS-153) and reports n_eff_participation
     base_series = np.random.default_rng(7).normal(0.0005, 0.01, 200)
 
     def bt_with_failure(data=None, k: int = 0):
@@ -538,8 +538,8 @@ def test_correlated_trials_dsr_luck_bar_audit_case_and_n_eff_participation() -> 
     sr = sweep(bt_with_failure, {"k": [0, 1, 2, 3]}, data=base_series)
     assert sr.n_trials == 4
     v = sr.verdict()
-    assert v["n_trials"] == 3
-    assert v["run_n_trials"] == 3
+    assert v["n_trials"] == 4
+    assert v["run_n_trials"] == 4
     assert "n_eff_participation" in v and v["n_eff_participation"] >= 1.0
     assert "deflated_sharpe_at_n_eff" in v and isinstance(v["deflated_sharpe_at_n_eff"], float)
 

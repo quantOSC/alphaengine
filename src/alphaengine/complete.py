@@ -90,33 +90,34 @@ def make_completer(
 def enable(*, verbs: list[str], symbols: list[str] | None = None, proj: Any = None) -> None:
     """Attach history + completer to this process. No-ops when readline is absent."""
     try:
-        import readline  # noqa: PLC0415
+        import readline as _rl_mod  # noqa: PLC0415
     except ImportError:  # pragma: no cover - Windows without pyreadline
         return
+    rl: Any = _rl_mod
 
     path = _history_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
-            readline.read_history_file(str(path))
+            rl.read_history_file(str(path))
     except OSError:
         pass
-    readline.set_history_length(1000)
+    rl.set_history_length(1000)
 
     completer = make_completer(verbs=verbs, symbols=symbols, proj=proj)
-    readline.set_completer(completer)
-    readline.set_completer_delims(" \t\n")
+    rl.set_completer(completer)
+    rl.set_completer_delims(" \t\n")
     try:
-        readline.parse_and_bind("tab: complete")
+        rl.parse_and_bind("tab: complete")
     except Exception:  # noqa: BLE001 - libedit uses a different bind
-        readline.parse_and_bind("bind ^I rl_complete")
+        rl.parse_and_bind("bind ^I rl_complete")
 
     import atexit
 
     def _save() -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            readline.write_history_file(str(path))
+            rl.write_history_file(str(path))
         except OSError:
             pass
 

@@ -6,18 +6,9 @@
 
 ── WHY THIS EXISTS ────────────────────────────────────────────────────────────
 
-The command list lived in three hand-maintained places and none of them agreed:
-the REPL's help text, the README, and the docs page on the site. `--data` and
-`--universe` shipped and appeared in one; the docs page listed no CLI commands
-at all. Every copy looks authoritative on its own, so a reader who finds the
-stale one concludes the feature does not exist.
-
-`--check` runs in CI. A verb added to `commands.py` and forgotten in the README
-fails a build rather than quietly misleading somebody for a month.
-
-The block is delimited by HTML comments so the rest of the README stays
-hand-written. Generating a whole README produces something nobody wants to read;
-generating the one part that is a machine-readable list is the whole trick.
+The command list is declared once in `src/alphaengine/commands.py` (`QOS-169`)
+and rendered into the CLI parser, the interactive `commands` directory, and
+`README.md`. `--check` runs in CI so command docs cannot drift from code.
 """
 
 from __future__ import annotations
@@ -35,18 +26,23 @@ END = "<!-- COMMANDS:END -->"
 README = pathlib.Path(__file__).resolve().parents[1] / "README.md"
 
 
-def _sig(c) -> str:
-    return f"{c.verb} {c.args}".strip()
+def _sig(c: object) -> str:
+    verb = getattr(c, "verb", "")
+    args = getattr(c, "args", "")
+    return f"{verb} {args}".strip()
 
 
 def _cell(text: str) -> str:
-    """A pipe inside a markdown table cell ends the cell.
-
-    `key [quantos | anthropic | openai]` renders as three broken columns
-    otherwise, which is the sort of thing a generator is supposed to make
-    impossible rather than reproduce faithfully.
-    """
+    r"""Escape pipe characters (`|`) inside markdown table cells."""
     return text.replace("|", r"\|")
+
+
+def _locality_badge(locality: str) -> str:
+    return {
+        "local": "local",
+        "remote": "remote",
+        "hybrid": "local/remote",
+    }.get(locality, locality)
 
 
 def render() -> str:
@@ -61,10 +57,11 @@ def render() -> str:
         rows = [c for c in COMMANDS if c.group == group]
         if not rows:
             continue
-        out += [f"### {title}", "", "| Command | Does | Where |", "|---|---|---|"]
+        out += [f"### {title}", "", "| Command | Does | Boundary | Where |", "|---|---|---|---|"]
         for c in rows:
             where = {"both": "shell + session", "cli": "shell", "repl": "session"}[c.scope]
-            out.append(f"| `{_cell(_sig(c))}` | {_cell(c.purpose)} | {where} |")
+            bound = _locality_badge(c.locality)
+            out.append(f"| `{_cell(_sig(c))}` | {_cell(c.purpose)} | `{bound}` | {where} |")
         out.append("")
 
     out += [
@@ -79,12 +76,12 @@ def render() -> str:
 
     out += ["### Flags", "", "| Flag | Does |", "|---|---|"]
     for f in FLAGS.values():
+        if f.deprecated:
+            continue
         sig = f"{f.name} {f.takes}".strip()
         out.append(f"| `{_cell(sig)}` | {_cell(f.purpose)} |")
     out.append("")
 
-    # Every command that carries examples, so the reference is copy-pasteable
-    # rather than a signature list somebody has to guess their way through.
     out += ["### Examples", "", "```bash"]
     for c in COMMANDS:
         for ex in c.examples:

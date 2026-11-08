@@ -8,39 +8,15 @@ and `--universe` shipped and appeared in one of the three; `demo` appeared in
 two; the docs page listed **no CLI commands at all** while describing the
 library in fourteen sections.
 
-That is not a documentation problem, it is a source problem. Three copies of a
-list drift within a week and the drift is invisible — every copy looks
-authoritative on its own, and a reader who finds the stale one concludes the
-feature does not exist.
-
-So: one declaration, four renderings.
-
-    HELP in the REPL                  -> `help`
-    the interactive directory          -> `commands`, `commands <verb>`
-    the README's reference block       -> scripts/gen_docs.py
-    the docs page table                -> the same generator
-
-A test asserts the README block matches what this generates, so a verb added
-here and forgotten there fails a build rather than misleading somebody.
-
-── WHAT A GOOD ENTRY LOOKS LIKE ───────────────────────────────────────────────
-
-`purpose` is ONE LINE and is what a directory shows. It answers "would I want
-this", not "how does it work". `body` is what `commands <verb>` expands to, and
-it is allowed to explain a distinction that matters — scripted versus
-exploratory, which door supplies a simulator — because that is the thing a
-reader cannot infer from a signature.
-
-`examples` are REAL and copy-pasteable. An example with a placeholder nobody can
-resolve (`--project <your module>`) teaches nothing; `--project research.momentum`
-at least shows the shape.
+So: one declaration (`COMMANDS` + `FLAGS`), driving the parser, the interactive
+`commands` directory, and `scripts/gen_docs.py` (`QOS-169`).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["Command", "COMMANDS", "GROUPS", "Flag", "FLAGS", "by_verb", "in_group"]
+__all__ = ["Command", "COMMANDS", "DATA_DOORS", "GROUPS", "Flag", "FLAGS", "by_verb", "in_group"]
 
 
 @dataclass(frozen=True)
@@ -48,6 +24,7 @@ class Flag:
     name: str
     takes: str
     purpose: str
+    deprecated: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,19 +34,20 @@ class Command:
     group: str
     #: What follows the verb, as a reader would type it. "" for a bare verb.
     args: str
-    #: ONE LINE. Answers "would I want this", not "how does it work".
+    #: ONE LINE (<= 80 chars). Answers "would I want this", not "how does it work".
     purpose: str
-    #: Where it works. A few verbs exist only inside the session.
-    scope: str = "both"  # cli | repl | both
+    #: Where it works: `cli`, `repl`, or `both`.
+    scope: str = "both"
+    #: Execution boundary: `local`, `remote`, or `hybrid` (`QOS-169`).
+    locality: str = "local"
+    #: Whether `--json` emits a structured machine-readable JSON payload.
+    supports_json: bool = False
     #: The longer explanation `commands <verb>` prints.
     body: str = ""
     examples: tuple[str, ...] = ()
     flags: tuple[str, ...] = ()  # names, resolved against FLAGS
 
 
-#: The four questions somebody has, in the order they have them. Grouping beats
-#: alphabetical here: a flat list of thirteen verbs makes a reader scan for a
-#: word they do not know yet.
 GROUPS: tuple[tuple[str, str], ...] = (
     ("start", "Get started"),
     ("run", "Do the work"),
@@ -79,10 +57,24 @@ GROUPS: tuple[tuple[str, str], ...] = (
 
 
 FLAGS: dict[str, Flag] = {
-    "url": Flag("--url", "URL", "workflow server (default $QUANTOS_API_URL or the public API)"),
-    "key": Flag("--key", "KEY", "portal-issued ae_live_ key (default $QUANTOS_API_KEY)"),
-    "project": Flag("--project", "MODULE", "a module exposing `data` and `backtest_fn`"),
-    "data": Flag("--data", "FILE", "a local CSV: wide, long, or a single series"),
+    "url": Flag("--url", "URL", "workflow server (default $ALPHAENGINE_API_URL or public API)"),
+    "key": Flag(
+        "--key",
+        "KEY",
+        "deprecated: exposes key in process list; use login or $QUANTOS_API_KEY",
+        deprecated=True,
+    ),
+    "signal": Flag(
+        "--signal",
+        "PATH_OR_MOD",
+        "coded signal module or .py file exposing signal(data_asof=..., params=...)",
+    ),
+    "project": Flag(
+        "--project",
+        "MODULE",
+        "a module exposing `data` and `backtest_fn` (user-owned P&L, not engine-verified)",
+    ),
+    "data": Flag("--data", "FILE", "a local CSV or Parquet file: wide, long, or a single series"),
     "universe": Flag("--universe", "NAME", "a universe registered in the portal, with its stored closes"),
     "thesis": Flag("--thesis", "NAME", "a thesis on this account; the run is attached to it"),
     "symbol": Flag(
@@ -95,14 +87,19 @@ FLAGS: dict[str, Flag] = {
     "share_series": Flag(
         "--share-series",
         "",
-        "opt in to uploading full series on run traces (default off; or $ALPHAENGINE_SHARE_SERIES=1)",
+        "opt in to uploading full series on run/sync payloads (default off)",
     ),
-    "limit": Flag("--limit", "N", "how many rows to show (default 25)"),
+    "limit": Flag("--limit", "N", "maximum rows or items per page (default 25 on log/runs, 100 on pull)"),
     "budget": Flag("--budget", "N", "how many runs a night is worth (default 3)"),
     "purge": Flag(
         "--purge",
         "",
-        "remove ~/.config/alphaengine/credentials.json and clean up its config directory",
+        "clear OS keyring, remove credentials.json, and unset keys in this process",
+    ),
+    "no_keyring": Flag(
+        "--no-keyring",
+        "",
+        "store credential in mode-0600 credentials.json instead of the OS keyring",
     ),
     "name": Flag(
         "--name",
@@ -121,13 +118,13 @@ FLAGS: dict[str, Flag] = {
     ),
     "since": Flag(
         "--since",
-        "DATE",
-        "filter project log to runs on or after YYYY-MM-DD",
+        "CURSOR_OR_DATE",
+        "filter project log on/after YYYY-MM-DD, or pull cursor token on pull",
     ),
     "verdict": Flag(
         "--verdict",
         "VERDICT",
-        "filter project log by verdict (e.g. robust, marginal, likely_noise)",
+        "filter project log by verdict (robust, marginal, likely_noise, unverified)",
     ),
     "asof_col": Flag(
         "--asof-col",
@@ -137,17 +134,23 @@ FLAGS: dict[str, Flag] = {
     "json": Flag(
         "--json",
         "",
-        "emit a versioned v1.0 JSON result envelope to stdout",
+        "emit structured machine-readable JSON to stdout",
     ),
     "stdin": Flag(
         "--stdin",
         "",
         "read an upstream JSON result envelope from standard input",
     ),
+    "kill_rule": Flag(
+        "--kill-rule",
+        "RULE",
+        "falsification rule for a hypothesis, e.g. 'DSR < 0.9'",
+    ),
     "kill_if": Flag(
         "--kill-if",
         "RULE",
-        "kill rule for a hypothesis, e.g. 'DSR < 0.9'",
+        "deprecated alias for --kill-rule",
+        deprecated=True,
     ),
     "format": Flag(
         "--format",
@@ -157,7 +160,17 @@ FLAGS: dict[str, Flag] = {
     "dry_run": Flag(
         "--dry-run",
         "",
-        "print the exact sync payload without making a network call",
+        "print the sync boundary preview without opening a network socket",
+    ),
+    "show_payload": Flag(
+        "--show-payload",
+        "",
+        "include the redacted sync_contract=2 JSON payload in the push preview",
+    ),
+    "yes": Flag(
+        "--yes",
+        "",
+        "skip interactive confirmation prompt on push",
     ),
     "live": Flag(
         "--live",
@@ -174,12 +187,14 @@ FLAGS: dict[str, Flag] = {
         "N",
         "number of polling cycles for watch before exiting (0 means continuous)",
     ),
+    "version": Flag(
+        "--version",
+        "",
+        "print engine_version, sync_contract, and wheel_sha256",
+    ),
 }
 
 
-#: The questions, as commands. Each is `run <workflow>` with the workflow
-#: pre-chosen: same flags, same behaviour, one implementation. Declared from
-#: one table so the parser, the docs and the shell cannot drift.
 _QUESTIONS: tuple[tuple[str, str, str, str], ...] = (
     (
         "diagnose",
@@ -206,8 +221,8 @@ _QUESTIONS: tuple[tuple[str, str, str, str], ...] = (
         "validate",
         "validate_study",
         "is this real?",
-        "Your simulator, our referee: the sweep, the deflated Sharpe, PBO, and a trial count "
-        "that was counted rather than claimed.",
+        "Your signal or simulator, our referee: the sweep, DSR probability, PBO, and a trial "
+        "count that was counted per executed attempt rather than claimed.",
     ),
     (
         "stress",
@@ -240,16 +255,37 @@ _QUESTIONS: tuple[tuple[str, str, str, str], ...] = (
 
 
 def _question_commands() -> tuple[Command, ...]:
+    base_flags = (
+        "signal",
+        "project",
+        "data",
+        "universe",
+        "symbol",
+        "thesis",
+        "label",
+        "input",
+        "quiet",
+        "stream",
+        "share_series",
+        "json",
+        "stdin",
+        "idea",
+        "family",
+        "url",
+    )
     return tuple(
         Command(
             verb=verb,
             group="run",
             args="",
             purpose=purpose,
+            locality="hybrid",
+            supports_json=True,
             body=body + f"\n\nThe long spelling is `run {workflow}`; the flags are identical.",
-            examples=(f"alphaengine {verb} --universe <name>",)
+            examples=(f"alphaengine {verb} --universe sp500",)
             if verb in ("diagnose", "screen")
             else (f"alphaengine {verb}",),
+            flags=base_flags + (("live",) if verb == "monitor" else ()),
         )
         for verb, workflow, purpose, body in _QUESTIONS
     )
@@ -262,6 +298,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="start",
         args="[--name NAME]",
         scope="both",
+        locality="local",
         purpose="initialize a local .alphaengine/ research project in this directory",
         body=(
             "Creates `.alphaengine/` in the current directory with `project.toml`, "
@@ -278,6 +315,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="start",
         args="",
         scope="both",
+        locality="local",
         purpose="run the built-in example offline, with no account and no data",
         body=(
             "The fastest way to see the whole offline half work. A fixed seed, so it "
@@ -295,6 +333,8 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="start",
         args="[ou | gbm | jump | garch]",
         scope="both",
+        locality="local",
+        supports_json=True,
         purpose="fit a named process to a series and stress it, offline",
         body=(
             "Calibrate a named data-generating process on a close, a spread, or "
@@ -305,43 +345,39 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "demo walk, which has no edge, and the stress should say so.\n\n"
             "Figures only: scalars, a histogram, a sketched band. The simulated "
             "paths stay on this machine. Trial count is the path count, sourced "
-            "as monte_carlo. This is local, like `demo`; it does not call the portal. "
-            "The long spelling that will, once the harness registers it, is "
-            "`run evaluate_process` or `stress --input dgp=ou`."
+            "as monte_carlo. This is local, like `demo`; it does not call the portal."
         ),
         examples=("alphaengine process", "alphaengine process ou", "process garch"),
-        flags=("data",),
+        flags=("data", "json", "stdin", "idea", "family"),
     ),
     Command(
         verb="runs",
         group="start",
         args="[--limit N]",
         scope="both",
+        locality="remote",
         purpose="your own week: what ran, what it decided, what it filed",
         body=(
-            "The terminal could START work and could not show you any of it, so "
-            '"what did I already try" was a question you had to open a browser to '
-            "ask, from the one place you are least likely to want to leave.\n\n"
+            "Reads recent runs from your quantOS account.\n\n"
             "MOSTLY STOPS, AND THAT IS THE POINT. The dead ends are the majority "
             "of a research week and the part that evaporates everywhere else, so a "
-            "stopped run prints its REASON here rather than only its token: the "
-            "sentence is the most useful thing the run produced.\n\n"
-            "Every row carries the honest trial count WITH its provenance, because "
-            "a count that was derived from a grid that ran and one that was "
-            "asserted are different claims about the same number."
+            "stopped run prints its REASON here rather than only its token.\n\n"
+            "Every row carries the honest trial count WITH its provenance."
         ),
         examples=("alphaengine runs", "alphaengine runs --limit 50"),
+        flags=("limit", "url"),
     ),
     Command(
         verb="log",
         group="start",
         args="[--idea ID] [--family FAMILY] [--since DATE] [--verdict VERDICT]",
         scope="both",
+        locality="local",
         purpose="list local project ledger runs, trial counts, and verdicts",
         body=(
             "Reads `.alphaengine/ledger/runs.jsonl` and prints recorded runs newest "
             "first, showing both the single-run trial count and the cumulative trial "
-            "count accumulated across the idea or family."
+            "count accumulated across executed attempts in the idea or family."
         ),
         examples=(
             "alphaengine log",
@@ -354,11 +390,12 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="start",
         args="<run>",
         scope="both",
+        locality="local",
         purpose="inspect one recorded project run, its hashes, trials, and figures",
         body=(
             "Prints the full ledger record for `<run>` (exact run id, prefix, or "
-            "`HEAD`), including parameter hash, dataset hashes, single-run and "
-            "cumulative trial counts, figures, and verdict."
+            "`HEAD`), including parameter hash, dataset hashes, manifest hash, "
+            "single-run and cumulative trial counts, figures, and verdict."
         ),
         examples=("alphaengine show HEAD",),
     ),
@@ -367,6 +404,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="start",
         args="<run-a> <run-b>",
         scope="both",
+        locality="local",
         purpose="compare data, parameter, trial, and figure changes between two runs",
         body=(
             "Compares two runs from the project ledger side by side: dataset hash "
@@ -380,80 +418,68 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="start",
         args="",
         scope="both",
+        locality="remote",
         purpose="what your record says is UNANSWERED, and what closes each one",
         body=(
             "`runs` shows what you already tried. This shows what you have not: "
-            "the other half of the same question, and the one you want at 9am "
-            "rather than at the end of a task.\n\n"
-            "EVERY LINE NAMES ITS REMEDY. A gap that cannot name one is an "
-            "observation rather than a next step, so the ones with no workflow "
-            "behind them are not printed as work.\n\n"
-            "Derived from the record, never asked of a model: a model invited to "
-            "find gaps can decline to find them, and can invent them. What you "
-            "see is a query over runs that actually happened."
+            "the other half of the same question.\n\n"
+            "EVERY LINE NAMES ITS REMEDY. Derived from the record, never asked of a model."
         ),
         examples=("alphaengine gaps",),
+        flags=("url",),
     ),
     Command(
         verb="tonight",
         group="start",
         args="[--budget N]",
         scope="both",
+        locality="remote",
         purpose="what would run unattended tonight, without running any of it",
         body=(
             "The same derivation the scheduler uses, so this is what WILL happen "
-            "rather than a description of it.\n\n"
-            "EVERYTHING SKIPPED IS PRINTED. A plan showing only what it kept "
-            "reads as 'this is everything that mattered', which is the one thing "
-            "a plan must never imply. Two reasons appear: past tonight's budget, "
-            "and blocked on an input only you can state. A monitor's tolerances "
-            "are not something the planner may invent."
+            "rather than a description of it. Everything skipped is printed with its reason."
         ),
         examples=("alphaengine tonight", "alphaengine tonight --budget 5"),
-        flags=("budget",),
+        flags=("budget", "url"),
     ),
     Command(
         verb="workflows",
         group="start",
         args="",
+        locality="remote",
         purpose="what the server offers, what each needs, and which reproduce",
         body=(
-            "The modeling week as questions: can I trust this data, what is worth "
-            "a look, does this signal carry information, is it real, where does it "
-            "break, is it new or my book again, how much, is it still inside the "
-            "lines. Only `validate_study` wants your simulator.\n\n"
-            "`reproducible` is not decoration. A SCRIPTED workflow reaches the same "
-            "place twice over the same data; an EXPLORATORY one may not, and its "
-            "artifact must never be read as though it does. Knowing which BEFORE you "
-            "start is the point of publishing it."
+            "Lists workflows published by the configured quantOS server, their input "
+            "requirements, and whether each is reproducible."
         ),
         examples=("alphaengine workflows",),
+        flags=("url",),
     ),
     Command(
         verb="login",
         group="start",
         args="[quantos | anthropic | openai | gemini | groq | azure | openrouter | gateway]",
         scope="both",
+        locality="local",
         purpose="sign in, or login anthropic for a model key",
         body=(
             "Three rungs and each is useful without the one above it:\n\n"
             "  the maths      yours, offline, always. No account.\n"
             "  workflows      a QuantOS `ae_live_` key. The loop, end to end.\n"
             "  ask anything   your OWN model key. Plain English in.\n\n"
-            "Bare `login` signs into QuantOS when you are not already. "
-            "`login anthropic` (or openai, gemini, groq, ...) prompts for a "
-            "model key. From a shell: `alphaengine login`.\n\n"
-            "Model keys are read from the environment at call time and handed to "
-            "the provider. You can also stay signed in: that writes a mode-0600 file "
-            "under your user profile, never the project directory."
+            "When you choose to stay signed in, credentials are stored in the OS "
+            "keychain (`keyring`) when available; `credentials.json` (mode 0600) is "
+            "written only when no OS keyring is available or `--no-keyring` is passed."
         ),
         examples=("login", "login anthropic", "alphaengine login"),
+        flags=("no_keyring",),
     ),
     Command(
         verb="key",
         group="start",
         args="[quantos | anthropic | openai | gemini | groq | azure | openrouter | gateway]",
         scope="repl",
+        locality="local",
         purpose="same as login: enter a credential, or see which rungs are lit",
         body=(
             "Kept because muscle memory. Prefer `login`. Bare `key` still shows "
@@ -465,10 +491,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         verb="commands",
         group="start",
         args="[verb]",
+        locality="local",
         purpose="this directory, or one command in full",
         body=(
-            "Bare `commands` groups every verb by the question it answers. "
-            "`commands <verb>` expands one: full syntax, its flags, and real examples."
+            "Bare `commands` groups every verb by the question it answers and labels "
+            "`[local]` vs `[remote]`. `commands <verb>` expands one in full."
         ),
         examples=("commands", "commands run", "alphaengine commands"),
     ),
@@ -477,23 +504,28 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         verb="run",
         group="run",
         args="<workflow>",
-        purpose="run one workflow exactly as written",
+        locality="hybrid",
+        supports_json=True,
+        purpose="run one workflow or coded signal exactly as written",
         body=(
             "SCRIPTED. The workflow owns the sequence, so two runs over the same data "
             "reach the same place and the artifact is reproducible. This is the path "
             "to use when you know which question you are asking.\n\n"
+            "Pass `--signal path/to/my_signal.py` to execute an engine-verified causal "
+            "weight signal (`signal(data_asof=..., params=...)`) with mandatory costs "
+            "and attempt-level trial counting. `--project` runs a user-owned `backtest_fn` "
+            "(explicitly labeled not engine-verified).\n\n"
             'A STOP IS A RESULT AND EXITS 0. "This did not clear the bar" is the '
-            "system working exactly as intended, and a non-zero exit would make every "
-            "CI pipeline treat an honest refusal as a broken build, which is the "
-            "pressure that gets honesty controls switched off."
+            "system working as intended."
         ),
         examples=(
             "alphaengine run screen_universe --universe sp500",
-            "alphaengine run size_position --data returns.csv",
+            "alphaengine run validate_study --signal research/momentum_signal.py --data prices.csv",
             "alphaengine run validate_study --project research.momentum",
             "alphaengine run examples/screen_validate_size.yaml",
         ),
         flags=(
+            "signal",
             "project",
             "data",
             "universe",
@@ -509,27 +541,32 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "idea",
             "family",
             "url",
-            "key",
         ),
     ),
     Command(
         verb="rerun",
         group="run",
-        args="<run>",
+        args="<run> [--json]",
         scope="both",
-        purpose="reproduce a recorded project run from its inputs and check figures",
+        locality="local",
+        supports_json=True,
+        purpose="re-execute a local run and check hash, figure, and provenance parity",
         body=(
-            "Re-executes `<run>` from its recorded inputs and parameters, compares "
-            "every scalar figure against the original ledger record, and reports "
-            "whether the figures match."
+            "Re-executes `<run>` from its recorded local inputs and reports three "
+            "independent verification statuses: `hash_verified` (CAS integrity), "
+            "`figures_reproduced` (every recorded scalar and curve/list within tolerance, "
+            "failing if any key is missing), and `provenance_verified` (`RunManifest` "
+            "engine/wheel/code/environment parity)."
         ),
-        examples=("alphaengine rerun HEAD",),
+        examples=("alphaengine rerun HEAD", "alphaengine rerun HEAD --json"),
+        flags=("json",),
     ),
     Command(
         verb="watch",
         group="run",
         args="<pipeline.yaml> [--interval SECONDS]",
         scope="both",
+        locality="local",
         purpose="re-run a declarative pipeline whenever a registered dataset file changes",
         body=(
             "Polls the pipeline file and every registered dataset in `.alphaengine/data/` "
@@ -544,66 +581,66 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="run",
         args="<study.json | run | idea>",
         scope="both",
-        purpose="write canonical content_sha256 into a study (or seal a project run/idea)",
+        locality="local",
+        supports_json=True,
+        purpose="write canonical seal_version=2 content_sha256 into a study or run",
         body=(
-            "Computes the canonical-JSON SHA-256 over the study (sorted keys, fixed "
-            "8-decimal float formatting) and writes `content_sha256` into the file.\n\n"
-            "Inside a `.alphaengine/` project, `seal <run|idea>` assembles a Schema 1.2 "
-            "study with trial ledger, dataset hashes, and PBO/PSR/SR0/MinTRL figures "
-            "and writes `.alphaengine/studies/<id>.json`."
+            "Computes the deterministic SHA-256 over `sealed_study_projection(study)` "
+            "(`seal_version = 2`, matching the exact sync wire projection) and writes "
+            "`content_sha256` into the study file."
         ),
         examples=("alphaengine seal study.json", "alphaengine seal HEAD"),
+        flags=("json",),
     ),
     Command(
         verb="verify",
         group="run",
-        args="<study.json> [--data FILE]",
+        args="<study.json> [--data FILE] [--json]",
         scope="both",
-        purpose="verify a study.json content_sha256 seal and optionally re-check figures",
+        locality="local",
+        supports_json=True,
+        purpose="verify a study.json seal, figure reproduction, and manifest provenance",
         body=(
-            "Checks that `content_sha256` in `<study.json>` matches its canonical JSON "
-            "content, and when `--data <file>` (or a local project run record) is "
-            "available, re-runs the calculation and confirms the figures within tolerance."
+            "Runs offline without an account or key. Reports three independent statuses: "
+            "`hash_verified` (`seal_version = 2` canonical projection or `legacy_v1`), "
+            "`figures_reproduced` (re-running against `--data` or local project record), "
+            "and `provenance_verified` (`RunManifest` environment parity)."
         ),
         examples=(
             "alphaengine verify study.json",
             "alphaengine verify study.json --data prices.csv",
         ),
-        flags=("data",),
+        flags=("data", "json"),
     ),
     Command(
         verb="report",
         group="run",
         args="<study.json> | memo <idea | run> [--format md | pdf]",
         scope="both",
-        purpose="send a study to quantOS (/api/me/runs/ingest), or export a cited committee memo",
+        locality="hybrid",
+        purpose="send a study to quantOS (/api/me/runs/ingest), or export a cited memo",
         body=(
             "Sends a saved `study.json` to your quantOS workspace (`POST /api/me/runs/ingest`).\n\n"
-            "`report memo <idea|run> --format md|pdf` exports a committee-style research "
-            "memo where every figure cites its `[run_id]`."
+            "`report memo <idea|run> --format md|pdf` exports a local committee-style "
+            "research memo where every figure cites its `[run_id]`."
         ),
         examples=(
             "alphaengine report study.json",
             "alphaengine report memo HEAD --format md",
         ),
-        flags=("format", "url", "key"),
+        flags=("format", "url"),
     ),
     Command(
         verb="<anything else>",
         group="run",
         args="",
         scope="repl",
+        locality="hybrid",
         purpose="ask in plain English; your model picks a workflow and drives it",
         body=(
             "EXPLORATORY. Your own model chooses a workflow from the catalogue, then "
-            "chooses each step from what the server permits, it never composes a "
-            "sequence, so this can be non-deterministic without being unsafe.\n\n"
-            "Two runs of the same question may differ, and the run says so rather "
-            "than presenting an exploratory result as a reproducible one.\n\n"
-            "Needs a model key in this shell (Anthropic, OpenAI, Gemini, Groq, "
-            "OpenRouter, Azure, or OPENAI_BASE_URL / ALPHAENGINE_BASE_URL for any "
-            "OpenAI-compatible gateway), and the SDK installed: "
-            "`pip install 'alphaengine[agents]'`."
+            "chooses each step from what the server permits.\n\n"
+            "Needs a model key in this shell and `pip install 'alphaengine[agents]'`."
         ),
         examples=(
             "which of my names rank highest on RSI?",
@@ -615,6 +652,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="run",
         args="",
         scope="repl",
+        locality="local",
         purpose="the current run, and what is loaded",
         examples=("status",),
     ),
@@ -622,13 +660,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         verb="models",
         group="start",
         args="",
+        locality="local",
         purpose="which model providers this machine can actually use",
         body=(
             "Lists every provider that has a key AND an SDK on this machine. A key "
-            "without an SDK is reported separately so the boot ladder never lights a "
-            "rung that would then raise.\n\n"
-            "OpenAI-compatible gateways (Groq, OpenRouter, Gemini, vLLM, a company "
-            "endpoint) light when OPENAI_BASE_URL or the provider's own key is set."
+            "without an SDK is reported separately."
         ),
         examples=("alphaengine models", "models"),
     ),
@@ -637,6 +673,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="start",
         args="[<provider[:name]>]",
         scope="repl",
+        locality="local",
         purpose="pin the model for this session, or show the pin",
         body=(
             "Examples: `model anthropic`, `model openai/gpt-4o`, `model groq`. "
@@ -648,11 +685,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         verb="trace",
         group="start",
         args="[run_id]",
+        locality="local",
         purpose="local model/run events for a run, hashed prompts only",
         body=(
-            "Reads ~/.local/share/alphaengine/runs/<id>.jsonl. The same allowlist "
-            "the portal ingest uses: choices, why, answers after the citation guard, "
-            "usage, prompt hashes. Never prices, never keys, never raw prompts."
+            "Reads ~/.local/share/alphaengine/runs/<id>.jsonl. Choices, why, answers "
+            "after the citation guard, usage, prompt hashes. Never prices, keys, or raw prompts."
         ),
         examples=("alphaengine trace", "trace", "trace <run_id>"),
     ),
@@ -661,10 +698,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="[<name> | status]",
         scope="repl",
+        locality="local",
         purpose="show or load sleeves on the multi-strategy book",
         body=(
             "A book is named return series, not an order pad. `book` lists sleeves. "
-            "`book status` monitors each one: nothing checked never reads as all clear."
+            "`book status` monitors each one."
         ),
         examples=("book", "book status"),
     ),
@@ -674,55 +712,50 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="<file | module | universe>",
         scope="repl",
+        locality="hybrid",
         purpose="a CSV, a project module, or a portal universe",
         body=(
             "One verb, three shapes. The token decides the door:\n\n"
             "  prices.csv              a local file (wide, long, or one series)\n"
             "  research.momentum       a module exposing `data` and `backtest_fn`\n"
             "  sp500                   a universe you registered in the portal\n\n"
-            "A path that exists, or a data suffix (.csv, .parquet, ...), is a file. "
-            "A dotted name is a module. Anything else is a universe.\n\n"
-            "`data`, `project` and `universe` still work. Prefer `load`.\n\n"
-            "The only door that can supply a simulator is a module, which is why "
-            "`validate` needs `load research.momentum` and a screen does not."
+            "`data`, `project` and `universe` still work. Prefer `load`."
         ),
         examples=("load prices.csv", "load research.momentum", "load sp500"),
     ),
     Command(
         verb="idea",
         group="data",
-        args='new "<thesis>" --kill-if "<rule>" [--family FAMILY] | list | status <id> <state> | show <id>',
+        args='new "<thesis>" --kill-rule "<rule>" [--family FAMILY] | list | status <id> <state> | show <id>',
         scope="both",
+        locality="local",
+        supports_json=True,
         purpose="create, list, update, and evaluate local research hypotheses",
         body=(
             "Tracks hypotheses as first-class objects in `.alphaengine/ideas/ideas.jsonl` "
-            'with a falsification rule (`--kill-if "DSR < 0.9"`).\n\n'
+            'with a falsification rule (`--kill-rule "DSR < 0.9"`; legacy `--kill-if` '
+            "is accepted as an alias).\n\n"
             "Attach runs with `--idea <id>`. `idea show <id>` lists linked runs, "
             "cumulative trials, and the current verdict against the kill rule."
         ),
         examples=(
-            'alphaengine idea new "Cross-sectional momentum holds" --kill-if "DSR < 0.9" --family momentum',
+            'alphaengine idea new "Cross-sectional momentum holds" --kill-rule "DSR < 0.9" --family momentum',
             "alphaengine idea list",
             "alphaengine idea status idea_1 testing",
             "alphaengine idea show idea_1",
         ),
-        flags=("kill_if", "family"),
+        flags=("kill_rule", "family", "json"),
     ),
     Command(
         verb="thesis",
         group="data",
         args="[<name> | clear]",
         scope="repl",
+        locality="remote",
         purpose="choose a portal thesis for the next run",
         body=(
             "Lists the theses on this account, or pins one. A pinned thesis rides on "
-            "every following run, question, and workflow as thesis_id. The statement "
-            "stays on this machine and is given to your model as context. It is not "
-            "written into the figures.\n\n"
-            "`thesis clear` unpins it. One thesis on the account is pinned at sign-in. "
-            "Several are named and not guessed.\n\n"
-            "The shell spelling is `--thesis <name>` on `run`, `screen`, `diagnose`, "
-            "and the other question commands."
+            "every following run, question, and workflow as thesis_id."
         ),
         examples=(
             "thesis",
@@ -736,15 +769,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="",
         scope="repl",
+        locality="local",
         purpose="the correlation of every loaded name with every other name",
         body=(
             "Runs on the universe already loaded. Closes become returns. The full "
-            "matrix stays on this machine and opens on the right of the session.\n\n"
-            "`covariance` is the same panel as a sample covariance. "
-            "`cointegration` screens the closes, pairwise, and needs the factors extra.\n\n"
-            "`check_overlap` is a different question: one name against the equal-weight "
-            "of the others. Name it with `run check_overlap --symbol MU`. With no name, "
-            "that command shows this matrix instead of refusing."
+            "matrix stays on this machine."
         ),
         examples=("correlation", "run check_overlap --symbol MU"),
     ),
@@ -753,11 +782,9 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="",
         scope="repl",
+        locality="local",
         purpose="the sample covariance of every loaded name with every other name",
-        body=(
-            "Same panel as `correlation`: the universe already loaded, closes "
-            "turned into returns, full matrix on the right of the session."
-        ),
+        body=("Same panel as `correlation`: the universe already loaded, closes turned into returns."),
         examples=("covariance",),
     ),
     Command(
@@ -765,11 +792,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="",
         scope="repl",
+        locality="local",
         purpose="which loaded names are cointegrated",
         body=(
             "Engle-Granger across the loaded closes, every pair. Needs the factors "
-            "extra (`pip install 'alphaengine[factors]'`). A hundred names is a few "
-            "thousand tests and takes a while. The pairs open on the right."
+            "extra (`pip install 'alphaengine[factors]'`)."
         ),
         examples=("cointegration",),
     ),
@@ -778,15 +805,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="",
         scope="repl",
+        locality="local",
         purpose="weights for the names already loaded",
         body=(
             "Hierarchical risk parity on a Ledoit-Wolf covariance of the loaded "
-            "returns. Say `portfolio risk parity` for equal risk contribution.\n\n"
-            "If this session already ran a correlation, covariance, or "
-            "cointegration, the book is the names that calculation kept, and "
-            "those readings stay attached so a later question can quote them. "
-            "The weights themselves come from the covariance, not from mixing "
-            "those readings into a second optimiser."
+            "returns. Say `portfolio risk parity` for equal risk contribution."
         ),
         examples=("portfolio", "portfolio risk parity"),
     ),
@@ -795,17 +818,9 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="<name>",
         scope="repl",
+        locality="remote",
         purpose="same as load: a universe registered in the portal",
-        body=(
-            "Brings the closes you stored with it. That is your own upload, "
-            "decrypted back to your own account, not us fetching market data.\n\n"
-            "Holds its names and not its prices? The portal's Data page marks it "
-            '"this browser only"; press "Store on my account" there and it loads '
-            "here. Or use `data` with a file instead.\n\n"
-            "This verb exists because `project` was the only way to load anything "
-            "mid-session, so somebody with a universe in the portal had to quit and "
-            "restart with a flag to reach it."
-        ),
+        body=("Brings the closes you stored with it on your account, not us fetching market data."),
         examples=("universe sp100", "run screen_universe --universe sp100"),
     ),
     Command(
@@ -813,13 +828,11 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="add <file> [--name NAME] [--asof-col COL] | list | show <name> | lineage <run>",
         scope="both",
+        locality="local",
         purpose="register, inspect, and trace local CSV/Parquet datasets",
         body=(
             "Manages the local `.alphaengine/data/` dataset registry, storing the "
-            "full SHA-256, row count, date range, column schema, and hygiene checks "
-            "(duplicate timestamps, gaps, look-ahead hints, and survivorship hints).\n\n"
-            "Inside the interactive session, `data <file>` also loads a local CSV or "
-            "Parquet file directly onto the desk."
+            "full SHA-256, row count, date range, column schema, and hygiene checks."
         ),
         examples=(
             "alphaengine data add prices.csv --name equities",
@@ -834,90 +847,133 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="data",
         args="<module>",
         scope="repl",
+        locality="local",
         purpose="same as load: a module with data and backtest_fn",
         body=(
-            "The ONLY door that can supply a simulator, because a simulator is code, "
-            "which is why `validate_study` needs this one and the other three "
-            "workflows do not.\n\n"
-            "An ordinary Python module with your prices in `data` and, if the workflow "
-            "sweeps, your backtest in `backtest_fn`. A module rather than a config "
-            "file because a quant already has this module: it is the notebook cell "
-            "they were going to run anyway."
+            "Loads a Python module exposing `data` and optional `backtest_fn` "
+            "(user-owned P&L; use `--signal` for engine-verified weight simulation)."
         ),
         examples=("project research.momentum", "project alphaengine.demo_universe"),
     ),
+    # ── session ────────────────────────────────────────────────────────────
     Command(
         verb="remote",
         group="session",
         args="add <name> [url] | list",
         scope="both",
+        locality="local",
         purpose="configure or list remote sync endpoints in .alphaengine/project.toml",
         body=(
-            "Registers a named remote in `.alphaengine/project.toml` (`remote add quantos [url]`), "
-            "defaulting to `$ALPHAENGINE_API_URL` or the default quantOS API URL."
+            "Registers a clean named remote in `.alphaengine/project.toml` (`remote add quantos [url]`). "
+            "Rejects URLs containing embedded credentials or query secrets."
         ),
         examples=(
             "alphaengine remote add quantos",
             "alphaengine remote add quantos https://qosai.app",
         ),
+        flags=("url",),
     ),
     Command(
         verb="push",
         group="session",
-        args="[remote] [--dry-run] [--share-series]",
+        args="[remote] [--dry-run] [--show-payload] [--yes] [--share-series]",
         scope="both",
-        purpose="sync sealed studies, ledger runs, and ideas to quantOS (opt-in network)",
+        locality="remote",
+        supports_json=True,
+        purpose="sync studies, runs, ideas, and trial_events to quantOS (sync_contract=2)",
         body=(
-            "Posts sealed studies, allowlisted ledger run records, and idea objects to "
-            "`POST /api/workspace/sync` using your `ae_live_` key, falling back to "
-            "`POST /api/me/runs/ingest` for studies when the sync endpoint returns 404.\n\n"
-            "Never sends raw dataset rows or series longer than 512 elements unless "
-            "`--share-series` is passed. `--dry-run` prints the exact JSON payload."
+            "Posts sealed studies (`seal_version = 2`), allowlisted ledger runs, ideas "
+            "(`idea_id`, `kill_rule`), and idempotent `trial_events` to "
+            "`POST /api/workspace/sync` (`sync_contract = 2`).\n\n"
+            "Code and raw datasets stay local. Prints a boundary preview first; "
+            "`--dry-run` prints the preview without opening a socket, and `--show-payload` "
+            "includes the redacted JSON payload.\n\n"
+            "Exit codes: `0` all accepted/duplicate, `2` partial rejection, `3` all rejected, "
+            "`4` auth/entitlement error, `5` network/server error, `6` contract mismatch."
         ),
         examples=(
             "alphaengine push --dry-run",
-            "alphaengine push",
+            "alphaengine push --dry-run --show-payload",
+            "alphaengine push --yes",
         ),
-        flags=("dry_run", "share_series", "url", "key"),
+        flags=("dry_run", "show_payload", "yes", "share_series", "url", "json"),
     ),
     Command(
         verb="pull",
         group="session",
-        args="[remote]",
+        args="[remote] [--since CURSOR] [--limit N]",
         scope="both",
-        purpose="pull team runs and ideas from quantOS into the local ledger (read-only)",
+        locality="remote",
+        supports_json=True,
+        purpose="pull team runs, ideas, and studies from quantOS via cursor pagination",
         body=(
-            "Fetches team runs and ideas from the configured remote into `.alphaengine/ledger/` "
-            "and `.alphaengine/ideas/`, marking pulled records `read_only: true`."
+            "Fetches team runs, ideas, and studies from `GET /api/workspace/pull` using "
+            "the per-remote cursor saved in `.alphaengine/project.toml` (`[sync_cursors]`). "
+            "Pulled records are marked `read_only: true` (summary figures only; code and "
+            "raw datasets are never fetched and cannot be rerun locally without local inputs)."
         ),
-        examples=("alphaengine pull",),
-        flags=("url", "key"),
+        examples=("alphaengine pull", "alphaengine pull --limit 50"),
+        flags=("since", "limit", "url", "json"),
+    ),
+    Command(
+        verb="whoami",
+        group="session",
+        args="[--json]",
+        scope="both",
+        locality="local",
+        supports_json=True,
+        purpose="show credential source, masked prefix, keyring status, and remote URL",
+        body=(
+            "Runs locally without requiring a key. Reports whether `QUANTOS_API_KEY` "
+            "and model provider keys come from `env`, `keyring`, `file`, or `none`, "
+            "whether an OS keyring backend is usable, and the active remote URL. "
+            "Never prints raw secret values."
+        ),
+        examples=("alphaengine whoami", "alphaengine whoami --json"),
+        flags=("url", "json"),
+    ),
+    Command(
+        verb="doctor",
+        group="session",
+        args="[--url URL] [--json]",
+        scope="both",
+        locality="hybrid",
+        supports_json=True,
+        purpose="check local project, keyring, credentials, and server version parity",
+        body=(
+            "Runs locally without requiring a key, and checks `GET /api/health` when "
+            "`--url` or a configured remote is reachable. Verifies `engine_version` "
+            "and `sync_contract` parity and prints the exact `pip install` command "
+            "when client and server drift."
+        ),
+        examples=("alphaengine doctor", "alphaengine doctor --json"),
+        flags=("url", "json"),
     ),
     Command(
         verb="plugin",
         group="session",
         args="list",
         scope="both",
+        locality="local",
+        supports_json=True,
         purpose="list installed loader, method, and report template plugins",
         body=(
             "Discovers plugins registered under the `alphaengine.plugins` entry-point "
-            "group across three kinds: `loader` (e.g. `quantconnect`, `vectorbt`, `csv`), "
-            "`method` (`deflated_sharpe`, `combinatorial_oos_stability`), and `template` "
-            "(`committee_memo`)."
+            "group across `loader`, `method`, and `template` kinds."
         ),
         examples=("alphaengine plugin list",),
+        flags=("json",),
     ),
     Command(
         verb="shell",
         group="session",
         args="",
         scope="cli",
+        locality="local",
         purpose="open the interactive research shell with project completion and status",
         body=(
             "Opens the interactive research shell (`ae shell`) with tab completion "
-            "over command verbs, run IDs, dataset names, and hypothesis IDs, a status "
-            "line showing the active project name and cumulative trial count, and "
-            "inline access to `help`, `log`, `show`, `diff`, and `idea`."
+            "over command verbs, run IDs, dataset names, and hypothesis IDs."
         ),
         examples=("alphaengine shell",),
     ),
@@ -925,12 +981,13 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         verb="logout",
         group="session",
         args="[--purge]",
-        purpose="remove stored credentials from this machine",
+        scope="both",
+        locality="local",
+        purpose="remove stored credentials from OS keyring and credentials.json",
         body=(
-            "Deletes `~/.config/alphaengine/credentials.json` (or "
-            "`%APPDATA%\\alphaengine\\credentials.json` on Windows). Pass `--purge` "
-            "to also remove any leftover temporary file, clean up the config "
-            "directory when empty, and clear managed keys from this process."
+            "Clears stored credentials from both the OS keychain (`keyring`) and "
+            "`credentials.json`. Pass `--purge` to also remove empty config directories "
+            "and unset managed keys in the current process."
         ),
         examples=("alphaengine logout", "alphaengine logout --purge"),
         flags=("purge",),
@@ -938,16 +995,24 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="version",
         group="session",
-        args="",
-        scope="cli",
-        purpose="print the version",
-        examples=("alphaengine version",),
+        args="[--json]",
+        scope="both",
+        locality="local",
+        supports_json=True,
+        purpose="print engine_version, wheel_sha256, sync_contract, and Python version",
+        body=(
+            "Prints `engine_info()` (`engine_version`, `wheel_sha256`, `sync_contract`, "
+            "`manifest_version`) and the active Python runtime version."
+        ),
+        examples=("alphaengine version", "alphaengine version --json"),
+        flags=("json",),
     ),
     Command(
         verb="help",
         group="session",
         args="",
         scope="repl",
+        locality="local",
         purpose="the short list: demo, login, load, then a question",
         examples=("help",),
     ),
@@ -956,18 +1021,27 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         group="session",
         args="",
         scope="repl",
+        locality="local",
         purpose="leave the session",
         examples=("quit",),
     ),
 )
 
 
-#: How data reaches a run. Not commands, but the thing people are most often
-#: looking for when they open the directory, so the directory names them.
 DATA_DOORS: tuple[tuple[str, str], ...] = (
-    ("--data FILE", "a local CSV. Wide (date,AAPL,MSFT), long (date,symbol,close), or one series."),
+    (
+        "--data FILE",
+        "a local CSV or Parquet. Wide (date,AAPL,MSFT), long (date,symbol,close), or one series.",
+    ),
+    (
+        "--signal PATH",
+        "a Python module or .py file exposing `signal(data_asof=..., params=...)` (engine-verified P&L).",
+    ),
+    (
+        "--project MODULE",
+        "a Python module exposing `data` and `backtest_fn` (user-owned P&L, not engine-verified).",
+    ),
     ("--universe NAME", "a universe you registered in the portal, with the closes you stored."),
-    ("--project MODULE", "a Python module. The only door that can carry a simulator."),
 )
 
 

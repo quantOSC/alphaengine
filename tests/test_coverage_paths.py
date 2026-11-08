@@ -379,6 +379,13 @@ def test_tui_dispatch_commands_and_tools(
     }
     fake = _FakeSession()
     monkeypatch.setattr(cli, "_session", lambda url, key, **kw: (fake, "https://api.example.invalid"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "cfg"))
+    monkeypatch.setenv("ALPHAENGINE_PROVIDER", "")
+    monkeypatch.setenv("ALPHAENGINE_MODEL", "")
+    monkeypatch.delenv("ALPHAENGINE_PROVIDER", raising=False)
+    monkeypatch.delenv("ALPHAENGINE_MODEL", raising=False)
 
     desk = Desk(
         session=fake,

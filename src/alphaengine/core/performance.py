@@ -21,9 +21,15 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike
 
+from .._version import current_engine_version
+from .conventions import (
+    build_annualization_spec,
+    build_costs_model_spec,
+    build_risk_free_spec,
+)
 from .rates import cash_rate, rate_fields
 from .trace import record
-from .validation import _as_1d_float
+from .validation import VOL_FLOOR, _as_1d_float
 
 _PPY = 252  # trading periods per year
 
@@ -65,24 +71,27 @@ def performance_report(
     arr = _as_1d_float(returns)
     n = arr.size
     if n < 30:
-        return {"error": "need >= 30 observations", "n_obs": int(n)}
+        return {
+            "error": "need >= 30 observations",
+            "n_obs": int(n),
+            "engine_version": current_engine_version(),
+        }
 
-    ppy = int(periods_per_year)
+    ppy = max(int(periods_per_year), 1)
     annual, _, _ = cash_rate(risk_free_rate)
     rf_per = annual / ppy
     excess = arr - rf_per
     sd = float(arr.std(ddof=1))
 
-    sharpe = float(excess.mean() / sd) if sd > 0 else 0.0
+    sharpe = float(excess.mean() / sd) if (math.isfinite(sd) and sd >= VOL_FLOOR) else 0.0
     sharpe_ann = sharpe * math.sqrt(ppy)
 
     # Downside deviation is the TARGET SEMIDEVIATION: RMS of below-target
     # excess around the target (0), averaged over ALL N, not the std of the
     # negative subset (which measures spread around the negatives' own mean).
-    # Math-identical to backend/quant/performance.sortino_ratio (M1 fix).
     downside = np.minimum(excess, 0.0)
     dsd = float(np.sqrt(np.mean(downside**2))) if np.count_nonzero(downside) else 0.0
-    sortino_ann = (float(excess.mean()) / dsd) * math.sqrt(ppy) if dsd > 0 else 0.0
+    sortino_ann = (float(excess.mean()) / dsd) * math.sqrt(ppy) if dsd >= VOL_FLOOR else 0.0
 
     # Drawdown reads a marked account when one was supplied. Otherwise the
     # path is built from unit capital. Total return always comes from the
@@ -102,7 +111,8 @@ def performance_report(
     tail = arr[arr <= cut]
     cvar95 = abs(float(tail.mean())) if tail.size else var95
 
-    out = {
+    out: dict[str, Any] = {
+        "engine_version": current_engine_version(),
         "n_obs": int(n),
         "sharpe_ratio": _clean(round(sharpe, 4)),  # per-period
         "sharpe_annualized": _clean(round(sharpe_ann, 4)),
@@ -118,6 +128,9 @@ def performance_report(
         "periods_per_year": ppy,
         "return_annualization": "geometric",
         "alpha_annualization": "arithmetic",
+        "annualization": build_annualization_spec(ppy),
+        "risk_free": build_risk_free_spec(risk_free_rate, ppy),
+        "costs_model": build_costs_model_spec(mode="pre_netted_returns"),
     }
 
     b = _as_1d_float(benchmark_returns)
@@ -130,7 +143,7 @@ def performance_report(
             alpha_per = float(a2.mean() - beta * b2.mean())
             active = arr[-m:] - b[-m:]
             te = float(active.std(ddof=1))
-            ir = (float(active.mean()) / te) * math.sqrt(ppy) if te > 0 else 0.0
+            ir = (float(active.mean()) / te) * math.sqrt(ppy) if te >= VOL_FLOOR else 0.0
             out["beta"] = _clean(round(beta, 4))
             out["alpha_annualized_pct"] = _clean(round(alpha_per * ppy * 100, 2))
             out["information_ratio"] = _clean(round(ir, 4))

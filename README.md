@@ -203,35 +203,36 @@ distinction is the whole of the data boundary below.
 
 ## Quickstart: Offline First, Then Connect for Firms
 
-### 1. Free and offline (no account, no API key)
+### 1. Free and offline forever (no account, no API key)
 
-The Python library (`import alphaengine`), every validation and portfolio math primitive, `alphaengine demo`, `alphaengine process`, and `ae verify` run 100% offline with no key (see [Free vs. Firm](docs/free-vs-firm.md)):
+The Python library (`import alphaengine`), every validation and portfolio math primitive, the local research workspace (`ae init`, `ae log`, `ae show`, `ae diff`, `ae rerun`, `ae data`, `ae idea`, `ae seal`, `ae verify`, `ae report memo`, `ae shell`), and local workflows run 100% offline with zero keys (see [Free vs. Firm](docs/free-vs-firm.md)). Both `alphaengine` and the short alias `ae` run the exact same binary:
 
 ```bash
 pip install alphaengine
 
-# Run the built-in 9-trial parameter sweep and inspect the surface & DSR verdict
+# 1. Initialize a local workspace, register data, and track hypotheses (free, offline)
+ae init --name equity-momentum
+ae data add prices.csv --name equities --asof-col date
+ae idea new "Cross-sectional 20d momentum holds net of costs" --kill-rule "DSR < 0.9" --family mom_20d
+
+# 2. Run built-in demos, coded signals, parameter sweeps, and process stress
 alphaengine demo
-
-# Fit OU, GBM, jump-diffusion, and GARCH(1,1) processes and run DGP stress offline
 alphaengine process
+ae run --signal research/momentum.py --data prices.csv
 
-# Verify any sealed Study artifact (Schema 1.2 or legacy) without an account
-ae verify study.json
+# 3. Inspect cumulative trials per William's rule, diff runs, and export cited memos
+ae log --family mom_20d
+ae show HEAD
+ae report memo HEAD --format md
+
+# 4. Verify any sealed Study artifact offline without an account
+ae seal HEAD
+ae verify .alphaengine/studies/HEAD.json
 ```
 
-### 2. Connect for firms (`ae_live_` key from the quantOS portal)
+### 2. Connect for firms (`ae_live_` key verified server-side on network paths)
 
-CLI workflows and the local-first Research OS (`ae init`, project ledgers, dataset registry, hypothesis tracking, sealing, memos, and workspace sync) require a firm `ae_live_` key issued through **Connect** in your firm's [quantOS portal](https://qosai.app). There is no retail CLI key or `--retail` flag.
-
-Both `alphaengine` and the short alias `ae` run the same entry point (see [Free vs. Firm](docs/free-vs-firm.md), [project format](docs/project-format.md), [result envelope](docs/result-format.md), and [plugins](docs/plugins.md)):
-
-```bash
-# Sign in with your firm's Connect key (stored in OS keychain or 0600 fallback)
-ae login
-
-# 1. Initialize a local .alphaengine/ workspace
-ae init --name equity-momentum
+Syncing research summaries to your firm's team portal (`ae push`, `ae pull`), portal report uploads, and hosted cloud workflows require a firm `ae_live_` key from **Connect** in the [quantOS portal](https://qosai.app). The firm key is checked server-side on every network request; all local commands run completely free.
 
 # 2. Register a local CSV (or Parquet) dataset and run hygiene checks
 ae data add prices.csv --name equities --asof-col date
@@ -255,6 +256,19 @@ ae seal HEAD
 ae verify .alphaengine/studies/HEAD.json
 ae report memo HEAD --format md
 ```
+
+---
+
+## What's new in 2.0.0
+
+- **Single canonical engine (`2.0.0`):** Unified version source across the library, CLI (`ae`), quantOS backend, and MCP server. Pinned version and drift checks guarantee zero divergence across consumers.
+- **William's trial counting rule:** Every executed trial attempt counts toward project cumulative trials. Identical re-runs record lineage via `duplicate_of` while continuing to increment cumulative trials (`9 -> 18`), eliminating silent trial count deflation. Failed sweep parameter points also remain in the trial denominator (`n_trials = len(self.trials)`).
+- **Keyring-first credentials & zero plaintext leakage:** Credentials are saved directly to the OS keychain (`keyring`) when available. The fallback file (`~/.config/alphaengine/credentials.json`, `0600`) is used only when no supported keyring backend exists or when `--no-keyring` is specified, accompanied by an explicit disclosure notice. Keyless diagnostics (`ae version`, `ae whoami`, `ae doctor`) inspect your environment without requiring or exposing API keys.
+- **Coded target-weights adapter (`alphaengine.coded`):** Write signal functions taking `data_asof` and `params` and returning ticker target weights. `run_signal()` guarantees zero look-ahead leak with strict bar slicing, next-open execution, mandatory transaction costs (`5 bps` slippage, `1 bps` commission), and an execution safety cap of 400 parameter combinations.
+- **Unified canonical `Verdict` enum:** All statistical outputs throughout the engine, CLI, and APIs standardize on four canonical verdicts: `Verdict.ROBUST` (`"robust"`), `Verdict.MARGINAL` (`"marginal"`), `Verdict.LIKELY_NOISE` (`"likely_noise"`), and `Verdict.UNVERIFIED` (`"unverified"`), with backwards-compatible alias normalization for legacy 1.x strings (`edge`, `inconclusive`, `acceptable`, `overfit`, `not_recorded`).
+- **Reproducibility manifest (`RunManifest` v1):** Every local run and coded backtest creates a content-addressed `manifest.json` in `.alphaengine/objects/`. Verification (`ae verify`, `ae rerun`) enforces three-level validation: `hash_verified`, `figures_reproduced`, and `provenance_verified`.
+- **Sync Contract v2 (`sync_contract = 2`):** Modernized client-server protocol with cursor-based pagination (`/api/workspace/pull?since=<cursor>&limit=<n>`), persistent cursors in `project.toml` (`[sync_cursors]`), per-attempt `trial_events` with UUID `attempt_id` idempotency, per-item acknowledgements (`accepted`/`duplicate`/`rejected`), structured exit codes, and zero silent fallbacks.
+- **Migration guide & free vs firm documentation:** See [Migration Guide](docs/MIGRATING_TO_2.md) and [Free vs. Firm](docs/free-vs-firm.md) for full details.
 
 ---
 
@@ -368,92 +382,95 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 
 ### Get started
 
-| Command | Does | Where |
-|---|---|---|
-| `init [--name NAME]` | initialize a local .alphaengine/ research project in this directory | shell + session |
-| `demo` | run the built-in example offline, with no account and no data | shell + session |
-| `process [ou \| gbm \| jump \| garch]` | fit a named process to a series and stress it, offline | shell + session |
-| `runs [--limit N]` | your own week: what ran, what it decided, what it filed | shell + session |
-| `log [--idea ID] [--family FAMILY] [--since DATE] [--verdict VERDICT]` | list local project ledger runs, trial counts, and verdicts | shell + session |
-| `show <run>` | inspect one recorded project run, its hashes, trials, and figures | shell + session |
-| `diff <run-a> <run-b>` | compare data, parameter, trial, and figure changes between two runs | shell + session |
-| `gaps` | what your record says is UNANSWERED, and what closes each one | shell + session |
-| `tonight [--budget N]` | what would run unattended tonight, without running any of it | shell + session |
-| `workflows` | what the server offers, what each needs, and which reproduce | shell + session |
-| `login [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | sign in, or login anthropic for a model key | shell + session |
-| `key [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | same as login: enter a credential, or see which rungs are lit | session |
-| `commands [verb]` | this directory, or one command in full | shell + session |
-| `models` | which model providers this machine can actually use | shell + session |
-| `model [<provider[:name]>]` | pin the model for this session, or show the pin | session |
-| `trace [run_id]` | local model/run events for a run, hashed prompts only | shell + session |
+| Command | Does | Boundary | Where |
+|---|---|---|---|
+| `init [--name NAME]` | initialize a local .alphaengine/ research project in this directory | `local` | shell + session |
+| `demo` | run the built-in example offline, with no account and no data | `local` | shell + session |
+| `process [ou \| gbm \| jump \| garch]` | fit a named process to a series and stress it, offline | `local` | shell + session |
+| `runs [--limit N]` | your own week: what ran, what it decided, what it filed | `remote` | shell + session |
+| `log [--idea ID] [--family FAMILY] [--since DATE] [--verdict VERDICT]` | list local project ledger runs, trial counts, and verdicts | `local` | shell + session |
+| `show <run>` | inspect one recorded project run, its hashes, trials, and figures | `local` | shell + session |
+| `diff <run-a> <run-b>` | compare data, parameter, trial, and figure changes between two runs | `local` | shell + session |
+| `gaps` | what your record says is UNANSWERED, and what closes each one | `remote` | shell + session |
+| `tonight [--budget N]` | what would run unattended tonight, without running any of it | `remote` | shell + session |
+| `workflows` | what the server offers, what each needs, and which reproduce | `remote` | shell + session |
+| `login [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | sign in, or login anthropic for a model key | `local` | shell + session |
+| `key [quantos \| anthropic \| openai \| gemini \| groq \| azure \| openrouter \| gateway]` | same as login: enter a credential, or see which rungs are lit | `local` | session |
+| `commands [verb]` | this directory, or one command in full | `local` | shell + session |
+| `models` | which model providers this machine can actually use | `local` | shell + session |
+| `model [<provider[:name]>]` | pin the model for this session, or show the pin | `local` | session |
+| `trace [run_id]` | local model/run events for a run, hashed prompts only | `local` | shell + session |
 
 ### Do the work
 
-| Command | Does | Where |
-|---|---|---|
-| `diagnose` | can I trust this data? | shell + session |
-| `screen` | what is worth a look? | shell + session |
-| `signal` | does this signal carry information? | shell + session |
-| `validate` | is this real? | shell + session |
-| `stress` | where does it break? | shell + session |
-| `overlap` | is it new, or my book again? | shell + session |
-| `size` | what sizing does the risk model imply? | shell + session |
-| `monitor` | still inside the lines? | shell + session |
-| `run <workflow>` | run one workflow exactly as written | shell + session |
-| `rerun <run>` | reproduce a recorded project run from its inputs and check figures | shell + session |
-| `watch <pipeline.yaml> [--interval SECONDS]` | re-run a declarative pipeline whenever a registered dataset file changes | shell + session |
-| `seal <study.json \| run \| idea>` | write canonical content_sha256 into a study (or seal a project run/idea) | shell + session |
-| `verify <study.json> [--data FILE]` | verify a study.json content_sha256 seal and optionally re-check figures | shell + session |
-| `report <study.json> \| memo <idea \| run> [--format md \| pdf]` | send a study to quantOS (/api/me/runs/ingest), or export a cited committee memo | shell + session |
-| `<anything else>` | ask in plain English; your model picks a workflow and drives it | session |
-| `status` | the current run, and what is loaded | session |
+| Command | Does | Boundary | Where |
+|---|---|---|---|
+| `diagnose` | can I trust this data? | `local/remote` | shell + session |
+| `screen` | what is worth a look? | `local/remote` | shell + session |
+| `signal` | does this signal carry information? | `local/remote` | shell + session |
+| `validate` | is this real? | `local/remote` | shell + session |
+| `stress` | where does it break? | `local/remote` | shell + session |
+| `overlap` | is it new, or my book again? | `local/remote` | shell + session |
+| `size` | what sizing does the risk model imply? | `local/remote` | shell + session |
+| `monitor` | still inside the lines? | `local/remote` | shell + session |
+| `run <workflow>` | run one workflow or coded signal exactly as written | `local/remote` | shell + session |
+| `rerun <run> [--json]` | re-execute a local run and check hash, figure, and provenance parity | `local` | shell + session |
+| `watch <pipeline.yaml> [--interval SECONDS]` | re-run a declarative pipeline whenever a registered dataset file changes | `local` | shell + session |
+| `seal <study.json \| run \| idea>` | write canonical seal_version=2 content_sha256 into a study or run | `local` | shell + session |
+| `verify <study.json> [--data FILE] [--json]` | verify a study.json seal, figure reproduction, and manifest provenance | `local` | shell + session |
+| `report <study.json> \| memo <idea \| run> [--format md \| pdf]` | send a study to quantOS (/api/me/runs/ingest), or export a cited memo | `local/remote` | shell + session |
+| `<anything else>` | ask in plain English; your model picks a workflow and drives it | `local/remote` | session |
+| `status` | the current run, and what is loaded | `local` | session |
 
 ### Bring your data
 
-| Command | Does | Where |
-|---|---|---|
-| `book [<name> \| status]` | show or load sleeves on the multi-strategy book | session |
-| `load <file \| module \| universe>` | a CSV, a project module, or a portal universe | session |
-| `idea new "<thesis>" --kill-if "<rule>" [--family FAMILY] \| list \| status <id> <state> \| show <id>` | create, list, update, and evaluate local research hypotheses | shell + session |
-| `thesis [<name> \| clear]` | choose a portal thesis for the next run | session |
-| `correlation` | the correlation of every loaded name with every other name | session |
-| `covariance` | the sample covariance of every loaded name with every other name | session |
-| `cointegration` | which loaded names are cointegrated | session |
-| `portfolio` | weights for the names already loaded | session |
-| `universe <name>` | same as load: a universe registered in the portal | session |
-| `data add <file> [--name NAME] [--asof-col COL] \| list \| show <name> \| lineage <run>` | register, inspect, and trace local CSV/Parquet datasets | shell + session |
-| `project <module>` | same as load: a module with data and backtest_fn | session |
+| Command | Does | Boundary | Where |
+|---|---|---|---|
+| `book [<name> \| status]` | show or load sleeves on the multi-strategy book | `local` | session |
+| `load <file \| module \| universe>` | a CSV, a project module, or a portal universe | `local/remote` | session |
+| `idea new "<thesis>" --kill-rule "<rule>" [--family FAMILY] \| list \| status <id> <state> \| show <id>` | create, list, update, and evaluate local research hypotheses | `local` | shell + session |
+| `thesis [<name> \| clear]` | choose a portal thesis for the next run | `remote` | session |
+| `correlation` | the correlation of every loaded name with every other name | `local` | session |
+| `covariance` | the sample covariance of every loaded name with every other name | `local` | session |
+| `cointegration` | which loaded names are cointegrated | `local` | session |
+| `portfolio` | weights for the names already loaded | `local` | session |
+| `universe <name>` | same as load: a universe registered in the portal | `remote` | session |
+| `data add <file> [--name NAME] [--asof-col COL] \| list \| show <name> \| lineage <run>` | register, inspect, and trace local CSV/Parquet datasets | `local` | shell + session |
+| `project <module>` | same as load: a module with data and backtest_fn | `local` | session |
 
 ### Session
 
-| Command | Does | Where |
-|---|---|---|
-| `remote add <name> [url] \| list` | configure or list remote sync endpoints in .alphaengine/project.toml | shell + session |
-| `push [remote] [--dry-run] [--share-series]` | sync sealed studies, ledger runs, and ideas to quantOS (opt-in network) | shell + session |
-| `pull [remote]` | pull team runs and ideas from quantOS into the local ledger (read-only) | shell + session |
-| `plugin list` | list installed loader, method, and report template plugins | shell + session |
-| `shell` | open the interactive research shell with project completion and status | shell |
-| `logout [--purge]` | remove stored credentials from this machine | shell + session |
-| `version` | print the version | shell |
-| `help` | the short list: demo, login, load, then a question | session |
-| `quit` | leave the session | session |
+| Command | Does | Boundary | Where |
+|---|---|---|---|
+| `remote add <name> [url] \| list` | configure or list remote sync endpoints in .alphaengine/project.toml | `local` | shell + session |
+| `push [remote] [--dry-run] [--show-payload] [--yes] [--share-series]` | sync studies, runs, ideas, and trial_events to quantOS (sync_contract=2) | `remote` | shell + session |
+| `pull [remote] [--since CURSOR] [--limit N]` | pull team runs, ideas, and studies from quantOS via cursor pagination | `remote` | shell + session |
+| `whoami [--json]` | show credential source, masked prefix, keyring status, and remote URL | `local` | shell + session |
+| `doctor [--url URL] [--json]` | check local project, keyring, credentials, and server version parity | `local/remote` | shell + session |
+| `plugin list` | list installed loader, method, and report template plugins | `local` | shell + session |
+| `shell` | open the interactive research shell with project completion and status | `local` | shell |
+| `logout [--purge]` | remove stored credentials from OS keyring and credentials.json | `local` | shell + session |
+| `version [--json]` | print engine_version, wheel_sha256, sync_contract, and Python version | `local` | shell + session |
+| `help` | the short list: demo, login, load, then a question | `local` | session |
+| `quit` | leave the session | `local` | session |
 
 ### Data flags
 
 | Flag | What it takes |
 |---|---|
-| `--data FILE` | a local CSV. Wide (date,AAPL,MSFT), long (date,symbol,close), or one series. |
+| `--data FILE` | a local CSV or Parquet. Wide (date,AAPL,MSFT), long (date,symbol,close), or one series. |
+| `--signal PATH` | a Python module or .py file exposing `signal(data_asof=..., params=...)` (engine-verified P&L). |
+| `--project MODULE` | a Python module exposing `data` and `backtest_fn` (user-owned P&L, not engine-verified). |
 | `--universe NAME` | a universe you registered in the portal, with the closes you stored. |
-| `--project MODULE` | a Python module. The only door that can carry a simulator. |
 
 ### Flags
 
 | Flag | Does |
 |---|---|
-| `--url URL` | workflow server (default $QUANTOS_API_URL or the public API) |
-| `--key KEY` | portal-issued ae_live_ key (default $QUANTOS_API_KEY) |
-| `--project MODULE` | a module exposing `data` and `backtest_fn` |
-| `--data FILE` | a local CSV: wide, long, or a single series |
+| `--url URL` | workflow server (default $ALPHAENGINE_API_URL or public API) |
+| `--signal PATH_OR_MOD` | coded signal module or .py file exposing signal(data_asof=..., params=...) |
+| `--project MODULE` | a module exposing `data` and `backtest_fn` (user-owned P&L, not engine-verified) |
+| `--data FILE` | a local CSV or Parquet file: wide, long, or a single series |
 | `--universe NAME` | a universe registered in the portal, with its stored closes |
 | `--thesis NAME` | a thesis on this account; the run is attached to it |
 | `--symbol TICKER` | one name out of a loaded universe; its closes become the return series |
@@ -461,30 +478,34 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--input K=V` | a workflow input; repeatable |
 | `--quiet` | only the result, no step narration |
 | `--stream` | print the answer once the citation guard has passed |
-| `--share-series` | opt in to uploading full series on run traces (default off; or $ALPHAENGINE_SHARE_SERIES=1) |
-| `--limit N` | how many rows to show (default 25) |
+| `--share-series` | opt in to uploading full series on run/sync payloads (default off) |
+| `--limit N` | maximum rows or items per page (default 25 on log/runs, 100 on pull) |
 | `--budget N` | how many runs a night is worth (default 3) |
-| `--purge` | remove ~/.config/alphaengine/credentials.json and clean up its config directory |
+| `--purge` | clear OS keyring, remove credentials.json, and unset keys in this process |
+| `--no-keyring` | store credential in mode-0600 credentials.json instead of the OS keyring |
 | `--name NAME` | name for the initialized project or registered dataset |
 | `--idea ID` | attach the run or filter the log to a local hypothesis id |
 | `--family FAMILY` | strategy or experiment family for cumulative trial counting |
-| `--since DATE` | filter project log to runs on or after YYYY-MM-DD |
-| `--verdict VERDICT` | filter project log by verdict (e.g. robust, marginal, likely_noise) |
+| `--since CURSOR_OR_DATE` | filter project log on/after YYYY-MM-DD, or pull cursor token on pull |
+| `--verdict VERDICT` | filter project log by verdict (robust, marginal, likely_noise, unverified) |
 | `--asof-col COL` | as-of column name or cutoff date for look-ahead checks in data add |
-| `--json` | emit a versioned v1.0 JSON result envelope to stdout |
+| `--json` | emit structured machine-readable JSON to stdout |
 | `--stdin` | read an upstream JSON result envelope from standard input |
-| `--kill-if RULE` | kill rule for a hypothesis, e.g. 'DSR < 0.9' |
+| `--kill-rule RULE` | falsification rule for a hypothesis, e.g. 'DSR < 0.9' |
 | `--format FMT` | output format for report memo: md or pdf (default md) |
-| `--dry-run` | print the exact sync payload without making a network call |
+| `--dry-run` | print the sync boundary preview without opening a network socket |
+| `--show-payload` | include the redacted sync_contract=2 JSON payload in the push preview |
+| `--yes` | skip interactive confirmation prompt on push |
 | `--live FILE` | live return series CSV to compare against a recorded backtest run |
 | `--interval SECONDS` | polling interval in seconds for watch (default 1.0) |
 | `--cycles N` | number of polling cycles for watch before exiting (0 means continuous) |
+| `--version` | print engine_version, sync_contract, and wheel_sha256 |
 
 ### Examples
 
 ```bash
-alphaengine diagnose --universe <name>
-alphaengine screen --universe <name>
+alphaengine diagnose --universe sp500
+alphaengine screen --universe sp500
 alphaengine signal
 alphaengine validate
 alphaengine stress
@@ -509,10 +530,11 @@ alphaengine workflows
 alphaengine login
 alphaengine commands
 alphaengine run screen_universe --universe sp500
-alphaengine run size_position --data returns.csv
+alphaengine run validate_study --signal research/momentum_signal.py --data prices.csv
 alphaengine run validate_study --project research.momentum
 alphaengine run examples/screen_validate_size.yaml
 alphaengine rerun HEAD
+alphaengine rerun HEAD --json
 alphaengine watch examples/screen_validate_size.yaml
 alphaengine seal study.json
 alphaengine seal HEAD
@@ -522,7 +544,7 @@ alphaengine report study.json
 alphaengine report memo HEAD --format md
 alphaengine models
 alphaengine trace
-alphaengine idea new "Cross-sectional momentum holds" --kill-if "DSR < 0.9" --family momentum
+alphaengine idea new "Cross-sectional momentum holds" --kill-rule "DSR < 0.9" --family momentum
 alphaengine idea list
 alphaengine idea status idea_1 testing
 alphaengine idea show idea_1
@@ -534,13 +556,20 @@ alphaengine data lineage HEAD
 alphaengine remote add quantos
 alphaengine remote add quantos https://qosai.app
 alphaengine push --dry-run
-alphaengine push
+alphaengine push --dry-run --show-payload
+alphaengine push --yes
 alphaengine pull
+alphaengine pull --limit 50
+alphaengine whoami
+alphaengine whoami --json
+alphaengine doctor
+alphaengine doctor --json
 alphaengine plugin list
 alphaengine shell
 alphaengine logout
 alphaengine logout --purge
 alphaengine version
+alphaengine version --json
 ```
 
 <!-- COMMANDS:END -->

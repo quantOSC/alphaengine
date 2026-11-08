@@ -1,6 +1,8 @@
-# Free Open-Source Library vs. Firm CLI Workflows (`Connect`)
+# Free Open-Source Library & Local Research OS vs. Firm Workflows (`Connect`)
 
-AlphaEngine has a strict, unambiguous boundary between what is **free and offline forever** for every researcher, and what requires a **firm `ae_live_` key** from **Connect** in the [quantOS portal](https://qosai.app).
+AlphaEngine 2.0 has a strict, unambiguous boundary: **everything local is free and offline forever** for every researcher, and a **firm `ae_live_` key** from **Connect** in the [quantOS portal](https://qosai.app) is used exclusively for network synchronization, hosted workflows, and cloud workspace integration.
+
+The command-line tool `ae` is the standard alias for `alphaengine` (`ae` and `alphaengine` execute the identical CLI binary). License is Apache-2.0.
 
 There is **no retail CLI key** and **no retail CLI path**. Retail ledger import happens by web upload in the quantOS portal, not through the CLI.
 
@@ -8,7 +10,7 @@ There is **no retail CLI key** and **no retail CLI path**. Retail ledger import 
 
 ## 1. Free, Keyless, and 100% Offline
 
-Installing `pip install alphaengine` gives you the complete validation and research library with **no account, no API key, and zero network calls**:
+Installing `pip install alphaengine` gives you the complete quantitative validation engine, local research OS, and coded backtesting system with **no account, no API key, and zero network calls**:
 
 | Surface | Commands / Entry Points | Network Calls | Key Required |
 |---|---|---|---|
@@ -16,73 +18,74 @@ Installing `pip install alphaengine` gives you the complete validation and resea
 | **Validation Math** | `deflated_sharpe` (DSR), `probabilistic_sharpe_ratio` (PSR), `min_track_record_length`, `pbo_cscv` (PBO via CSCV), `combinatorial_oos_stability` | **None** | **No** |
 | **Portfolio & Process Math** | `performance_report`, `compute_var_cvar`, `alphaengine.core.panel`, `signals`, `cross_section`, `covariance`, `allocate`, `process`, `active` | **None** | **No** |
 | **Loaders** | `load_csv`, `load_delimited`, `from_quantconnect`, `from_vectorbt` | **None** | **No** |
-| **Offline CLI Demos** | `alphaengine demo`, `alphaengine process` | **None** | **No** |
-| **Study Verification** | `ae verify <study.json> [--data <file>]` | **None** | **No** |
+| **Coded Signal Runner** | `from alphaengine.coded import run_signal, Signal`, `ae run --signal` | **None** | **No** |
+| **Offline CLI Demos** | `ae demo` (`alphaengine demo`), `ae process` (`alphaengine process`) | **None** | **No** |
+| **Local Research Workspace** | `ae init`, `ae log`, `ae show`, `ae diff`, `ae rerun`, `ae watch`, `ae shell`, `ae plugin` | **None** | **No** |
+| **Hypotheses & Datasets** | `ae idea new|list|status|show`, `ae data add|list|show|lineage` | **None** | **No** |
+| **Sealing & Verification** | `ae seal <run|study>`, `ae verify <study.json> [--data <file>]` | **None** | **No** |
+| **Local Cited Memos** | `ae report memo <idea|run> --format md|pdf` | **None** | **No** |
+| **Keyless Diagnostics** | `ae version`, `ae whoami`, `ae doctor`, `ae push --dry-run` | **None** | **No** |
+| **Local Workflow Runs** | `ae run <recipe.yaml>`, `ae validate`, `ae screen`, `ae diagnose`, `ae size`, etc. (without `--url`) | **None** | **No** |
 
-Anyone receiving a sealed `study.json` (whether an academic referee, a peer, or an allocator) can run `ae verify study.json --data prices.csv` offline without an account to verify both the canonical `content_sha256` seal (including legacy seals) and the 64-hex `data_hash`.
+Anyone receiving a sealed `study.json` (whether an academic referee, an institutional peer, or an allocator) can run `ae verify study.json --data prices.csv` offline without an account to verify both the canonical `content_sha256` seal and dataset lineage hashes.
 
 ### Quickstart: Offline First (No Account Needed)
 
 ```bash
 pip install alphaengine
 
-# 1. Run the built-in 9-trial parameter sweep and inspect the surface & DSR verdict
-alphaengine demo
+# 1. Initialize a local .alphaengine/ workspace (free, keyless)
+ae init --name momentum-research
 
-# 2. Fit OU, GBM, jump-diffusion, and GARCH(1,1) processes and run DGP stress offline
+# 2. Register local prices and track a hypothesis with an explicit kill rule
+ae data add prices.csv --name equities --asof-col date
+ae idea new "Cross-sectional 20d momentum holds net of costs" --kill-rule "DSR < 0.9"
+
+# 3. Run parameter sweeps, coded backtests, and pipelines locally
+ae run --signal research/momentum.py --data prices.csv
+alphaengine demo
 alphaengine process
 
-# 3. Verify any sealed Study artifact (Schema 1.2 or legacy)
-ae verify study.json
-```
+# 4. Inspect cumulative trials per William's rule, diff runs, and export cited memos
+ae log
+ae show HEAD
+ae report memo HEAD --format md
 
-```python
-from alphaengine import (
-    combinatorial_oos_stability,
-    compute_var_cvar,
-    deflated_sharpe,
-    pbo_cscv,
-    performance_report,
-    sweep,
-)
+# 5. Verify any sealed Study artifact offline
+ae seal HEAD
+ae verify .alphaengine/studies/HEAD.json
 ```
 
 ---
 
-## 2. Connect for Firms (`ae_live_` Key Required)
+## 2. Connect for Firms (`ae_live_` Key Checked Server-Side on Network Paths)
 
-CLI workflows and the local-first Research OS (`ae init`, project ledgers, dataset registry, hypothesis tracking, sealing, memos, and workspace sync) are built for quantitative teams and require an `ae_live_` key issued to your firm through **Connect** in the quantOS portal:
+Firm keys issued through **Connect** in your firm's [quantOS portal](https://qosai.app) connect your local research to team infrastructure. Per AlphaEngine 2.0 policy, **all local operations are free** and firm authentication is strictly enforced **server-side on network requests**:
 
-- **Core workflows:** `diagnose`, `screen`, `signal`, `validate`, `stress`, `overlap`, `size`, `monitor`, `run`, `workflows`, `runs`, `gaps`, `tonight`
-- **Research OS (`ae`):** `init`, `log`, `show`, `diff`, `rerun`, `watch`, `data`, `idea`, `seal`, `report`, `remote`, `push`, `pull`, `plugin`, `shell`
+- **Workspace Sync (`ae push`, `ae pull`):** Sync research summaries, trial event lineage (`attempt_id`), and sealed studies to your firm's cloud ledger.
+- **Hosted Portal Workflows (`ae run --url <url>`, `ae workflows`, `ae runs`, `ae gaps`, `ae tonight`):** Query remote workflow catalogues, trigger remote execution runs on cloud runners, or inspect portal execution gaps.
+- **Report Ingestion (`ae report <study.json>`):** Ingest sealed studies into the quantOS web portal for firm-wide committee review and institutional story pages.
 
-Every gated command checks `alphaengine.auth.require_firm_key()` before executing. The server is the authority: the key's firm tier is verified server-side on every request, and a key stops working if its firm leaves an active firm tier.
+Every network request transmits the credential in the Authorization header (`Bearer ae_live_...`). The server is the sole authority: invalid, missing, or expired credentials return `401 Unauthorized` / `403 Forbidden` (`EXIT_AUTH_ERROR = 4`).
 
-### Quickstart: Connect for Firms
-
-1. Open your firm's [quantOS portal](https://qosai.app) → **Connect** and issue an `ae_live_...` key.
-2. Sign in once from your terminal (stored in your OS keychain via `keyring` when available, or `~/.config/alphaengine/credentials.json` with `0600` permissions as fallback):
+### Signing In with Your Firm Key
 
 ```bash
+# Stored securely in OS keychain (keyring) with 0600 file fallback
 ae login
-# or set: export QUANTOS_API_KEY="ae_live_..."
-```
 
-3. Initialize your firm project and run workflows with cumulative project-wide trial accounting:
+# Or pass via environment variable:
+export QUANTOS_API_KEY="ae_live_..."
 
-```bash
-ae init --name equity-momentum
-ae data add prices.csv --name equities --asof-col date
-ae idea new "Cross-sectional 20d momentum holds net of costs" --kill-if "DSR < 0.9"
-ae validate --project research.momentum --idea idea_1
-ae seal HEAD
-ae push
+# Push research summaries to your firm portal
+ae push --yes
+ae pull
 ```
 
 ---
 
 ## 3. What Uses the Network (and What Never Leaves Your Machine)
 
-- **Makes zero network calls:** The Python library (`import alphaengine`), all math functions, `sweep()`, `Study.save()` / `load()`, `alphaengine demo`, `alphaengine process`, and `ae verify`. Enforced in CI by a socket-blocked test (`tests/test_smoke.py`).
-- **Uses the network:** `ae login` / `whoami`, CLI workflows (`validate`, `screen`, `diagnose`, etc.), `Study.report()` / `ae report`, and workspace sync (`ae push`, `ae pull`).
+- **Makes zero network calls (100% offline):** The Python library (`import alphaengine`), all math functions, `sweep()`, `run_signal()`, `Study.save()` / `load()`, `ae demo`, `ae process`, `ae init`, `ae log`, `ae show`, `ae diff`, `ae rerun`, `ae idea`, `ae data`, `ae seal`, `ae verify`, `ae report memo`, `ae version`, `ae whoami`, `ae doctor`, and `ae push --dry-run`. Enforced in CI by socket-blocked tests (`tests/test_smoke.py`).
+- **Uses the network:** `ae login` (remote credential check), live workspace sync (`ae push`, `ae pull`), portal report upload (`ae report study.json`), remote workflow execution (`ae run --url ...`), and portal queries (`ae workflows`, `ae runs`, `ae gaps`, `ae tonight`).
 - **Return series boundary:** By default, only summary figures and canonical SHA-256 hashes cross the wire; any list longer than 512 elements is refused by both client and server guards. Full return series upload **only** when you explicitly pass `--share-series` (or set `ALPHAENGINE_SHARE_SERIES=1`).

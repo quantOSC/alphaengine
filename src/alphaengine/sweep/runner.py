@@ -9,22 +9,26 @@ WHAT THIS DELIBERATELY DOES NOT DO
 
 WHY THE TRIAL COUNT IS NOT A PARAMETER
     Because a parameter is a place to be optimistic. `n_trials` is `len(grid)`,
-    computed from the grid actually iterated, and there is no argument to
-    override it. That is the single design decision this module exists for.
+    computed from the grid actually iterated — including failed parameter
+    combinations (`QOS-153`) — and there is no argument to override it. That is
+    the single design decision this module exists for.
 """
 
 from __future__ import annotations
 
 import itertools
 import math
+import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import numpy.typing as npt
 
+from .._version import current_engine_version
 from ..core import (
     deflated_sharpe,
     min_track_record_length,
@@ -32,8 +36,16 @@ from ..core import (
     pbo_cscv,
     performance_report,
 )
+from ..core.conventions import (
+    Verdict,
+    build_annualization_spec,
+    build_costs_model_spec,
+    build_risk_free_spec,
+)
+from ..core.rates import cash_rate
+from ..core.validation import VOL_FLOOR
 
-__all__ = ["sweep", "SweepResult"]
+__all__ = ["sweep", "SweepResult", "Trial"]
 
 # A parameter set is a plain dict; a returns series is a sequence of floats.
 Params = Mapping[str, Any]
@@ -81,14 +93,25 @@ def _hash_params(p: Params) -> str:
     return canonical_sha256(dict(p))[:12]
 
 
-def _sharpe(returns: npt.NDArray[np.float64]) -> float:
-    sd = float(returns.std(ddof=1)) if returns.size > 1 else 0.0
-    return float(returns.mean() / sd) if sd > 0 else 0.0
+def _sharpe(
+    returns: npt.NDArray[np.float64],
+    *,
+    risk_free_rate: float | None = None,
+    periods_per_year: int = 252,
+) -> float:
+    """Per-period excess Sharpe ratio aligned with `cash_rate()` and `VOL_FLOOR` (`QOS-156`)."""
+    if returns.size <= 1:
+        return 0.0
+    ppy = max(int(periods_per_year), 1)
+    annual_rf, _, _ = cash_rate(risk_free_rate)
+    excess = returns - (annual_rf / ppy)
+    sd = float(excess.std(ddof=1))
+    return float(excess.mean() / sd) if sd >= VOL_FLOOR else 0.0
 
 
 @dataclass
 class Trial:
-    """One parameter set and what it produced."""
+    """One executed parameter attempt and what it produced."""
 
     index: int
     params: dict[str, Any]
@@ -98,6 +121,8 @@ class Trial:
     sharpe_annualized: float
     total_return_pct: float
     failed: str | None = None
+    attempt_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    executed_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 @dataclass
@@ -105,37 +130,46 @@ class SweepResult:
     """Everything the sweep saw. The trial matrix is the irreplaceable part."""
 
     trials: list[Trial]
-    matrix: npt.NDArray[np.float64] = field(repr=False)  # (T observations, N configurations)
+    matrix: npt.NDArray[np.float64] = field(repr=False)  # (T observations, N_ok configurations)
     data_hash: str = ""
     grid_keys: list[str] = field(default_factory=list)
     store_params: bool = False
     run_id: str | None = None
     cumulative_trials: int | None = None
     project_trials: int | None = None
+    risk_free_rate: float | None = None
+    periods_per_year: int = 252
 
     @property
     def n_trials(self) -> int:
-        """Derived, never supplied. This is the whole point of the module."""
+        """Derived, never supplied: all executed grid attempts, including failures (`QOS-153`)."""
         return len(self.trials)
 
     @property
     def best(self) -> Trial:
         return max((t for t in self.trials if t.failed is None), key=lambda t: t.sharpe)
 
-    def verdict(self, *, risk_free_rate: float | None = None) -> dict[str, Any]:
-        """Deflate the best result for the search that actually produced it.
+    def verdict(
+        self,
+        *,
+        risk_free_rate: float | None = None,
+        periods_per_year: int | None = None,
+    ) -> dict[str, Any]:
+        """Deflate the best result for the full search that actually executed.
+
+        Per William's trial counting rule (`QOS-153`), every executed grid
+        combination — including failed ones — counts toward `n_trials`.
+        Cross-trial Sharpe dispersion (`trials_sharpe_std`) is estimated over
+        the surviving series when `>= 2` configurations succeeded.
 
         PBO is reported alongside but is NOT the gate. It answers a different
         question, "was the choice AMONG configurations informative?", and
         returns roughly 0.5 for genuinely near-tied top configs even when the
-        underlying edge is real. Measured on our own null/edge fixture, DSR
-        discriminates cleanly and PBO does not; treating them as two readings of
-        the same thing would be a mistake.
+        underlying edge is real.
         """
+        rf_eff = self.risk_free_rate if risk_free_rate is None else risk_free_rate
+        ppy_eff = max(int(self.periods_per_year if periods_per_year is None else periods_per_year), 1)
         best = self.best
-        # Cross-trial variance of Sharpe ratios per Bailey & López de Prado (2014).
-        # Fallback to single-series sampling error (trials_sharpe_std=None) only when fewer
-        # than 2 valid trials exist. Failed trials do not count toward N.
         ok = [t for t in self.trials if t.failed is None]
         col = self.matrix[:, ok.index(best)]
         trials_sharpe_std: float | None = None
@@ -143,38 +177,61 @@ class SweepResult:
             dispersion = float(np.std([t.sharpe for t in ok], ddof=1))
             if math.isfinite(dispersion) and dispersion > 0:
                 trials_sharpe_std = dispersion
+        total_attempted = len(self.trials)
         n_ok = len(ok)
-        effective_n = max(n_ok, int(self.cumulative_trials)) if self.cumulative_trials is not None else n_ok
+        n_failed = total_attempted - n_ok
+        effective_n = (
+            max(total_attempted, int(self.cumulative_trials))
+            if self.cumulative_trials is not None
+            else total_attempted
+        )
         n_eff = round(n_eff_participation(self.matrix), 4)
         dsr = deflated_sharpe(
             col.tolist(),
             n_trials=effective_n,
             trials_sharpe_std=trials_sharpe_std,
-            risk_free_rate=risk_free_rate,
+            risk_free_rate=rf_eff,
+            periods_per_year=ppy_eff,
         )
         dsr_neff = deflated_sharpe(
             col.tolist(),
             n_trials=n_eff,
             trials_sharpe_std=trials_sharpe_std,
-            risk_free_rate=risk_free_rate,
+            risk_free_rate=rf_eff,
+            periods_per_year=ppy_eff,
         )
         out: dict[str, Any] = {
+            "engine_version": current_engine_version(),
             "n_trials": effective_n,
-            "run_n_trials": n_ok,
+            "run_n_trials": total_attempted,
+            "n_ok_trials": n_ok,
+            "n_failed_trials": n_failed,
             "n_trials_source": "derived_from_grid",
+            "deflation_applied": dsr.get("deflation_applied", effective_n > 1),
+            "n_eff": n_eff,
             "n_eff_participation": n_eff,
+            "n_eff_method": "eigenvalue_participation_ratio",
             "deflated_sharpe_at_n_eff": dsr_neff.get("deflated_sharpe"),
+            "dsr_probability_at_n_eff": dsr_neff.get("dsr_probability"),
             "n_eff_diagnostic_note": (
-                "diagnostic only; headline deflated_sharpe uses n_trials with cross-trial trials_sharpe_std"
+                "diagnostic only; headline dsr_probability uses n_trials with cross-trial trials_sharpe_std"
             ),
             "best_trial_index": best.index,
             "best_params_hash": best.params_hash,
             "data_hash": self.data_hash,
+            "dsr_probability": dsr.get("dsr_probability"),
             "deflated_sharpe": dsr.get("deflated_sharpe"),
             "verdict": dsr.get("verdict"),
             "psr_vs_zero": dsr.get("psr_vs_zero"),
             "sr0_expected_max": dsr.get("sr0_expected_max"),
-            "performance": performance_report(col.tolist(), risk_free_rate=risk_free_rate),
+            "performance": performance_report(
+                col.tolist(),
+                risk_free_rate=rf_eff,
+                periods_per_year=ppy_eff,
+            ),
+            "annualization": build_annualization_spec(ppy_eff),
+            "risk_free": build_risk_free_spec(rf_eff, ppy_eff),
+            "costs_model": build_costs_model_spec(mode="user_backtest_fn"),
         }
         if self.store_params:
             out["best_params"] = best.params
@@ -183,6 +240,7 @@ class SweepResult:
         if self.cumulative_trials is not None:
             out["cumulative_trials"] = effective_n
             out["project_trials"] = self.project_trials
+            out["cumulative_dsr_probability"] = dsr.get("dsr_probability")
             out["cumulative_deflated_sharpe"] = dsr.get("deflated_sharpe")
             out["cumulative_verdict"] = dsr.get("verdict")
 
@@ -190,7 +248,11 @@ class SweepResult:
         # result is distinguishable from luck. Bites universally, and converts
         # into a dated obligation rather than a pass/fail insult.
         try:
-            out["min_track_record_length"] = min_track_record_length(col.tolist())
+            out["min_track_record_length"] = min_track_record_length(
+                col.tolist(),
+                risk_free_rate=rf_eff,
+                periods_per_year=ppy_eff,
+            )
         except Exception:  # noqa: BLE001 - never fail a verdict on an optional figure
             out["min_track_record_length"] = None
 
@@ -206,11 +268,14 @@ class SweepResult:
         return out
 
     def ledger(self) -> list[dict[str, Any]]:
-        """Per-trial ledger export: parameter hash + Sharpe per trial, plus failed trials."""
+        """Per-trial ledger export: attempt_id + parameter hash + Sharpe + status per trial."""
         return [
             {
+                "attempt_id": t.attempt_id,
+                "executed_at": t.executed_at,
                 "index": t.index,
                 "params_hash": t.params_hash,
+                "status": "failed" if t.failed is not None else "ok",
                 "n_obs": t.n_obs,
                 "sharpe": None if t.failed is not None else t.sharpe,
                 "sharpe_annualized": None if t.failed is not None else t.sharpe_annualized,
@@ -296,6 +361,8 @@ def sweep(
     store_params: bool = False,
     on_error: str = "record",
     jobs: int = 1,
+    risk_free_rate: float | None = None,
+    periods_per_year: int = 252,
 ) -> SweepResult:
     """Run `backtest_fn` once per combination in `grid`.
 
@@ -317,18 +384,26 @@ def sweep(
         jobs: worker count. Default 1 preserves order and the golden figures.
             Greater than 1 runs combinations concurrently but still records
             each trial at its original index, including failures (0.3.0).
+        risk_free_rate: annual cash rate subtracted per period (`annual / periods_per_year`);
+            defaults to the pinned 3-month Treasury bill (`core.rates.cash_rate`).
+        periods_per_year: trading periods per year (default 252).
 
     Returns:
-        SweepResult, holding the full (T x N) trial matrix that PBO needs and
-        that a single-point run structurally cannot produce.
+        SweepResult, holding the full (T x N_ok) trial matrix that PBO needs and
+        every executed `Trial` (including failures) for DSR trial accounting.
     """
+    if not callable(backtest_fn):
+        raise TypeError(f"backtest_fn must be callable, got {type(backtest_fn).__name__}")
     combos = _expand(grid)
     if not combos:
         raise ValueError("grid is empty: nothing to sweep")
+    ppy = max(int(periods_per_year), 1)
 
     data_hash = _hash_data(data) if data is not None else ""
 
     def _run_one(i: int, params: dict[str, Any]) -> tuple[int, Trial, npt.NDArray[np.float64] | None]:
+        attempt_id = str(uuid.uuid4())
+        executed_at = datetime.now(timezone.utc).isoformat()
         try:
             raw = backtest_fn(data=data, **params) if data is not None else backtest_fn(**params)
             r = np.asarray(list(raw), dtype=float)
@@ -337,31 +412,40 @@ def sweep(
             if not np.all(np.isfinite(r)):
                 r = np.nan_to_num(r, nan=0.0, posinf=0.0, neginf=0.0)
         except Exception as exc:  # noqa: BLE001
-            if on_error == "raise":
-                raise
-            return (
-                i,
-                Trial(
-                    i,
-                    dict(params),
-                    _hash_params(params),
-                    0,
-                    0.0,
-                    0.0,
-                    0.0,
-                    failed=f"{type(exc).__name__}: {exc}",
-                ),
-                None,
+            failed_trial = Trial(
+                index=i,
+                params=dict(params),
+                params_hash=_hash_params(params),
+                n_obs=0,
+                sharpe=0.0,
+                sharpe_annualized=0.0,
+                total_return_pct=0.0,
+                failed=f"{type(exc).__name__}: {exc}",
+                attempt_id=attempt_id,
+                executed_at=executed_at,
             )
-        sr = _sharpe(r)
+            if on_error == "raise":
+                _maybe_record_failed_project_sweep(
+                    [failed_trial],
+                    grid,
+                    data_hash=data_hash,
+                    backtest_fn=backtest_fn,
+                    risk_free_rate=risk_free_rate,
+                    periods_per_year=ppy,
+                )
+                raise
+            return (i, failed_trial, None)
+        sr = _sharpe(r, risk_free_rate=risk_free_rate, periods_per_year=ppy)
         trial = Trial(
             index=i,
             params=dict(params),
             params_hash=_hash_params(params),
             n_obs=int(r.size),
             sharpe=round(sr, 6),
-            sharpe_annualized=round(sr * math.sqrt(252), 4),
+            sharpe_annualized=round(sr * math.sqrt(ppy), 4),
             total_return_pct=round((float(np.prod(1 + r)) - 1) * 100, 4),
+            attempt_id=attempt_id,
+            executed_at=executed_at,
         )
         return i, trial, r
 
@@ -385,6 +469,14 @@ def sweep(
     columns = [c for _, c in ordered if c is not None]
 
     if not columns:
+        _maybe_record_failed_project_sweep(
+            trials,
+            grid,
+            data_hash=data_hash,
+            backtest_fn=backtest_fn,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=ppy,
+        )
         raise RuntimeError(
             f"every one of the {len(combos)} combinations failed. First error: {trials[0].failed}"
         )
@@ -402,16 +494,97 @@ def sweep(
         data_hash=data_hash,
         grid_keys=sorted(grid),
         store_params=store_params,
+        risk_free_rate=risk_free_rate,
+        periods_per_year=ppy,
     )
-    _maybe_record_project_sweep(result, grid)
+    _maybe_record_project_sweep(result, grid, backtest_fn=backtest_fn)
     return result
 
 
-def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable[Any]]) -> None:
-    """When `sweep()` runs inside a `.alphaengine/` project, record the run and trials."""
+def _maybe_record_failed_project_sweep(
+    trials: list[Trial],
+    grid: Mapping[str, Iterable[Any]],
+    *,
+    data_hash: str,
+    backtest_fn: Any = None,
+    risk_free_rate: float | None = None,
+    periods_per_year: int = 252,
+) -> None:
+    """Record executed failed trial attempts in `.alphaengine/` before raising (`QOS-153`)."""
+    from ..ledger import LedgerError, is_auto_sweep_suppressed, record_run, record_trials
+    from ..project import find_project
+
+    if is_auto_sweep_suppressed():
+        return
+    proj = find_project()
+    if proj is None:
+        return
+    grid_keys = sorted(str(k) for k in grid)
+    grid_serializable = {str(k): list(v) for k, v in grid.items()}
+    family = f"sweep:{','.join(grid_keys)}" if grid_keys else "sweep"
+    trial_entries = [
+        {
+            "attempt_id": t.attempt_id,
+            "executed_at": t.executed_at,
+            "index": t.index,
+            "params_hash": t.params_hash,
+            "status": "failed",
+            "n_obs": 0,
+            "sharpe": None,
+            "sharpe_annualized": None,
+            "total_return_pct": None,
+            "failed": t.failed,
+        }
+        for t in trials
+    ]
+    try:
+        rec = record_run(
+            proj,
+            command="sweep",
+            params={"grid": grid_serializable, "grid_keys": grid_keys},
+            dataset_hashes=[data_hash] if data_hash else [],
+            n_trials=len(trials),
+            n_trials_source="derived_from_grid",
+            figures={
+                "n_trials": len(trials),
+                "run_n_trials": len(trials),
+                "n_ok_trials": 0,
+                "n_failed_trials": len(trials),
+                "n_trials_source": "derived_from_grid",
+                "surface": {"shape": "empty", "n_ok": 0, "n_failed": len(trials)},
+                "failed": trials[0].failed if trials else "all_failed",
+            },
+            verdict=Verdict.UNVERIFIED.value,
+            family=family,
+            code_target=backtest_fn,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=periods_per_year,
+        )
+        record_trials(
+            proj,
+            run_id=str(rec["run_id"]),
+            trials=trial_entries,
+            family=family,
+            timestamp=str(rec["timestamp"]),
+        )
+    except LedgerError:
+        raise
+    except OSError as exc:
+        raise LedgerError(
+            f"Failed to record failed sweep in project ledger at {proj.dot_dir}: {exc}"
+        ) from exc
+
+
+def _maybe_record_project_sweep(
+    result: SweepResult,
+    grid: Mapping[str, Iterable[Any]],
+    *,
+    backtest_fn: Any = None,
+) -> None:
+    """When `sweep()` runs inside a `.alphaengine/` project, record the run and all attempted trials."""
     from dataclasses import asdict
 
-    from ..ledger import is_auto_sweep_suppressed, record_run, record_trials
+    from ..ledger import LedgerError, is_auto_sweep_suppressed, record_run, record_trials
     from ..project import find_project
 
     if is_auto_sweep_suppressed():
@@ -435,6 +608,8 @@ def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable
                 "data_hash": result.data_hash,
                 "grid_keys": result.grid_keys,
                 "store_params": result.store_params,
+                "risk_free_rate": result.risk_free_rate,
+                "periods_per_year": result.periods_per_year,
             }
         )
         rec = record_run(
@@ -442,14 +617,19 @@ def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable
             command="sweep",
             params={"grid": grid_serializable, "grid_keys": result.grid_keys},
             dataset_hashes=[result.data_hash] if result.data_hash else [],
-            n_trials=len(ok),
+            n_trials=len(result.trials),
             n_trials_source="derived_from_grid",
             figures={
                 "n_trials": v["n_trials"],
+                "run_n_trials": v["run_n_trials"],
+                "n_ok_trials": v["n_ok_trials"],
+                "n_failed_trials": v["n_failed_trials"],
                 "n_trials_source": v["n_trials_source"],
+                "deflation_applied": v.get("deflation_applied"),
                 "n_eff_participation": v.get("n_eff_participation"),
                 "deflated_sharpe_at_n_eff": v.get("deflated_sharpe_at_n_eff"),
                 "n_eff_diagnostic_note": v.get("n_eff_diagnostic_note"),
+                "dsr_probability": v.get("dsr_probability"),
                 "deflated_sharpe": v.get("deflated_sharpe"),
                 "psr_vs_zero": v.get("psr_vs_zero"),
                 "sr0_expected_max": v.get("sr0_expected_max"),
@@ -458,20 +638,29 @@ def _maybe_record_project_sweep(result: SweepResult, grid: Mapping[str, Iterable
             },
             verdict=v.get("verdict"),
             family=family,
-            repro_spec={"kind": "sweep", "matrix_object_sha256": matrix_sha},
+            repro_spec={
+                "kind": "sweep",
+                "matrix_object_sha256": matrix_sha,
+                "risk_free_rate": result.risk_free_rate,
+                "periods_per_year": result.periods_per_year,
+            },
             returns_for_deflation=best_col,
             trials_sharpe_std=trials_std,
+            risk_free_rate=result.risk_free_rate,
+            periods_per_year=result.periods_per_year,
+            code_target=backtest_fn,
         )
-        if rec.get("duplicate_of") is None:
-            record_trials(
-                proj,
-                run_id=str(rec["run_id"]),
-                trials=result.ledger(),
-                family=family,
-                timestamp=str(rec["timestamp"]),
-            )
+        record_trials(
+            proj,
+            run_id=str(rec["run_id"]),
+            trials=result.ledger(),
+            family=family,
+            timestamp=str(rec["timestamp"]),
+        )
         result.run_id = str(rec["run_id"])
         result.cumulative_trials = int(rec["cumulative_trials"])
         result.project_trials = int(rec["project_trials"])
+    except LedgerError:
+        raise
     except OSError as exc:
-        raise RuntimeError(f"Failed to record sweep in project ledger at {proj.dot_dir}: {exc}") from exc
+        raise LedgerError(f"Failed to record sweep in project ledger at {proj.dot_dir}: {exc}") from exc

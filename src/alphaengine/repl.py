@@ -21,6 +21,9 @@ __all__ = ["SessionState", "SLASH", "run_shell"]
 #: Verbs that also work with a leading `/`, Claude-Code style.
 SLASH = (
     "init",
+    "version",
+    "whoami",
+    "doctor",
     "login",
     "load",
     "demo",

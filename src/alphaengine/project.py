@@ -76,6 +76,7 @@ def _format_toml(
     created: str,
     schema_version: str,
     remotes: dict[str, str] | None = None,
+    sync_cursors: dict[str, str] | None = None,
 ) -> str:
     lines = [
         "# AlphaEngine local research project configuration",
@@ -88,12 +89,18 @@ def _format_toml(
         lines.append("[remotes]")
         for k, v in sorted(remotes.items()):
             lines.append(f"{k} = {json.dumps(v)}")
+    if sync_cursors:
+        lines.append("")
+        lines.append("[sync_cursors]")
+        for k, v in sorted(sync_cursors.items()):
+            if v:
+                lines.append(f"{k} = {json.dumps(v)}")
     return "\n".join(lines) + "\n"
 
 
 def _parse_toml(text: str) -> dict[str, Any]:
     """Parse `project.toml` without requiring external dependencies on Python 3.10."""
-    out: dict[str, Any] = {"remotes": {}}
+    out: dict[str, Any] = {"remotes": {}, "sync_cursors": {}}
     section: str | None = None
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -134,6 +141,7 @@ class Project:
     created: str
     schema_version: str = PROJECT_FORMAT_VERSION
     remotes: dict[str, str] = field(default_factory=dict)
+    sync_cursors: dict[str, str] = field(default_factory=dict)
 
     @property
     def dot_dir(self) -> Path:
@@ -175,9 +183,22 @@ class Project:
                 created=self.created,
                 schema_version=self.schema_version,
                 remotes=self.remotes,
+                sync_cursors=self.sync_cursors,
             ),
             encoding="utf-8",
         )
+
+    def get_sync_cursor(self, remote_name: str = "quantos") -> str | None:
+        val = self.sync_cursors.get((remote_name or "quantos").strip())
+        return str(val).strip() if val and str(val).strip() else None
+
+    def set_sync_cursor(self, remote_name: str, cursor: str | None) -> None:
+        key = (remote_name or "quantos").strip()
+        if cursor and cursor.strip():
+            self.sync_cursors[key] = cursor.strip()
+        else:
+            self.sync_cursors.pop(key, None)
+        self.save_config()
 
     def put_object(self, payload: Any) -> str:
         """Write a content-addressed JSON object under `.alphaengine/objects/<sha256>.json`."""
@@ -219,22 +240,43 @@ class Project:
             fh.write(line + "\n")
         return digest
 
-    def read_jsonl(self, rel_path: str) -> list[dict[str, Any]]:
+    def write_jsonl(self, rel_path: str, records: list[dict[str, Any]]) -> None:
+        """Atomically write `records` to `.alphaengine/<rel_path>`, storing each record in CAS."""
+        target = self.dot_dir / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        lines: list[str] = []
+        for rec in records:
+            entry = dict(rec)
+            entry.pop("object_sha256", None)
+            digest = self.put_object(entry)
+            entry["object_sha256"] = digest
+            lines.append(json.dumps(_sanitize_json_numbers(entry), sort_keys=True, ensure_ascii=False))
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        tmp.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
+        tmp.replace(target)
+
+    def read_jsonl(self, rel_path: str, *, strict: bool = False) -> list[dict[str, Any]]:
         """Read all records from an append-only JSON Lines file under `.alphaengine/`."""
         target = self.dot_dir / rel_path
-        if not target.is_file():
+        if not target.exists():
             return []
+        if not target.is_file():
+            raise OSError(f"Expected file at {target}, found directory or special path.")
         out: list[dict[str, Any]] = []
-        for raw in target.read_text(encoding="utf-8").splitlines():
+        for lineno, raw in enumerate(target.read_text(encoding="utf-8").splitlines(), start=1):
             text = raw.strip()
             if not text:
                 continue
             try:
                 parsed = json.loads(text)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                if strict or rel_path.startswith("ledger/"):
+                    raise ValueError(f"Corrupted JSONL at {target}:{lineno}: {exc}") from exc
                 continue
             if isinstance(parsed, dict):
                 out.append(parsed)
+            elif strict or rel_path.startswith("ledger/"):
+                raise ValueError(f"Expected JSON object at {target}:{lineno}, got {type(parsed).__name__}")
         return out
 
 
@@ -282,12 +324,15 @@ def _load_from_root(root: Path) -> Project:
     parsed = _parse_toml(cfg.read_text(encoding="utf-8"))
     raw_remotes = parsed.get("remotes")
     remotes = {str(k): str(v) for k, v in raw_remotes.items()} if isinstance(raw_remotes, dict) else {}
+    raw_cursors = parsed.get("sync_cursors")
+    cursors = {str(k): str(v) for k, v in raw_cursors.items() if v} if isinstance(raw_cursors, dict) else {}
     return Project(
         root=root,
         name=str(parsed.get("name") or root.name or "research"),
         created=str(parsed.get("created") or ""),
         schema_version=str(parsed.get("schema_version") or PROJECT_FORMAT_VERSION),
         remotes=remotes,
+        sync_cursors=cursors,
     )
 
 

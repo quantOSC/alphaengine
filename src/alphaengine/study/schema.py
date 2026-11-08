@@ -8,6 +8,16 @@ VERSIONING RULE
     `load()` refuses a major version it does not know rather than guessing. A
     study that silently half-parses is worse than one that fails loudly: the
     figures in it get quoted to investors.
+
+SEAL PROJECTION (`seal_version = 2`, `QOS-161`)
+    `Study.seal()` hashes `sealed_study_projection(study)` — the exact
+    deterministic allowlisted wire projection (excluding local-only `best_params`)
+    with explicit keys, sorted dictionaries, and 8-decimal float formatting.
+    Because `ae push` and `study.report()` transmit that exact projection,
+    client-side `Study.verify()` and server-side seal verification always compute
+    the identical 64-hex `content_sha256`. Studies sealed under 1.x (`seal_version`
+    absent or `1`) remain verifiable via `verify_study_mode()` (`"legacy_v1"` /
+    `"legacy"`).
 """
 
 from __future__ import annotations
@@ -15,26 +25,31 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .._version import __version__
+from .._version import current_engine_version
 
 SCHEMA_VERSION = "1.2"
+SEAL_VERSION = 2
+_MAX_TRIAL_LEDGER = 512
 
 __all__ = [
+    "SEAL_VERSION",
+    "SCHEMA_VERSION",
     "Study",
-    "save",
-    "load",
-    "seal_study",
-    "verify_study",
-    "verify_study_mode",
     "canonical_json",
     "canonical_sha256",
     "compute_content_sha256",
-    "SCHEMA_VERSION",
+    "load",
+    "save",
+    "seal_study",
+    "sealed_study_projection",
+    "verify_study",
+    "verify_study_mode",
 ]
 
 
@@ -80,9 +95,66 @@ def _strip_content_sha(payload: Any) -> Any:
     return raw
 
 
+def sealed_study_projection(study: Study | Mapping[str, Any]) -> dict[str, Any]:
+    """Return the canonical `seal_version = 2` wire projection of a Study (`QOS-161`).
+
+    Every field in this projection travels unchanged in `ae push` and
+    `study.report()`. Local-only `best_params` is intentionally excluded so
+    parameter grids never leave the researcher's machine while client and server
+    compute the exact same `content_sha256`.
+    """
+    src: Mapping[str, Any] = study.to_dict() if isinstance(study, Study) else study
+    raw_ledger = src.get("trial_ledger")
+    bounded_ledger = (
+        list(raw_ledger)[:_MAX_TRIAL_LEDGER]
+        if isinstance(raw_ledger, list) and len(raw_ledger) <= _MAX_TRIAL_LEDGER
+        else None
+    )
+    dsr_prob = src.get("dsr_probability")
+    def_sr = src.get("deflated_sharpe")
+    if dsr_prob is None and isinstance(def_sr, (int, float)) and not isinstance(def_sr, bool):
+        dsr_prob = float(def_sr)
+    if def_sr is None and isinstance(dsr_prob, (int, float)) and not isinstance(dsr_prob, bool):
+        def_sr = float(dsr_prob)
+
+    return {
+        "schema_version": str(src.get("schema_version") or SCHEMA_VERSION),
+        "seal_version": int(src.get("seal_version") or SEAL_VERSION),
+        "engine_version": str(src.get("engine_version") or current_engine_version()),
+        "created_at": str(src.get("created_at") or ""),
+        "label": str(src.get("label") or ""),
+        "n_trials": int(src.get("n_trials") or 0),
+        "n_trials_source": str(src.get("n_trials_source") or "derived_from_grid"),
+        "grid_keys": [str(k) for k in (src.get("grid_keys") or [])],
+        "n_failed_trials": int(src.get("n_failed_trials") or 0),
+        "data_hash": str(src.get("data_hash") or ""),
+        "data_description": str(src.get("data_description") or ""),
+        "verdict": src.get("verdict"),
+        "dsr_probability": dsr_prob,
+        "deflated_sharpe": def_sr,
+        "deflation_applied": src.get("deflation_applied"),
+        "psr_vs_zero": src.get("psr_vs_zero"),
+        "sr0_expected_max": src.get("sr0_expected_max"),
+        "min_track_record_length": src.get("min_track_record_length"),
+        "selection": src.get("selection"),
+        "surface": dict(src.get("surface") or {}),
+        "performance": dict(src.get("performance") or {}),
+        "process": src.get("process"),
+        "charts": list(src["charts"]) if isinstance(src.get("charts"), list) else None,
+        "trial_ledger": bounded_ledger,
+        "manifest": dict(src["manifest"]) if isinstance(src.get("manifest"), Mapping) else None,
+        "notes": str(src.get("notes") or ""),
+        "assignment_id": src.get("assignment_id"),
+        "thesis_id": src.get("thesis_id"),
+    }
+
+
 def canonical_json(study: Study | dict[str, Any] | Any) -> str:
     """Deterministic canonical JSON over a Study or arbitrary JSON-serializable payload."""
-    raw = _strip_content_sha(study)
+    if isinstance(study, Study):
+        raw: Any = sealed_study_projection(study)
+    else:
+        raw = _strip_content_sha(study)
     normalized = _normalize_canonical(raw)
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -94,53 +166,81 @@ def canonical_sha256(payload: Study | dict[str, Any] | Any) -> str:
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
-def compute_content_sha256(study: Study | dict[str, Any]) -> str:
-    """Full 64-hex SHA-256 content hash over canonical JSON of the Study."""
-    return canonical_sha256(study)
+def compute_content_sha256(study: Study | Mapping[str, Any]) -> str:
+    """Full 64-hex SHA-256 content hash over the canonical `seal_version = 2` Study projection."""
+    return canonical_sha256(sealed_study_projection(study))
 
 
-def _legacy_hashes(study: Study | dict[str, Any]) -> set[str]:
-    """Compute legacy study hashes so studies sealed under pre-1.1.1 formats still verify as 'legacy'."""
-    raw = _strip_content_sha(study)
-    candidates: set[str] = set()
-    # 1. Legacy 10-decimal numeric float normalization
+def _legacy_v1_dict(study: Study | Mapping[str, Any]) -> dict[str, Any]:
+    """Reconstruct the 1.x full-Study dict (prior to `seal_version = 2` fields) for legacy verification."""
+    raw = dict(study.to_dict()) if isinstance(study, Study) else dict(study)
+    raw.pop("content_sha256", None)
+    if "seal_version" not in study.__dict__ if isinstance(study, Study) else "seal_version" not in study:
+        raw.pop("seal_version", None)
+    # Strip 2.0-only optional fields when absent in a 1.x file
+    for v2_key in ("seal_version", "dsr_probability", "deflation_applied", "manifest"):
+        if isinstance(study, Mapping) and v2_key not in study:
+            raw.pop(v2_key, None)
+    return raw
+
+
+def _legacy_hashes(study: Study | Mapping[str, Any]) -> tuple[str, set[str]]:
+    """Compute legacy v1 canonical hash and pre-1.1.1 round10/plain hashes."""
+    raw = _legacy_v1_dict(study)
+    v1_canonical = hashlib.sha256(
+        json.dumps(
+            _normalize_canonical(raw),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+    older: set[str] = set()
     leg10 = json.dumps(
         _normalize_legacy_round10(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
-    candidates.add(hashlib.sha256(leg10.encode("utf-8")).hexdigest())
-    # 2. Legacy plain sort_keys JSON (compact and default separators)
+    older.add(hashlib.sha256(leg10.encode("utf-8")).hexdigest())
     for sep in ((",", ":"), (", ", ": ")):
         plain = json.dumps(raw, sort_keys=True, separators=sep, default=str, ensure_ascii=False)
-        candidates.add(hashlib.sha256(plain.encode("utf-8")).hexdigest())
-    return candidates
+        older.add(hashlib.sha256(plain.encode("utf-8")).hexdigest())
+    return v1_canonical, older
 
 
-def verify_study_mode(study: Study | dict[str, Any]) -> str | None:
-    """Return `'canonical'` if `content_sha256` matches, `'legacy'` for legacy seals, or `None`."""
+def verify_study_mode(study: Study | Mapping[str, Any]) -> str | None:
+    """Return `'canonical'` (`seal_version=2`), `'legacy_v1'` (`1.1.x`), `'legacy'` (`<=1.1.0`), or `None`."""
     claimed = (
         study.content_sha256
         if isinstance(study, Study)
-        else (study.get("content_sha256") if isinstance(study, dict) else None)
+        else (study.get("content_sha256") if isinstance(study, Mapping) else None)
     )
     if not claimed or not isinstance(claimed, str):
         return None
     clean = claimed.strip().lower()
-    if clean == canonical_sha256(study):
+    if clean == compute_content_sha256(study):
         return "canonical"
-    if clean in _legacy_hashes(study):
+    v1_hash, older_hashes = _legacy_hashes(study)
+    if clean == v1_hash:
+        return "legacy_v1"
+    if clean in older_hashes:
         return "legacy"
     return None
 
 
 def seal_study(study: Study) -> str:
-    """Compute and store ``content_sha256`` on ``study``, returning the 64-hex digest."""
-    digest = canonical_sha256(study)
+    """Compute and store `seal_version = 2` ``content_sha256`` on ``study``."""
+    study.seal_version = SEAL_VERSION
+    if study.dsr_probability is None and study.deflated_sharpe is not None:
+        study.dsr_probability = study.deflated_sharpe
+    if study.deflated_sharpe is None and study.dsr_probability is not None:
+        study.deflated_sharpe = study.dsr_probability
+    digest = compute_content_sha256(study)
     study.content_sha256 = digest
     return digest
 
 
-def verify_study(study: Study) -> bool:
-    """True when ``study.content_sha256`` is present and matches canonical or legacy hash."""
+def verify_study(study: Study | Mapping[str, Any]) -> bool:
+    """True when ``content_sha256`` is present and matches canonical or legacy hash."""
     return verify_study_mode(study) is not None
 
 
@@ -158,24 +258,20 @@ class Study:
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # ── the search ──────────────────────────────────────────────────────────
-    # n_trials is the count of configurations actually executed. `n_trials_source`
-    # records HOW it was obtained, because a derived count and an asserted one
-    # are not the same evidence and a reader is entitled to know which they hold.
     n_trials: int = 0
     n_trials_source: str = "derived_from_grid"
     grid_keys: list[str] = field(default_factory=list)
     n_failed_trials: int = 0
 
     # ── identity of the inputs ──────────────────────────────────────────────
-    # A content hash, not a name. A label can be changed to escape a history;
-    # an array cannot. Two studies over the same data are recognisably the same
-    # segment however they were titled.
     data_hash: str = ""
     data_description: str = ""
 
     # ── what came back ──────────────────────────────────────────────────────
     verdict: str | None = None
+    dsr_probability: float | None = None
     deflated_sharpe: float | None = None
+    deflation_applied: bool | None = None
     psr_vs_zero: float | None = None
     sr0_expected_max: float | None = None
     min_track_record_length: dict[str, Any] | None = None
@@ -189,25 +285,22 @@ class Study:
     # ── the shape of the neighbourhood ──────────────────────────────────────
     surface: dict[str, Any] = field(default_factory=dict)
 
-    # ── optional, off by default ────────────────────────────────────────────
-    # The parameter grid is frequently bigger IP than the return series.
+    # ── optional, off by default (NEVER included in `sealed_study_projection`) ──
     best_params: dict[str, Any] | None = None
 
     # ── optional, 1.1 ────────────────────────────────────────────────────────
-    # A named data-generating process and the chart hints a portal draws from
-    # figures. Absent on studies that never asked; older readers drop both.
     process: dict[str, Any] | None = None
     charts: list[dict[str, Any]] | None = None
 
-    # ── optional, 1.2 ────────────────────────────────────────────────────────
-    # Per-trial ledger (parameter hash + Sharpe per trial, plus failed trials)
-    # and the canonical SHA-256 seal over the study content.
+    # ── optional, 1.2 / 2.0 ─────────────────────────────────────────────────
     trial_ledger: list[dict[str, Any]] | None = None
+    manifest: dict[str, Any] | None = None
+    seal_version: int = SEAL_VERSION
     content_sha256: str | None = None
 
     # ── provenance ──────────────────────────────────────────────────────────
     schema_version: str = SCHEMA_VERSION
-    engine_version: str = __version__
+    engine_version: str = field(default_factory=current_engine_version)
     notes: str = ""
     assignment_id: str | None = None
     thesis_id: str | None = None
@@ -215,24 +308,40 @@ class Study:
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+    def to_sealed_projection(self) -> dict[str, Any]:
+        """Return the exact `seal_version = 2` wire projection hashed by `seal()`."""
+        return sealed_study_projection(self)
+
     def seal(self) -> str:
         """Seal this study in place and return its 64-hex ``content_sha256``."""
         return seal_study(self)
 
     def verify(self) -> bool:
-        """Verify that ``content_sha256`` matches this study's canonical content."""
+        """Verify that ``content_sha256`` matches this study's canonical or legacy seal."""
         return verify_study(self)
 
     def report(self, **kw: Any) -> dict[str, Any]:
-        """Send this study to a QuantOS workspace. See `alphaengine.report`.
-
-        Imported inside the method so that `import alphaengine` still touches no
-        networking code at all — the offline half must stay offline by
-        construction, not by good intentions.
-        """
+        """Send this study to a QuantOS workspace. See `alphaengine.report`."""
         from .report import report as _report
 
         return _report(self, **kw)
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> Study:
+        """Construct a `Study` from a deserialized dictionary, validating major schema version."""
+        ver = current_engine_version()
+        got = str(raw.get("schema_version", SCHEMA_VERSION))
+        if got.split(".")[0] != SCHEMA_VERSION.split(".")[0]:
+            raise ValueError(
+                f"study schema version {got} cannot be read by alphaengine {ver}, "
+                f"which understands {SCHEMA_VERSION}. Refusing rather than partially parsing: "
+                f"the figures in a study get quoted to investors."
+            )
+        known = set(cls.__dataclass_fields__)
+        filtered: dict[str, Any] = {k: v for k, v in raw.items() if k in known}
+        if "seal_version" not in raw:
+            filtered["seal_version"] = 1
+        return cls(**filtered)
 
     @classmethod
     def from_sweep(
@@ -247,12 +356,7 @@ class Study:
         thesis_id: str | None = None,
         include_ledger: bool = False,
     ) -> Study:
-        """Build a study from a SweepResult.
-
-        Kept here rather than as a method on SweepResult so the sweep module has
-        no opinion about serialisation, and a study can be assembled from
-        something other than a sweep later.
-        """
+        """Build and seal a Study from a `SweepResult`."""
         v = result.verdict(risk_free_rate=risk_free_rate)
         ledger = result.ledger() if (include_ledger and hasattr(result, "ledger")) else None
         study = cls(
@@ -264,7 +368,9 @@ class Study:
             data_hash=v["data_hash"],
             data_description=data_description,
             verdict=v.get("verdict"),
+            dsr_probability=v.get("dsr_probability"),
             deflated_sharpe=v.get("deflated_sharpe"),
+            deflation_applied=v.get("deflation_applied"),
             psr_vs_zero=v.get("psr_vs_zero"),
             sr0_expected_max=v.get("sr0_expected_max"),
             min_track_record_length=v.get("min_track_record_length"),
@@ -294,16 +400,6 @@ def save(study: Study, path: str | Path) -> Path:
 def load(path: str | Path) -> Study:
     """Read a study, refusing a schema major version this build does not know."""
     raw = json.loads(Path(path).read_text(encoding="utf8"))
-
-    got = str(raw.get("schema_version", "0"))
-    if got.split(".")[0] != SCHEMA_VERSION.split(".")[0]:
-        raise ValueError(
-            f"study schema version {got} cannot be read by alphaengine {__version__}, "
-            f"which understands {SCHEMA_VERSION}. Refusing rather than partially parsing: "
-            f"the figures in a study get quoted to investors."
-        )
-
-    known = {f for f in Study.__dataclass_fields__}
-    # Unknown keys are dropped, not fatal, that is what makes a minor bump
-    # forward-compatible for an older reader.
-    return Study(**{k: v for k, v in raw.items() if k in known})
+    if "schema_version" not in raw:
+        raw["schema_version"] = "0"
+    return Study.from_dict(raw)

@@ -1,9 +1,12 @@
 """Hypotheses as first-class project objects (`ae idea`) and prior-work checks.
 
 Stores hypotheses in `.alphaengine/ideas/ideas.jsonl` (backed by content-addressed
-SHA-256 objects), links runs via `--idea <id>`, evaluates `--kill-if` rules against
-the latest and cumulative figures, and warns before a run when the ledger already
-contains prior work on the same family or overlapping parameter sets.
+SHA-256 objects), links runs via `--idea <id>`, evaluates `--kill-rule` / `--kill-if`
+rules against the latest and cumulative figures, and warns before a run when the
+ledger already contains prior work on the same family or overlapping parameter sets.
+
+Canonical 2.0 wire/schema field names (`QOS-163`): `idea_id` and `kill_rule`
+(legacy `kill_if` is accepted on read and mirrored locally for 1.x compatibility).
 """
 
 from __future__ import annotations
@@ -23,14 +26,31 @@ __all__ = [
     "list_ideas",
     "resolve_idea",
     "update_idea_status",
+    "upsert_idea_revision",
     "idea_summary",
     "evaluate_kill_rule",
     "check_prior_work",
 ]
 
 _METRIC_ALIASES: dict[str, tuple[str, ...]] = {
-    "dsr": ("cumulative_deflated_sharpe", "deflated_sharpe"),
-    "deflated_sharpe": ("cumulative_deflated_sharpe", "deflated_sharpe"),
+    "dsr": (
+        "cumulative_dsr_probability",
+        "dsr_probability",
+        "cumulative_deflated_sharpe",
+        "deflated_sharpe",
+    ),
+    "dsr_probability": (
+        "cumulative_dsr_probability",
+        "dsr_probability",
+        "cumulative_deflated_sharpe",
+        "deflated_sharpe",
+    ),
+    "deflated_sharpe": (
+        "cumulative_dsr_probability",
+        "dsr_probability",
+        "cumulative_deflated_sharpe",
+        "deflated_sharpe",
+    ),
     "pbo": ("pbo",),
     "psr": ("psr_vs_zero",),
     "psr_vs_zero": ("psr_vs_zero",),
@@ -55,10 +75,24 @@ def _slug_family(thesis: str) -> str:
     return "_".join(words[:3]) if words else "hypothesis"
 
 
+def _normalize_idea_dict(row: dict[str, Any]) -> dict[str, Any]:
+    out = dict(row)
+    iid = str(out.get("idea_id") or out.get("id") or "").strip()
+    if iid:
+        out["idea_id"] = iid
+    rule = str(
+        out.get("kill_rule") if out.get("kill_rule") is not None else (out.get("kill_if") or "")
+    ).strip()
+    out["kill_rule"] = rule
+    out["kill_if"] = rule
+    return out
+
+
 def create_idea(
     proj: Project,
     thesis: str,
     *,
+    kill_rule: str = "",
     kill_if: str = "",
     family: str | None = None,
     idea_id: str | None = None,
@@ -70,10 +104,12 @@ def create_idea(
     now = datetime.now(timezone.utc).isoformat()
     iid = idea_id or f"idea_{uuid.uuid4().hex[:8]}"
     fam = (family or "").strip() or _slug_family(clean_thesis)
+    effective_rule = (kill_rule or kill_if or "").strip()
     record: dict[str, Any] = {
         "idea_id": iid,
         "thesis": clean_thesis,
-        "kill_if": (kill_if or "").strip(),
+        "kill_rule": effective_rule,
+        "kill_if": effective_rule,
         "family": fam,
         "status": "open",
         "created_at": now,
@@ -89,14 +125,66 @@ def list_ideas(proj: Project) -> list[dict[str, Any]]:
     rows = proj.read_jsonl("ideas/ideas.jsonl")
     by_id: dict[str, dict[str, Any]] = {}
     for row in rows:
-        iid = str(row.get("idea_id") or "")
+        norm = _normalize_idea_dict(row)
+        iid = str(norm.get("idea_id") or "")
         if not iid:
             continue
         if iid not in by_id:
-            by_id[iid] = dict(row)
+            by_id[iid] = norm
         else:
-            by_id[iid].update(row)
+            by_id[iid].update(norm)
+            by_id[iid] = _normalize_idea_dict(by_id[iid])
     return list(by_id.values())
+
+
+def upsert_idea_revision(
+    proj: Project,
+    incoming: dict[str, Any],
+    *,
+    read_only: bool = False,
+    source: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Insert or update an idea by `idea_id` without duplicating rows in `list_ideas()` (`QOS-163`).
+
+    Returns ``(status, stored_record)`` where ``status`` is ``"new"``,
+    ``"updated"``, or ``"skipped"`` (when the incoming revision is identical to
+    the current local state).
+    """
+    raw_in = dict(incoming)
+    if read_only:
+        raw_in["read_only"] = True
+    if source is not None:
+        raw_in["source"] = source
+    norm = _normalize_idea_dict(raw_in)
+    iid = str(norm.get("idea_id") or "").strip()
+    if not iid:
+        raise ValueError("Idea payload is missing `idea_id`.")
+
+    existing_map = {str(i.get("idea_id")): i for i in list_ideas(proj)}
+    prev = existing_map.get(iid)
+    if prev is None:
+        norm.pop("object_sha256", None)
+        sha = proj.append_jsonl("ideas/ideas.jsonl", norm)
+        norm["object_sha256"] = sha
+        return "new", norm
+
+    if read_only and not prev.get("read_only"):
+        return "skipped", prev
+
+    compare_keys = ("thesis", "kill_rule", "family", "status", "updated_at")
+    changed = any(norm.get(k) is not None and norm.get(k) != prev.get(k) for k in compare_keys)
+    if not changed:
+        return "skipped", prev
+
+    merged = dict(prev)
+    for k, v in norm.items():
+        if v is not None:
+            merged[k] = v
+    merged = _normalize_idea_dict(merged)
+    merged.pop("object_sha256", None)
+    sha = proj.append_jsonl("ideas/ideas.jsonl", merged)
+    merged["object_sha256"] = sha
+    return "updated", merged
 
 
 def resolve_idea(proj: Project, idea_ref: str) -> dict[str, Any]:
@@ -126,6 +214,7 @@ def update_idea_status(proj: Project, idea_ref: str, status: str) -> dict[str, A
     updated = dict(current)
     updated["status"] = clean_status
     updated["updated_at"] = datetime.now(timezone.utc).isoformat()
+    updated = _normalize_idea_dict(updated)
     updated.pop("object_sha256", None)
     obj_sha = proj.append_jsonl("ideas/ideas.jsonl", updated)
     updated["object_sha256"] = obj_sha
@@ -139,7 +228,6 @@ def _lookup_metric(metric_name: str, figures: dict[str, Any]) -> tuple[str, floa
         val = figures.get(cand)
         if isinstance(val, (int, float)) and not isinstance(val, bool):
             return cand, float(val)
-        # Also check nested dicts one level deep
         for sub in figures.values():
             if (
                 isinstance(sub, dict)
@@ -150,13 +238,12 @@ def _lookup_metric(metric_name: str, figures: dict[str, Any]) -> tuple[str, floa
     return candidates[0], None
 
 
-def evaluate_kill_rule(kill_if: str, figures: dict[str, Any]) -> dict[str, Any]:
-    """Evaluate a `--kill-if` rule (e.g. `DSR < 0.9`) against `figures`."""
-    rule = (kill_if or "").strip()
+def evaluate_kill_rule(kill_rule: str, figures: dict[str, Any]) -> dict[str, Any]:
+    """Evaluate a `--kill-rule` / `--kill-if` rule (e.g. `DSR < 0.9`) against `figures`."""
+    rule = (kill_rule or "").strip()
     if not rule:
         return {"rule": "", "triggered": None, "status": "no_rule", "detail": "no kill rule specified"}
 
-    # Split on `or` / `,` (any triggered clause triggers the kill rule)
     clauses = [c.strip() for c in re.split(r"\b(?:or|OR)\b|;", rule) if c.strip()]
     details: list[str] = []
     any_triggered = False
@@ -216,7 +303,8 @@ def idea_summary(proj: Project, idea_ref: str) -> dict[str, Any]:
     latest_run = linked[-1] if linked else None
     latest_figs = dict(latest_run.get("figures") or {}) if latest_run else {}
     current_verdict = latest_run.get("verdict") if latest_run else None
-    kill_eval = evaluate_kill_rule(str(idea.get("kill_if") or ""), latest_figs)
+    rule_text = str(idea.get("kill_rule") or idea.get("kill_if") or "")
+    kill_eval = evaluate_kill_rule(rule_text, latest_figs)
     return {
         **idea,
         "linked_runs": linked,

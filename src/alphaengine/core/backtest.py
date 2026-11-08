@@ -1,8 +1,9 @@
 """
-backtest.py, deterministic signal+price backtest (BACKTESTING_TRACKRECORD_PLAN.md
-Pillar A). PURE: signals + prices in, fills simulated with slippage/commission,
-equity curve + per-trade log out. No fetch, no LLM, no clock. Math-identical to
-backend/quant/backtest.py (parity-guarded).
+backtest.py, deterministic signal+price backtest.
+PURE: signals + prices in, fills simulated with slippage, commission, short
+borrow, causal ADV market impact/participation caps, and final residual
+liquidation costs in equity -> equity curve + per-trade log out.
+No fetch, no LLM, no clock.
 
 Input:
   signals : {ticker: [{date, target_weight | action, conviction?}...]}
@@ -11,24 +12,41 @@ Input:
             (enter_long/long/buy=+1, enter_short/short=-1, exit/flat/close=0,
             hold=carry prior). Weights are clamped to ±max_position_pct.
   prices  : {ticker: [{date, close, open?}...]}  (or {date: close} / bare closes)
-  config  : slippage_bps, commission_bps, fill_timing ('close'|'next_open'),
-            initial_capital, max_position_pct
-
-Output: dates, equity_curve, returns, trades[], summary scalars. Scoring
-(performance_report + deflated-Sharpe verdict) is layered on by the gateway tool;
-this module only simulates and reconstructs trades.
+  config  : slippage_bps, commission_bps, borrow_bps, fill_timing ('close'|'next_open'),
+            initial_capital, max_position_pct, adv, adv_series, liquidate_final
 
 No-look-ahead: a signal dated bar i is actioned at bar i's close ('close') or
-bar i+1's open ('next_open'), never at a price it could not have transacted at.
+bar i+1's open ('next_open'), never at a price or ADV reading that printed
+after the signal reference bar.
 """
 
 from __future__ import annotations
 
+import bisect
+import contextlib
 import math
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any
 
+from .._version import current_engine_version
+from .conventions import (
+    build_annualization_spec,
+    build_costs_model_spec,
+    build_risk_free_spec,
+    verdict_from_dsr,
+)
 from .trace import record
 
 MIN_BARS = 2
+
+_NOTEBOOK_HOOK_CALLBACK: Callable[[dict[str, Any]], None] | None = None
+
+
+def register_notebook_hook(callback: Callable[[dict[str, Any]], None] | None) -> None:
+    """Register an active notebook session hook callback (QOS-181)."""
+    global _NOTEBOOK_HOOK_CALLBACK
+    _NOTEBOOK_HOOK_CALLBACK = callback
+
 
 # action keyword -> target weight; None means "hold" (carry the prior weight).
 _ACTION_WEIGHTS = {
@@ -48,9 +66,10 @@ _ACTION_WEIGHTS = {
 
 def _f(v) -> float | None:
     try:
-        return float(v)
+        val = float(v)
     except (TypeError, ValueError):
         return None
+    return val if math.isfinite(val) else None
 
 
 def _norm_price_series(series) -> dict:
@@ -80,6 +99,46 @@ def _norm_price_series(series) -> dict:
                 c = _f(row)
                 if c is not None:
                     out[str(i)] = {"close": c, "open": None}
+    return out
+
+
+def _norm_adv_series(
+    raw_adv_series: Mapping[str, Any] | None, prices_n: dict[str, dict]
+) -> dict[str, tuple[list[str], list[float]]]:
+    """Normalize per-ticker dated ADV into sorted ``(dates, values)`` tuples for O(log T) causal lookup."""
+    out: dict[str, tuple[list[str], list[float]]] = {}
+    if not isinstance(raw_adv_series, Mapping):
+        return out
+    for raw_tk, s in raw_adv_series.items():
+        tk = str(raw_tk).upper()
+        pairs: list[tuple[str, float]] = []
+        if isinstance(s, Mapping):
+            for k, v in s.items():
+                fv = _f(v)
+                if fv is not None and fv > 0:
+                    pairs.append((str(k), fv))
+        elif isinstance(s, Sequence) and not isinstance(s, (str, bytes)):
+            tk_dates = sorted(prices_n.get(tk, {}))
+            for i, row in enumerate(s):
+                if isinstance(row, Mapping):
+                    d = str(row.get("date") or row.get("Date") or (tk_dates[i] if i < len(tk_dates) else i))
+                    fv = _f(row.get("adv", row.get("ADV", row.get("dollar_volume", row.get("value")))))
+                else:
+                    d = tk_dates[i] if i < len(tk_dates) else str(i)
+                    fv = _f(row)
+                if fv is not None and fv > 0:
+                    pairs.append((d, fv))
+        if pairs:
+            pairs.sort(key=lambda x: x[0])
+            dedup_d: list[str] = []
+            dedup_v: list[float] = []
+            for d_str, val in pairs:
+                if dedup_d and dedup_d[-1] == d_str:
+                    dedup_v[-1] = val
+                else:
+                    dedup_d.append(d_str)
+                    dedup_v.append(val)
+            out[tk] = (dedup_d, dedup_v)
     return out
 
 
@@ -154,43 +213,67 @@ def run_backtest(
     *,
     slippage_bps: float = 5.0,
     commission_bps: float = 1.0,
+    borrow_bps: float = 0.0,
     fill_timing: str = "close",
     initial_capital: float = 100000.0,
     max_position_pct: float = 1.0,
     adv: dict | None = None,
+    adv_series: Mapping[str, Any] | None = None,
     impact_coef: float = 0.1,
     max_participation: float | None = None,
+    liquidate_final: bool = True,
+    periods_per_year: int = 252,
 ) -> dict:
-    """See the module docstring for the fill model. Capacity / market-impact are
-    OPT-IN and OFF unless `adv` (a {ticker: average daily DOLLAR volume} map) is
-    supplied, with adv=None the fill math is byte-identical to the cost-free path
-    (the golden + parity guard depend on this):
-      - square-root market impact: a per-fill cost = notional·impact_coef·√(notional/ADV)
-        (Almgren-style) deducted from cash on top of slippage + commission.
-      - capacity cap: when `max_participation` is set, a fill is clipped so its
-        notional never exceeds max_participation·ADV; the un-filled remainder keeps
-        working toward target on later bars (tagged n_capacity_limited_fills).
-    Always reports a `cost_breakdown` (slippage/commission/impact $), the per-bar
-    cost drag (`costs_per_bar`, for a gross-vs-net decomposition) and gross traded
-    notional (for turnover), these are derived, never stored."""
+    """Simulate a dated weight-target portfolio with causal fills and full costs.
+
+    Features (`QOS-151`):
+      - ``fill_timing``: ``"close"`` or ``"next_open"`` (waits for prior close;
+        missing open falls back to that bar's close).
+      - ``borrow_bps``: annual borrow rate in bps accrued per bar on carried short
+        positions (`abs(shares) * close * (borrow_bps / 10000) / periods_per_year`).
+      - ``adv`` / ``adv_series``: scalar `{ticker: dollar_adv}` or dated
+        `{ticker: {date: dollar_adv}}` resolved strictly as-of the signal reference
+        date (no full-sample ADV look-ahead) for Almgren square-root market impact
+        and ``max_participation`` fill clipping.
+      - ``liquidate_final``: when ``True`` (default), residual open positions at the
+        final bar are liquidated in cash/equity with slippage, commission, and impact
+        deducted rather than escaping exit costs.
+    """
     prices_n = {str(tk).upper(): _norm_price_series(s) for tk, s in (prices or {}).items()}
     signals_n = {str(tk).upper(): _norm_signal_series(s) for tk, s in (signals or {}).items()}
 
     all_dates = sorted({d for s in prices_n.values() for d in s})
     if len(all_dates) < MIN_BARS:
-        return {"error": f"need >= {MIN_BARS} price bars across the universe", "n_bars": len(all_dates)}
+        return {
+            "error": f"need >= {MIN_BARS} price bars across the universe",
+            "n_bars": len(all_dates),
+            "engine_version": current_engine_version(),
+        }
 
+    ppy = max(int(periods_per_year), 1)
     slip = float(slippage_bps) / 10000.0
     comm = float(commission_bps) / 10000.0
+    borrow_per_bar = (max(0.0, float(borrow_bps)) / 10000.0) / ppy
     cap = abs(float(max_position_pct))
     fill_open = str(fill_timing) == "next_open"
-    # Capacity / market-impact (opt-in; inert when adv is falsy).
-    _adv = {str(tk).upper(): float(v) for tk, v in (adv or {}).items() if _f(v) and float(v) > 0}
+
+    _adv_scalar = {str(tk).upper(): float(v) for tk, v in (adv or {}).items() if _f(v) and float(v) > 0}
+    _adv_dated = _norm_adv_series(adv_series, prices_n)
+    has_adv = bool(_adv_scalar or _adv_dated)
+    adv_source: str | None = "adv_series" if _adv_dated else ("scalar_adv" if _adv_scalar else None)
     _icoef = abs(float(impact_coef)) if impact_coef else 0.0
     _maxpart = abs(float(max_participation)) if max_participation else None
 
-    # Per-ticker target weight known as of each bar's close (forward-filled,
-    # clamped to ±cap; 'hold' carries the prior weight).
+    def _resolve_adv(tk: str, asof_date: str) -> float | None:
+        dated = _adv_dated.get(tk)
+        if dated is not None:
+            ds, vs = dated
+            pos_idx = bisect.bisect_right(ds, asof_date) - 1
+            if pos_idx >= 0:
+                return vs[pos_idx]
+            return None
+        return _adv_scalar.get(tk)
+
     def _known_weights(tk: str) -> dict:
         sig = signals_n.get(tk, [])
         known, si, w = {}, 0, 0.0
@@ -207,13 +290,13 @@ def run_backtest(
 
     cash = float(initial_capital)
     pos = {tk: {"shares": 0.0, "avg": 0.0, "entry_date": None} for tk in prices_n}
-    applied = {tk: 0.0 for tk in prices_n}  # weight currently expressed in the position
+    applied = {tk: 0.0 for tk in prices_n}
     trades: list[dict] = []
     equity_curve: list[float] = []
     dates_out: list[str] = []
-    costs_per_bar: list[float] = []  # total explicit cost charged to equity each bar
-    slip_cost_total = comm_cost_total = impact_cost_total = 0.0
-    gross_notional = 0.0  # |delta|·exec traded, for turnover
+    costs_per_bar: list[float] = []
+    slip_cost_total = comm_cost_total = impact_cost_total = borrow_cost_total = 0.0
+    gross_notional = 0.0
     n_capacity_limited = 0
 
     def _mark_equity(d: str) -> float:
@@ -226,15 +309,23 @@ def run_backtest(
 
     for idx, d in enumerate(all_dates):
         bar_cost = 0.0
+        # Short borrow accrues on short positions carried into bar `d` (`idx >= 1`).
+        if borrow_per_bar > 0.0 and idx > 0:
+            for tk in tickers:
+                sh = pos[tk]["shares"]
+                if sh < 0.0:
+                    bar_b = prices_n[tk].get(d)
+                    if bar_b and bar_b["close"] > 0:
+                        b_cost = abs(sh) * bar_b["close"] * borrow_per_bar
+                        cash -= b_cost
+                        borrow_cost_total += b_cost
+                        bar_cost += b_cost
+
         for tk in tickers:
             bar = prices_n[tk].get(d)
             if bar is None:
                 continue
             if fill_open:
-                # A signal is known at the close. The first bar has no prior
-                # close, so there is nothing to fill — using this bar's own
-                # signal at this bar's open would trade a price that printed
-                # before the signal existed.
                 if idx == 0:
                     continue
                 fillp = bar["open"] if bar["open"] is not None else bar["close"]
@@ -245,9 +336,6 @@ def run_backtest(
             if not fillp or fillp <= 0:
                 continue
             tw = targets[tk].get(ref_date, 0.0)
-            # Trade ONLY when the target weight CHANGES, enter on signal, hold,
-            # exit on signal. No rebalance-to-weight drift between signals (which
-            # would manufacture phantom trades every bar).
             if abs(tw - applied[tk]) < 1e-12:
                 continue
             equity = _mark_equity(d)
@@ -255,27 +343,26 @@ def run_backtest(
             delta = target_shares - pos[tk]["shares"]
             applied[tk] = tw
             exec_price = fillp * (1 + slip) if delta > 0 else fillp * (1 - slip)
-            # Capacity cap (opt-in): clip the fill to max_participation·ADV; the
-            # remainder keeps working toward target on later bars.
-            adv_tk = _adv.get(tk)
+
+            adv_tk = _resolve_adv(tk, ref_date)
             if adv_tk and _maxpart:
                 cur_notional = abs(delta) * exec_price
                 if cur_notional > _maxpart * adv_tk:
                     delta *= (_maxpart * adv_tk) / cur_notional
                     n_capacity_limited += 1
                     achieved = pos[tk]["shares"] + delta
-                    applied[tk] = (achieved * fillp / equity) if equity else tw  # not fully filled
+                    applied[tk] = (achieved * fillp / equity) if equity else tw
             if abs(delta * fillp) < 1e-9:
                 continue
-            slip_cost = abs(delta) * fillp * slip  # slippage (already inside exec_price)
+            slip_cost = abs(delta) * fillp * slip
             comm_cost = abs(delta) * exec_price * comm
             impact_cost = 0.0
-            if adv_tk and _icoef:  # square-root market impact
+            if adv_tk and _icoef:
                 notional = abs(delta) * exec_price
                 impact_cost = notional * _icoef * math.sqrt(notional / adv_tk)
-            cash -= delta * exec_price  # buy lowers cash; short/sell raises it
-            cash -= comm_cost  # commission
-            cash -= impact_cost  # market impact (0 unless adv given)
+            cash -= delta * exec_price
+            cash -= comm_cost
+            cash -= impact_cost
             slip_cost_total += slip_cost
             comm_cost_total += comm_cost
             impact_cost_total += impact_cost
@@ -286,45 +373,81 @@ def run_backtest(
         dates_out.append(d)
         costs_per_bar.append(round(bar_cost, 6))
 
-    # Close residual positions at the final close so every trade completes. This
-    # completes the trade LOG only (it does not touch cash/equity, see the module
-    # docstring); we still count its notional toward turnover.
+    # Close residual positions at the final close. When `liquidate_final=True`
+    # (default in 2.0), exit slippage, commission, and market impact are deducted
+    # from cash and reflected in `equity_curve[-1]` and `cost_breakdown`.
     last = all_dates[-1]
+    liq_bar_cost = 0.0
+    liquidated_any = False
     for tk in tickers:
         if pos[tk]["shares"] != 0.0 and prices_n[tk].get(last):
             fillp = prices_n[tk][last]["close"]
             delta = -pos[tk]["shares"]
             exec_price = fillp * (1 + slip) if delta > 0 else fillp * (1 - slip)
-            gross_notional += abs(delta) * exec_price
+            notional = abs(delta) * exec_price
+            gross_notional += notional
+            if liquidate_final:
+                slip_cost = abs(delta) * fillp * slip
+                comm_cost = notional * comm
+                adv_tk = _resolve_adv(tk, last)
+                impact_cost = notional * _icoef * math.sqrt(notional / adv_tk) if (adv_tk and _icoef) else 0.0
+                cash -= delta * exec_price
+                cash -= comm_cost
+                cash -= impact_cost
+                slip_cost_total += slip_cost
+                comm_cost_total += comm_cost
+                impact_cost_total += impact_cost
+                liq_bar_cost += slip_cost + comm_cost + impact_cost
+                liquidated_any = True
             _apply_fill(pos[tk], tk, delta, exec_price, last, trades)
 
-    returns = []
-    for i in range(1, len(equity_curve)):
-        prev = equity_curve[i - 1]
-        returns.append(round((equity_curve[i] - prev) / prev, 8) if prev else 0.0)
+    if liquidate_final and liquidated_any and equity_curve:
+        equity_curve[-1] = round(_mark_equity(last), 2)
+        costs_per_bar[-1] = round(costs_per_bar[-1] + liq_bar_cost, 6)
 
-    final_equity = equity_curve[-1] if equity_curve else float(initial_capital)
-    total_return_pct = round((final_equity / float(initial_capital) - 1.0) * 100.0, 4)
+    # Initial-capital-aware per-bar returns: bar 0 is measured against
+    # `initial_capital` so bar-0 execution costs are never dropped from returns.
+    returns: list[float] = []
+    init_cap_f = float(initial_capital)
+    for i, eq_val in enumerate(equity_curve):
+        prev = init_cap_f if i == 0 else equity_curve[i - 1]
+        returns.append(round((eq_val - prev) / prev, 8) if prev else 0.0)
+
+    final_equity = equity_curve[-1] if equity_curve else init_cap_f
+    total_return_pct = round((final_equity / init_cap_f - 1.0) * 100.0, 4) if init_cap_f else 0.0
+    fill_mode = "next_open" if fill_open else "close"
+    costs_model = build_costs_model_spec(
+        mode="simulated",
+        slippage_bps=float(slippage_bps),
+        commission_bps=float(commission_bps),
+        borrow_bps=float(borrow_bps),
+        fill_timing=fill_mode,
+        adv_source=adv_source,
+        liquidate_final=bool(liquidate_final),
+    )
 
     record(
         "equity",
-        "marked equity after each bar; the residual close updates the trade log only",
+        "marked equity after each bar net of slippage, commission, borrow, impact, and final liquidation",
         inputs={
             "n_bars": len(dates_out),
-            "fill_timing": "next_open" if fill_open else "close",
-            "initial_capital": float(initial_capital),
+            "fill_timing": fill_mode,
+            "initial_capital": init_cap_f,
+            "liquidate_final": bool(liquidate_final),
         },
         series={"equity": equity_curve, "returns": returns},
         result=total_return_pct,
     )
-    return {
+    total_costs = slip_cost_total + comm_cost_total + impact_cost_total + borrow_cost_total
+    out = {
+        "engine_version": current_engine_version(),
         "n_bars": len(dates_out),
         "dates": dates_out,
         "equity_curve": equity_curve,
         "returns": returns,
         "trades": trades,
         "n_trades": len(trades),
-        "initial_capital": float(initial_capital),
+        "initial_capital": init_cap_f,
         "final_equity": round(final_equity, 2),
         "total_return_pct": total_return_pct,
         "gross_traded_notional": round(gross_notional, 2),
@@ -332,73 +455,63 @@ def run_backtest(
             "slippage": round(slip_cost_total, 2),
             "commission": round(comm_cost_total, 2),
             "impact": round(impact_cost_total, 2),
-            "total": round(slip_cost_total + comm_cost_total + impact_cost_total, 2),
+            "borrow": round(borrow_cost_total, 2),
+            "total": round(total_costs, 2),
         },
         "costs_per_bar": costs_per_bar,
         "capacity": (
-            {"max_participation": _maxpart, "n_capacity_limited_fills": n_capacity_limited}
-            if _maxpart
+            {
+                "max_participation": _maxpart,
+                "n_capacity_limited_fills": n_capacity_limited,
+                "adv_source": adv_source,
+            }
+            if (_maxpart or has_adv)
             else None
         ),
+        "costs_model": costs_model,
+        "annualization": build_annualization_spec(ppy),
         "config": {
             "slippage_bps": float(slippage_bps),
             "commission_bps": float(commission_bps),
-            "fill_timing": "next_open" if fill_open else "close",
+            "borrow_bps": float(borrow_bps),
+            "fill_timing": fill_mode,
             "max_position_pct": cap,
-            "impact_model": ("sqrt" if _adv else None),
-            "impact_coef": (_icoef if _adv else None),
+            "impact_model": ("sqrt" if has_adv else None),
+            "impact_coef": (_icoef if has_adv else None),
             "max_participation": _maxpart,
+            "adv_source": adv_source,
+            "liquidate_final": bool(liquidate_final),
+            "periods_per_year": ppy,
         },
     }
+    if _NOTEBOOK_HOOK_CALLBACK is not None:
+        with contextlib.suppress(Exception):
+            _NOTEBOOK_HOOK_CALLBACK(out)
+    return out
 
 
-# ── Scoring (gateway-only): compose performance + overfitting into a verdict ──
-# NOT parity-copied to the backend, it composes quant_core.performance +
-# quant_core.validation, whose backend siblings differ in shape. Only run_backtest
-# is the shared pure core. The verdict rule below IS the moat in code: 'edge' is
-# unreachable without a populated deflated_sharpe, mirroring the envelope Signal's
-# _edge_requires_validation rule, which a test cross-checks.
+# ── Scoring: compose performance + overfitting into a canonical 2.0 verdict ──
 
 
-def _verdict(dsr: float | None, pbo: float | None, n_trials_source: str = "asserted") -> str:
-    """The moat. `edge` requires BOTH a rigor figure and a recorded denominator.
-
-    THE HOLE THIS CLOSES (0.2.0). `score_backtest` declared `n_trials: int = 1`,
-    so a caller who simply omitted the argument got the most generous deflation
-    arithmetic can produce -- no deflation at all -- and a populated
-    `deflated_sharpe`, which was the only thing the moat checked. **Omitting the
-    trial count was the easiest path to `edge`**, in the function whose own
-    docstring advertises deflation as the overfitting moat.
-
-    A deflated Sharpe is a ratio and `n_trials` is its denominator. Deflating by
-    an unrecorded denominator does not produce a weaker claim; it produces a
-    claim about nothing. So an unrecorded count caps the verdict at
-    `inconclusive`. The figure is still computed and returned, because the
-    undeflated number is informative -- it just cannot clear the gate alone.
-
-    `sweep()` is unaffected: it derives `n_trials` as a property with no setter,
-    so its source is always `derived_from_grid`.
-    """
-    if dsr is None:
-        return "inconclusive"  # no rigor figure -> never 'edge'
-    if pbo is not None and pbo > 0.5:
-        return "likely_noise"  # overfit by PBO
-    if dsr < 0.5:
-        return "likely_noise"  # weak on its own terms, denominator or not
-    if n_trials_source == "not_recorded":
-        return "inconclusive"  # no denominator -> never 'edge'
-    if dsr >= 0.9 and (pbo is None or pbo <= 0.2):
-        return "edge"
-    return "inconclusive"
+def _verdict(
+    dsr: float | None,
+    pbo: float | None,
+    n_trials_source: str = "asserted",
+    *,
+    n_trials: int | float | None = None,
+) -> str:
+    """Canonical 2.0 verdict helper (`robust`, `marginal`, `likely_noise`, `unverified`)."""
+    verdict, _ = verdict_from_dsr(
+        dsr,
+        pbo=pbo,
+        n_trials=n_trials if n_trials is not None else (None if n_trials_source == "not_recorded" else 2),
+        n_trials_source=n_trials_source,
+    )
+    return verdict
 
 
 def _ar1_effective_n(returns: list) -> tuple:
-    """AR(1) autocorrelation-honest effective sample size and lag-1 autocorr.
-
-    n_eff = n·(1-r1)/(1+r1). Positive serial correlation inflates a naive Sharpe
-    t-stat; this discounts it. Conservative convention: capped at n, so NEGATIVE
-    autocorrelation is not credited (never claims more significance than the raw
-    sample). Returns (n_eff, r1)."""
+    """AR(1) autocorrelation-honest effective sample size and lag-1 autocorr."""
     from .validation import _as_1d_float
 
     arr = _as_1d_float(returns)
@@ -434,9 +547,7 @@ def _trade_summary(trades: list) -> dict:
 
 
 def _excursions(trades: list, prices: dict) -> dict:
-    """MAE/MFE per trade from the close path between entry and exit, the
-    intra-trade 'how far did it go against / for me' view. Excursion is signed by
-    side (favorable positive). A trade with no covered prices reports None."""
+    """MAE/MFE per trade from the close path between entry and exit."""
     pn = {str(tk).upper(): _norm_price_series(s) for tk, s in (prices or {}).items()}
     per, maes, mfes, n_cov = [], [], [], 0
     for t in trades:
@@ -450,7 +561,7 @@ def _excursions(trades: list, prices: dict) -> dict:
             if path:
                 sign = -1.0 if str(t.get("side")) == "short" else 1.0
                 favs = [sign * (p - entry) / entry * 100.0 for p in path]
-                mae, mfe = round(min(favs), 4), round(max(favs), 4)  # worst adverse, best favorable
+                mae, mfe = round(min(favs), 4), round(max(favs), 4)
                 maes.append(mae)
                 mfes.append(mfe)
                 n_cov += 1
@@ -464,8 +575,6 @@ def _excursions(trades: list, prices: dict) -> dict:
 
 
 def _regime_attribution(trades: list, regime_series: dict) -> dict:
-    """Bucket each trade's P&L by the regime label at its entry date (caller-
-    supplied {date: regime}, so the tool stays no-fetch)."""
     rs = {str(k): str(v) for k, v in regime_series.items()} if isinstance(regime_series, dict) else {}
     buckets: dict = {}
     for t in trades:
@@ -496,9 +605,6 @@ def _attribution(
     risk_free_rate: float | None,
     not_computed: dict,
 ) -> dict:
-    """MAE/MFE + factor + regime attribution. Each leg is OPTIONAL and pure: it
-    runs only when its caller-supplied input is present, else names itself in
-    not_computed (never fetched, never fabricated)."""
     trades = bt.get("trades") or []
     attribution: dict = {}
     if prices:
@@ -527,19 +633,25 @@ def _attribution(
     return attribution
 
 
-def _cost_report(bt: dict, perf, risk_free_rate: float | None) -> dict | None:
-    """Turnover + net-of-cost vs gross Sharpe from the sim's cost bookkeeping.
-
-    The equity curve is ALREADY net of slippage + commission + impact (they are
-    deducted from cash inside run_backtest), so the served Sharpe IS the
-    net-of-cost Sharpe. We add the per-bar cost drag back to reconstruct the
-    GROSS (cost-free) curve and report both, plus turnover, the cost demolition
-    a capacity-blind backtest hides."""
+def _cost_report(
+    bt: dict,
+    perf: dict | None,
+    risk_free_rate: float | None,
+    *,
+    initial_capital: float | None = None,
+    periods_per_year: int = 252,
+) -> dict | None:
+    """Turnover + initial-capital-aware net-of-cost vs gross Sharpe."""
     cb = bt.get("cost_breakdown")
     if not isinstance(cb, dict):
         return None
-    init_cap = float(bt.get("initial_capital") or 0.0) or None
+    init_cap = (
+        float(initial_capital)
+        if (initial_capital is not None and float(initial_capital) > 0)
+        else (float(bt.get("initial_capital") or 0.0) or None)
+    )
     n_bars = int(bt.get("n_bars") or 0)
+    ppy = max(int(periods_per_year), 1)
     gross_notional = float(bt.get("gross_traded_notional") or 0.0)
     total_cost = float(cb.get("total") or 0.0)
     turnover_ratio = (gross_notional / init_cap) if init_cap else None
@@ -548,30 +660,37 @@ def _cost_report(bt: dict, perf, risk_free_rate: float | None) -> dict | None:
         "cost_drag_pct": round(total_cost / init_cap * 100.0, 4) if init_cap else None,
         "turnover_ratio": round(turnover_ratio, 4) if turnover_ratio is not None else None,
         "annualized_turnover": (
-            round(turnover_ratio * 252.0 / n_bars, 4) if (turnover_ratio is not None and n_bars) else None
+            round(turnover_ratio * float(ppy) / n_bars, 4)
+            if (turnover_ratio is not None and n_bars)
+            else None
         ),
         "net_of_cost_sharpe": (perf.get("sharpe_annualized") if isinstance(perf, dict) else None),
         "gross_sharpe": None,
         "sharpe_cost_drag": None,
         "capacity": bt.get("capacity"),
     }
-    # Reconstruct the gross (cost-free) equity curve: gross_i = net_i + Σ cost_≤i.
     cpb = bt.get("costs_per_bar")
     eq = bt.get("equity_curve")
     if isinstance(cpb, list) and isinstance(eq, list) and len(cpb) == len(eq) and len(eq) > 1:
         from .performance import performance_report
 
         cum = 0.0
-        gross_eq = []
+        gross_marks: list[float] = []
         for i, e in enumerate(eq):
             cum += float(cpb[i])
-            gross_eq.append(e + cum)
+            gross_marks.append(float(e) + cum)
+        gross_eq = [init_cap, *gross_marks] if init_cap else gross_marks
         gross_rets = [
             round((gross_eq[i] - gross_eq[i - 1]) / gross_eq[i - 1], 8)
             for i in range(1, len(gross_eq))
             if gross_eq[i - 1]
         ]
-        gp = performance_report(gross_rets, equity_curve=gross_eq, risk_free_rate=risk_free_rate)
+        gp = performance_report(
+            gross_rets,
+            equity_curve=gross_eq,
+            risk_free_rate=risk_free_rate,
+            periods_per_year=ppy,
+        )
         if isinstance(gp, dict) and "error" not in gp:
             out["gross_sharpe"] = gp.get("sharpe_annualized")
             if out["net_of_cost_sharpe"] is not None and out["gross_sharpe"] is not None:
@@ -584,6 +703,8 @@ def score_backtest(
     *,
     n_trials: int | None = None,
     n_trials_source: str | None = None,
+    ledger_runs: Sequence[Mapping[str, Any]] | int | None = None,
+    initial_capital: float | None = None,
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
     benchmark_returns: list | None = None,
@@ -598,85 +719,98 @@ def score_backtest(
     cpcv_purge: int = 1,
     cpcv_embargo: int = 1,
 ) -> dict:
-    """Score a run_backtest result: performance_report + deflated-Sharpe (+ PBO
-    when a parameter-sweep `pnl_matrix` is supplied) -> a MOAT-GATED verdict.
+    """Score a ``run_backtest`` result into canonical 2.0 performance + validation figures.
 
-    `n_trials` is the number of strategy configs the caller searched; it deflates
-    the Sharpe for multiple testing.
-
-    **IT DEFAULTS TO `None`, NOT TO 1** (changed in 0.2.0). The old default made
-    omission the most generous possible answer -- no deflation, a populated
-    `deflated_sharpe`, and therefore the easiest available route to an `edge`
-    verdict. `None` now means NOT RECORDED, which is a different claim from "I
-    searched one configuration" and is reported as such: `n_trials` comes back
-    `null` rather than 1, and `edge` is unreachable. The DSR itself is still
-    computed at an effective denominator of 1 and returned, because the
-    undeflated figure is informative -- it just cannot clear a gate on its own.
-
-    `n_trials_source` is one of `derived_from_grid`, `asserted`, `not_recorded`.
-    A count that was COUNTED and a count that was CLAIMED are different claims,
-    and every deflated figure downstream rests on which one it is. `sweep()`
-    passes `derived_from_grid` because it counted the grid; it is inferred from
-    `n_trials` when omitted.
-
-    The 'edge' verdict is structurally unreachable unless a deflated_sharpe
-    figure is populated AND its denominator was recorded (the moat).
-
-    The validation block always surfaces the AR(1)-honest effective sample size
-    (`n_obs_effective`) and the Harvey-Liu multiple-testing hurdle (`sharpe_tstat`
-    vs t > 3), and MinTRL (is the sample long enough to trust the Sharpe?). Set
-    `cpcv=True` to add Combinatorial Purged Cross-Validation, the OOS Sharpe/DSR
-    distribution across many purged held-out partitions. When the sim carried
-    costs, a `costs` block reports turnover + net-of-cost vs gross Sharpe."""
+    Applies ``trials_for_deflated_sharpe`` across ``n_trials`` and ``ledger_runs``,
+    enforces ``deflation_applied=False`` (capping verdict at ``marginal``) when
+    ``n_trials <= 1`` or ``not_recorded``, anchors equity/return evaluation to
+    ``initial_capital`` when present, and stamps ``engine_version``,
+    ``annualization``, ``risk_free``, and ``costs_model``.
+    """
     from .performance import performance_report
     from .validation import (
+        _per_period_sharpe,
         combinatorial_oos_stability,
         deflated_sharpe,
+        harvey_liu_haircut,
         min_track_record_length,
+        n_eff_participation,
         pbo_cscv,
+        trials_for_deflated_sharpe,
     )
 
-    # NOT RECORDED is not the same claim as "one trial", so the two are kept
-    # apart: `n_trials_eff` drives the arithmetic, `source` drives the gate and
-    # what the caller is told.
-    source = n_trials_source or ("not_recorded" if n_trials is None else "asserted")
-    n_trials_eff = max(1, int(n_trials)) if n_trials is not None else 1
+    ppy = max(int(periods_per_year), 1)
+    resolved_trials, source = trials_for_deflated_sharpe(
+        n_trials,
+        n_trials_source=n_trials_source,
+        ledger_runs=ledger_runs,
+    )
+    n_trials_eff = max(1, int(resolved_trials)) if resolved_trials is not None else 1
 
-    returns = bt.get("returns") or []
+    init_cap = (
+        float(initial_capital)
+        if (initial_capital is not None and float(initial_capital) > 0)
+        else (_f(bt.get("initial_capital")) if bt.get("initial_capital") else None)
+    )
+    raw_eq = bt.get("equity_curve")
+    raw_returns = bt.get("returns")
+
+    if isinstance(raw_eq, list) and len(raw_eq) >= 1 and init_cap and init_cap > 0:
+        if not raw_returns:
+            returns = [
+                round(
+                    (
+                        (float(raw_eq[i]) - (init_cap if i == 0 else float(raw_eq[i - 1])))
+                        / (init_cap if i == 0 else float(raw_eq[i - 1]))
+                    ),
+                    8,
+                )
+                for i in range(len(raw_eq))
+            ]
+            eq_for_perf: list[float] | None = [init_cap, *[float(x) for x in raw_eq]]
+        elif len(raw_returns) == len(raw_eq) - 1:
+            r0 = round((float(raw_eq[0]) - init_cap) / init_cap, 8)
+            returns = [r0, *[float(r) for r in raw_returns if r is not None]]
+            eq_for_perf = [init_cap, *[float(x) for x in raw_eq]]
+        elif len(raw_returns) == len(raw_eq):
+            returns = [float(r) for r in raw_returns if r is not None]
+            eq_for_perf = [init_cap, *[float(x) for x in raw_eq]]
+        else:
+            returns = list(raw_returns)
+            eq_for_perf = raw_eq
+    else:
+        returns = list(raw_returns or [])
+        eq_for_perf = raw_eq
+
     perf = performance_report(
         returns,
-        equity_curve=bt.get("equity_curve"),
+        equity_curve=eq_for_perf,
         benchmark_returns=benchmark_returns,
         risk_free_rate=risk_free_rate,
-        periods_per_year=periods_per_year,
+        periods_per_year=ppy,
     )
     dsr = deflated_sharpe(
         returns,
         n_trials=n_trials_eff,
         trials_sharpe_std=trials_sharpe_std,
         risk_free_rate=risk_free_rate,
-        periods_per_year=periods_per_year,
+        periods_per_year=ppy,
     )
     pbo = pbo_cscv(pnl_matrix) if pnl_matrix is not None else None
-    mintrl = min_track_record_length(
-        returns, risk_free_rate=risk_free_rate, periods_per_year=periods_per_year
-    )
+    mintrl = min_track_record_length(returns, risk_free_rate=risk_free_rate, periods_per_year=ppy)
 
     dsr_ok = isinstance(dsr, dict) and "error" not in dsr
     pbo_ok = isinstance(pbo, dict) and "error" not in pbo
     mintrl_ok = isinstance(mintrl, dict) and "error" not in mintrl
-    dsr_val = dsr.get("deflated_sharpe") if dsr_ok else None
+    dsr_val = dsr.get("dsr_probability") if dsr_ok else None
     psr_val = dsr.get("psr_vs_zero") if dsr_ok else None
     pbo_val = pbo.get("pbo") if pbo_ok else None
 
-    # A2, DSR honesty: AR(1)-effective N + the Harvey-Liu t > 3 hurdle + HL (2015) haircut Sharpe.
     n_eff, r1 = _ar1_effective_n(returns)
     sr_pp = dsr.get("sharpe_per_period") if dsr_ok else None
     if sr_pp is None:
         arr_len = len([r for r in returns if r is not None])
         import numpy as _np
-
-        from .validation import _per_period_sharpe
 
         sr_pp = (
             _per_period_sharpe(_np.asarray([float(r) for r in returns if r is not None], dtype=float))
@@ -684,8 +818,6 @@ def score_backtest(
             else 0.0
         )
     t_stat = float(sr_pp) * math.sqrt(n_eff)
-
-    from .validation import harvey_liu_haircut, n_eff_participation
 
     n_eff_part: float | None = None
     trial_pvals: list[float] | None = None
@@ -707,29 +839,50 @@ def score_backtest(
     n_obs_val = int(dsr.get("n_obs") if dsr_ok else len([r for r in returns if r is not None]))
     hl_haircut = (
         harvey_liu_haircut(
-            float(sr_pp) * math.sqrt(max(int(periods_per_year), 1)),
+            float(sr_pp) * math.sqrt(ppy),
             n_obs_val,
             n_trials_eff,
-            periods_per_year=periods_per_year,
+            periods_per_year=ppy,
             n_obs_effective=n_eff,
             n_eff_participation=n_eff_part if n_eff_part is not None else float(n_trials_eff),
             trial_pvalues=trial_pvals,
         )
-        if n_trials is not None and n_obs_val >= 2
+        if resolved_trials is not None and n_obs_val >= 2
         else None
     )
 
+    verdict_val, deflation_applied = verdict_from_dsr(
+        dsr_val,
+        pbo=pbo_val,
+        n_trials=resolved_trials,
+        n_trials_source=source,
+    )
+    bt_cfg = bt.get("config") if isinstance(bt.get("config"), dict) else {}
+    costs_model = (
+        dict(bt["costs_model"])
+        if isinstance(bt.get("costs_model"), dict)
+        else build_costs_model_spec(
+            mode="simulated" if bt_cfg else "pre_netted_returns",
+            slippage_bps=_f(bt_cfg.get("slippage_bps")),
+            commission_bps=_f(bt_cfg.get("commission_bps")),
+            borrow_bps=_f(bt_cfg.get("borrow_bps")),
+            fill_timing=bt_cfg.get("fill_timing"),
+            adv_source=bt_cfg.get("adv_source"),
+            liquidate_final=bt_cfg.get("liquidate_final"),
+        )
+    )
+
     validation = {
+        "engine_version": current_engine_version(),
+        "dsr_probability": dsr_val,
         "deflated_sharpe": dsr_val,
+        "deflation_applied": deflation_applied,
         "pbo": pbo_val,
         "psr": psr_val,
-        # `null`, NEVER 0 and never a silent 1 -- "not recorded" is a distinct
-        # fact from "I searched one configuration".
-        "n_trials": (int(n_trials) if n_trials is not None else None),
+        "n_trials": (int(resolved_trials) if resolved_trials is not None else None),
         "n_trials_source": source,
         "n_eff_participation": n_eff_part,
-        "verdict": _verdict(dsr_val, pbo_val, source),
-        # A2, autocorrelation-honest significance.
+        "verdict": verdict_val,
         "n_obs": n_obs_val,
         "n_obs_effective": round(n_eff, 1),
         "autocorr_lag1": round(r1, 4),
@@ -737,7 +890,6 @@ def score_backtest(
         "harvey_liu_hurdle": 3.0,
         "passes_harvey_liu": bool(t_stat > 3.0),
         "harvey_liu": hl_haircut,
-        # A3, MinTRL: is the sample long enough to trust the Sharpe? (Bailey/LdP)
         "min_track_record_length": (mintrl.get("min_track_record_length") if mintrl_ok else None),
         "min_track_record_years": (mintrl.get("min_track_record_years") if mintrl_ok else None),
         "track_length_sufficient": (mintrl.get("sufficient") if mintrl_ok else None),
@@ -759,7 +911,6 @@ def score_backtest(
     elif not pbo_ok:
         not_computed["validation.pbo"] = pbo.get("error", "pbo unavailable")
 
-    # A1, Combinatorial OOS stability (opt-in): OOS Sharpe/DSR distribution across purged partitions.
     if cpcv:
         cp = combinatorial_oos_stability(
             returns,
@@ -769,7 +920,7 @@ def score_backtest(
             embargo=cpcv_embargo,
             n_trials=n_trials_eff,
             risk_free_rate=risk_free_rate,
-            periods_per_year=periods_per_year,
+            periods_per_year=ppy,
         )
         if isinstance(cp, dict) and "error" not in cp:
             validation["cpcv"] = cp
@@ -783,23 +934,26 @@ def score_backtest(
     attribution = _attribution(
         bt, returns, prices, factor_returns, regime_series, risk_free_rate, not_computed
     )
-
-    # C2, turnover + net-of-cost vs gross Sharpe (from the sim's cost bookkeeping).
-    costs = _cost_report(bt, perf, risk_free_rate)
+    costs = _cost_report(bt, perf, risk_free_rate, initial_capital=init_cap, periods_per_year=ppy)
 
     record(
         "verdict",
-        "edge requires a recorded n_trials, dsr >= 0.9, and pbo <= 0.2 when pbo is present",
+        "robust requires deflation_applied (recorded n_trials > 1), dsr_probability >= 0.9, and pbo <= 0.2 when pbo is present",
         inputs={
             "n_trials": validation["n_trials"],
             "n_trials_source": source,
-            "deflated_sharpe": dsr_val,
+            "deflation_applied": deflation_applied,
+            "dsr_probability": dsr_val,
             "pbo": pbo_val,
         },
         series={"returns": [float(r) for r in returns if r is not None]},
         result=validation["verdict"],
     )
     return {
+        "engine_version": current_engine_version(),
+        "annualization": build_annualization_spec(ppy),
+        "risk_free": build_risk_free_spec(risk_free_rate, ppy),
+        "costs_model": costs_model,
         "performance": perf,
         "validation": validation,
         "dsr_detail": dsr if dsr_ok else None,

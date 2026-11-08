@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [2.0.0] - 2026-11-08
+
+### Added
+- **Canonical Architecture & Boundary (`ARCHITECTURE.md` — QOS-151):** Formalized the boundary between the pure offline Python research engine (`alphaengine`) and the optional `quantOS` cloud platform (`/api/workspace/sync` and `/api/workspace/pull`). `import alphaengine` makes zero network requests and requires no account.
+- **Unified Verdict Vocabulary (`Verdict` enum — QOS-156):** Standardized statistical verdict classifications across all validation, backtesting, walk-forward, and scoring pipelines to `Verdict.ROBUST` ("robust"), `Verdict.MARGINAL` ("marginal"), `Verdict.LIKELY_NOISE` ("likely_noise"), and `Verdict.UNVERIFIED` ("unverified"). Standardized deprecated 1.x aliases (`edge -> robust`, `inconclusive -> marginal`, `acceptable -> marginal`, `overfit -> likely_noise`, `not_recorded -> unverified`).
+- **Reproducibility Run Manifest (`RunManifest` v1 — QOS-158):** Every run records a canonical JSON `manifest.json` referencing code SHA-256, dataset hashes, parameter hashes, observation horizons, annualization, cash rate, and transaction costs model specifications, with CAS object storage in `.alphaengine/objects/`.
+- **Coded Target-Weights Adapter (`alphaengine.coded` — QOS-154, QOS-121, QOS-123):** Run user-coded Python signals exposing `signal(data_asof=..., params=...)` through engine-verified backtesting with AST static analysis, strict causal `data_asof` slicing (preventing look-ahead leaks), automatic weight validation and normalization, mandatory transaction costs (slippage, commissions, borrow rate, and final liquidation), and 400-combination grid safety caps.
+- **Sync Contract v2 (`src/alphaengine/sync/` — QOS-152, QOS-161–QOS-167):** Formal `sync_contract = 2` schema with JSON Schema export, cursor-based pagination (`[sync_cursors]` in `project.toml`), per-attempt `trial_events` synchronization with UUID `attempt_id` idempotency, canonical `idea_id` and `kill_rule` models, optional metrics schema honesty, and per-item `accepted`/`duplicate`/`rejected` acknowledgements.
+- **Keyring-First Auth & Local Diagnostics (QOS-155, QOS-168, QOS-169):** Keyring storage is prioritized with zero plaintext fallback when keyring is available. Added keyless `ae whoami`, `ae version` (with `--json`), and `ae doctor` commands.
+- **14-Case Wheel Golden Test Suite (`tests/golden/` — QOS-157):** Deterministic end-to-end golden coverage running against the built `.whl` in an isolated site directory outside the repository tree, covering next-open fills, missing open fallbacks, same-close fills, final liquidation drag, short borrow accruals, dated ADV participation caps, volatility floors, misaligned market datasets, failed grid sweep combinations, repeated identical project sweeps, cash-rate consistency, walk-forward purge gaps, single-trial marginal caps, pinned synthetic DSR/PSR/PBO matrices, and coded signal execution.
+- **Free/Firm Line & Boundary Security Guard (QOS-180, QOS-182):** Local workflow commands run 100% free and offline without credentials; CI boundary scanner (scripts/check_public_boundary.py) blocks server-only modules, secrets, or paid client gates.
+- **Effective Trials & Notebook Run Interceptor (QOS-181):** Eigenvalue participation ratio {\\text{eff}} = (\\sum \\lambda_i)^2 / \\sum \\lambda_i^2$ integrated into multiple-testing adjustments; native src/alphaengine/notebook.py hook intercepting ad-hoc backtests and enforcing ledger attempt floors against silent =1$ assertions.
+- **Audited 25-Tool MCP Registry & Gateway Specification (QOS-172, QOS-174, QOS-147):** Single source of truth in src/alphaengine/mcp/registry.py with 22 deterministic in-memory tools and 3 workspace/firm account tools, certified against lphaengine==2.0.0, documented via scripts/gen_gateway_doc.py in ALPHAENGINE_GATEWAY.md and mcp-server/README.md.
+- **Pinned Distribution Digests & Shadow Copy Elimination (QOS-173, QOS-175, QOS-159):** Wheel lphaengine-2.0.0-py3-none-any.whl (sha256:cc83fb5f3fbaf97df613bdcc585b478e59573060776ee28c9de310218507ed1d) and sdist (sha256:9554a47959d55b340b7ae51d81e3ef6240baf3bbf04d7b366b1651effb8a579f) pinned in constraints/engine.txt; AST scanner scripts/check_no_engine_copies.py enforcing zero shadow engine re-implementations outside lphaengine.core.
+
+### Changed
+- **William's Trial Counting Rule (QOS-153):** Every executed trial attempt now counts toward project cumulative trials (`N`). Identical re-runs record lineage via `duplicate_of` while continuing to increment cumulative trials (`9 -> 18`), eliminating silent trial count deflation.
+- **Stated Output Conventions (QOS-156):** All validation and scoring outputs explicitly embed `annualization`, `risk_free`, and `costs_model` convention dictionaries.
+
+### 2.0.0: output changes
+- PBO CSCV golden verdict updated from `overfit` to `likely_noise` per canonical 2.0 `Verdict` enum.
+- Single-trial unrecorded trial counts cap verdicts at `marginal` (previously `inconclusive`).
+- Failed grid combinations in sweeps are preserved in `n_trials` denominator rather than discarded.
+
 ## [1.1.10] - 2026-10-27
 
 ### Fixed

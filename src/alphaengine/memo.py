@@ -1,23 +1,26 @@
 """Seal project runs/ideas into Schema 1.2 Studies, verify studies against data, and export committee memos.
 
-- `seal_from_project(proj, target_ref)` builds a sealed Schema 1.2 `Study` from a
-  run or idea in `.alphaengine/`, including `content_sha256`, `trial_ledger`,
-  `dataset_hashes`, and PBO / PSR / SR0 / MinTRL figures, saving it to
-  `.alphaengine/studies/<id>.json`.
-- `verify_study_file(study_path, data_path=None, proj=None)` verifies the
-  canonical `content_sha256` hash and, when data or a project run record is
-  available, re-computes and checks the figures within tolerance.
+- `seal_from_project(proj, target_ref)` builds a sealed Schema 1.2 `Study`
+  (`seal_version = 2`) from a run or idea in `.alphaengine/`, including
+  `content_sha256`, `trial_ledger`, `manifest`, `dataset_hashes`, and
+  PBO / PSR / SR0 / MinTRL figures.
+- `verify_study_file(study_path, data_path=None, proj=None)` evaluates the three
+  `QOS-158` verification statuses (`hash_verified`, `figures_reproduced`,
+  `provenance_verified`).
 - `generate_memo(proj, target_ref, fmt="md")` generates a committee-style
   research memo (Markdown or PDF) where every reported figure cites its `[run_id]`.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from ._version import __version__
+from ._version import current_engine_version
+from .manifest import build_run_manifest, check_manifest_provenance
 from .project import Project
 from .study import Study, compute_content_sha256, load, save, verify_study_mode
 
@@ -29,15 +32,14 @@ __all__ = [
 
 
 def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
-    """Build and write a sealed Schema 1.2 Study from a `<run>` or `<idea>` in `proj`."""
+    """Build and write a sealed Schema 1.2 (`seal_version=2`) Study from `<run>` or `<idea>`."""
     from .ideas import idea_summary
-    from .ledger import resolve_run
+    from .ledger import cumulative_trials_for, resolve_run
 
     ref = (target_ref or "HEAD").strip()
     run_rec: dict[str, Any] | None = None
     idea_rec: dict[str, Any] | None = None
 
-    # Check if `ref` resolves to an idea first (when it starts with `idea_` or matches an idea)
     try:
         idea_rec = idea_summary(proj, ref)
     except KeyError:
@@ -68,7 +70,6 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
     figs = dict((run_rec or {}).get("figures") or {})
     ds_hashes = list((run_rec or {}).get("dataset_hashes") or [])
     primary_hash = ds_hashes[0] if ds_hashes else ""
-    from .ledger import cumulative_trials_for
 
     _fam_t, proj_cum_trials = cumulative_trials_for(proj)
     n_trials_val = max(
@@ -116,6 +117,19 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
     if ds_hashes:
         notes_parts.append("dataset_hashes=" + ",".join(ds_hashes))
 
+    def_sr = (
+        figs.get("cumulative_deflated_sharpe")
+        if figs.get("cumulative_deflated_sharpe") is not None
+        else figs.get("deflated_sharpe")
+    )
+    dsr_prob = (
+        figs.get("cumulative_dsr_probability")
+        if figs.get("cumulative_dsr_probability") is not None
+        else (figs.get("dsr_probability") if figs.get("dsr_probability") is not None else def_sr)
+    )
+    raw_manifest = (run_rec or {}).get("manifest")
+    manifest_summary = dict(raw_manifest) if isinstance(raw_manifest, Mapping) else None
+
     study = Study(
         label=label,
         n_trials=n_trials_val,
@@ -125,9 +139,9 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
         data_hash=primary_hash,
         data_description=", ".join(ds_hashes),
         verdict=figs.get("cumulative_verdict") or (run_rec or {}).get("verdict"),
-        deflated_sharpe=figs.get("cumulative_deflated_sharpe")
-        if figs.get("cumulative_deflated_sharpe") is not None
-        else figs.get("deflated_sharpe"),
+        dsr_probability=dsr_prob,
+        deflated_sharpe=def_sr,
+        deflation_applied=figs.get("deflation_applied"),
         psr_vs_zero=figs.get("psr_vs_zero"),
         sr0_expected_max=figs.get("cumulative_sr0_expected_max")
         if figs.get("cumulative_sr0_expected_max") is not None
@@ -138,8 +152,11 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
         surface=surf_dict,
         trial_ledger=[
             {
+                "attempt_id": t.get("attempt_id"),
+                "executed_at": t.get("executed_at"),
                 "index": t.get("index"),
                 "params_hash": t.get("params_hash"),
+                "status": t.get("status") or ("failed" if t.get("failed") is not None else "ok"),
                 "n_obs": t.get("n_obs"),
                 "sharpe": t.get("sharpe"),
                 "sharpe_annualized": t.get("sharpe_annualized"),
@@ -149,6 +166,7 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
             for t in all_trials[:512]
         ]
         or None,
+        manifest=manifest_summary,
         notes="; ".join(notes_parts),
         thesis_id=iid or None,
     )
@@ -165,7 +183,16 @@ def verify_study_file(
     proj: Project | None = None,
     tolerance: float = 1e-4,
 ) -> tuple[bool, dict[str, Any]]:
-    """Verify a `study.json` hash and, when data or a project run is available, re-check its figures."""
+    """Verify a `study.json` across all 3 `QOS-158` statuses:
+
+    - ``hash_verified``: `content_sha256` matches `seal_version=2` (`"canonical"`)
+      or 1.x legacy seal (`"legacy_v1"` / `"legacy"`).
+    - ``figures_reproduced`` (also aliased to ``data_verified``): `True`/`False`
+      when re-executed against `--data` or a linked `.alphaengine/` run, or `None`
+      when no data/project run was supplied.
+    - ``provenance_verified``: compares recorded `Study.manifest` against the
+      active runtime environment.
+    """
     p = Path(study_path).expanduser().resolve()
     raw = json.loads(p.read_text(encoding="utf-8"))
     study = load(p)
@@ -174,19 +201,27 @@ def verify_study_file(
     computed_sha = compute_content_sha256(study)
     mode = verify_study_mode(raw) or verify_study_mode(study)
     hash_ok = mode is not None
+
+    prov_ok, prov_diag = check_manifest_provenance(
+        study.manifest if isinstance(study.manifest, Mapping) else None
+    )
+
     report_info: dict[str, Any] = {
         "study_path": str(p),
         "stored_sha256": stored_sha,
         "computed_sha256": computed_sha,
         "hash_verified": hash_ok,
         "verification_mode": mode,
+        "figures_reproduced": None,
         "data_verified": None,
+        "provenance_verified": prov_ok,
+        "provenance": prov_diag,
         "mismatches": {},
     }
     if not hash_ok:
         return False, report_info
 
-    # If `--data <file>` was provided, verify data_hash and recompute performance/DSR figures
+    # 1. If `--data <file>` was provided, verify data_hash and recompute performance/DSR figures
     if data_path is not None:
         from .connectors import load_panel
         from .core import deflated_sharpe, performance_report
@@ -195,7 +230,7 @@ def verify_study_file(
 
         dp = Path(data_path).expanduser().resolve()
         loaded = load_panel(dp)
-        file_sha = __import__("hashlib").sha256(dp.read_bytes()).hexdigest()
+        file_sha = hashlib.sha256(dp.read_bytes()).hexdigest()
         panel_hashes = hash_dataset_any(loaded)
         valid_hashes = {file_sha, *panel_hashes}
         mismatches: dict[str, Any] = {}
@@ -210,9 +245,15 @@ def verify_study_file(
         if rets and len(rets) >= 8:
             repro_perf = performance_report(rets)
             for k, rec_val in (study.performance or {}).items():
-                if (
-                    k in repro_perf
-                    and isinstance(rec_val, (int, float))
+                if k not in repro_perf:
+                    mismatches[f"performance.{k}"] = {
+                        "recorded": rec_val,
+                        "reproduced": None,
+                        "reason": "missing_in_reproduction",
+                    }
+                elif (
+                    isinstance(rec_val, (int, float))
+                    and not isinstance(rec_val, bool)
                     and isinstance(repro_perf[k], (int, float))
                     and abs(float(rec_val) - float(repro_perf[k])) > tolerance
                 ):
@@ -231,24 +272,38 @@ def verify_study_file(
                         "reproduced": repro_dsr["psr_vs_zero"],
                     }
 
-        report_info["data_verified"] = len(mismatches) == 0
+        figs_ok = len(mismatches) == 0
+        cur_man = build_run_manifest(dataset_hashes=panel_hashes)
+        prov_ok_d, prov_diag_d = check_manifest_provenance(
+            study.manifest if isinstance(study.manifest, Mapping) else None,
+            current=cur_man,
+        )
+        report_info["figures_reproduced"] = figs_ok
+        report_info["data_verified"] = figs_ok
+        report_info["provenance_verified"] = prov_ok_d
+        report_info["provenance"] = prov_diag_d
         report_info["mismatches"] = mismatches
-        return len(mismatches) == 0, report_info
+        return figs_ok, report_info
 
-    # If inside a project and notes reference `run_id=...`, rerun that ledger record
+    # 2. If inside a project and notes reference `run_id=...`, rerun that ledger record
     if proj is not None and "run_id=" in (study.notes or ""):
-        from .ledger import rerun_record, resolve_run
+        from .ledger import rerun_record_report, resolve_run
 
         rid = study.notes.split("run_id=", 1)[1].split(";", 1)[0].strip()
         if rid:
             try:
                 run_rec = resolve_run(proj, rid)
-                matched, _repro, mismatches = rerun_record(proj, run_rec)
-                report_info["data_verified"] = matched
-                report_info["mismatches"] = mismatches
-                return matched, report_info
-            except Exception:  # noqa: BLE001
-                pass
+            except KeyError:
+                run_rec = None
+            if run_rec is not None:
+                rerun_rep = rerun_record_report(proj, run_rec)
+                figs_ok = bool(rerun_rep["hash_verified"] and rerun_rep["figures_reproduced"])
+                report_info["figures_reproduced"] = figs_ok
+                report_info["data_verified"] = figs_ok
+                report_info["provenance_verified"] = bool(rerun_rep["provenance_verified"])
+                report_info["provenance"] = rerun_rep["provenance"]
+                report_info["mismatches"] = rerun_rep["mismatches"]
+                return figs_ok, report_info
 
     return True, report_info
 
@@ -264,6 +319,7 @@ def generate_memo(
     from .ideas import idea_summary
     from .ledger import resolve_run
 
+    eng_ver = current_engine_version()
     ref = (target_ref or "HEAD").strip()
     idea_rec: dict[str, Any] | None = None
     try:
@@ -276,7 +332,7 @@ def generate_memo(
         thesis = str(idea_rec.get("thesis") or "")
         family = str(idea_rec.get("family") or "")
         status = str(idea_rec.get("status") or "open")
-        kill_if = str(idea_rec.get("kill_if") or "(none)")
+        kill_rule = str(idea_rec.get("kill_rule") or idea_rec.get("kill_if") or "(none)")
         kill_eval = idea_rec.get("kill_evaluation") or {}
         runs = list(idea_rec.get("linked_runs") or [])
         stem = f"memo_{idea_rec['idea_id']}"
@@ -286,7 +342,7 @@ def generate_memo(
         thesis = f"Run {run_one['run_id']} ({run_one.get('command')})"
         family = str(run_one.get("family") or "")
         status = str(run_one.get("verdict") or "recorded")
-        kill_if = "(none)"
+        kill_rule = "(none)"
         kill_eval = {}
         runs = [run_one]
         stem = f"memo_{run_one['run_id']}"
@@ -300,11 +356,11 @@ def generate_memo(
         f"- **Family:** `{family}`",
         f"- **Status:** `{status}`",
         f"- **Thesis:** {thesis}",
-        f"- **Kill Rule:** `{kill_if}`",
+        f"- **Kill Rule:** `{kill_rule}`",
     ]
     if kill_eval.get("detail"):
         lines.append(f"- **Kill Evaluation:** `{kill_eval.get('status')}` — {kill_eval.get('detail')}")
-    lines.append(f"- **Engine Version:** `alphaengine {__version__}`")
+    lines.append(f"- **Engine Version:** `alphaengine {eng_ver}`")
     lines.append("")
     lines.append("## Recorded Runs & Cited Figures")
     lines.append("")
@@ -320,9 +376,11 @@ def generate_memo(
             nt = r.get("n_trials")
             ct = r.get("cumulative_trials")
             src = str(r.get("n_trials_source") or "")
+            run_eng = str(r.get("engine_version") or eng_ver)
             ds_hashes = ", ".join(str(h)[:16] for h in (r.get("dataset_hashes") or [])) or "none"
             lines.append(f"### Run `{rid}` — `{cmd}` ({ts})")
             lines.append(f"- **Verdict:** `{verd}` `[{rid}]`")
+            lines.append(f"- **Engine Version:** `{run_eng}` `[{rid}]`")
             lines.append(f"- **Trials (this run):** `{nt}` (`{src}`) `[{rid}]`")
             lines.append(f"- **Trials (cumulative):** `{ct}` `[{rid}]`")
             lines.append(f"- **Dataset SHA-256:** `{ds_hashes}` `[{rid}]`")
@@ -369,7 +427,7 @@ def _write_memo_pdf(md_text: str, out_path: Path, *, title: str) -> None:
     with PdfPages(out_path) as pdf:
         info = pdf.infodict()
         info["Title"] = title
-        info["Creator"] = f"alphaengine {__version__}"
+        info["Creator"] = f"alphaengine {current_engine_version()}"
         for page_lines in pages:
             fig = plt.figure(figsize=(8.5, 11))
             y = 0.94

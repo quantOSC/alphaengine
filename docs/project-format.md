@@ -44,6 +44,9 @@ schema_version = "1.0"
 
 [remotes]
 quantos = "https://alpha-backend-production-51df.up.railway.app"
+
+[sync_cursors]
+quantos = "cur_1234567890"
 ```
 
 ---
@@ -64,7 +67,8 @@ The 64-character hex SHA-256 of those bytes determines the file path `.alphaengi
 
 Each `.jsonl` file under `ledger/`, `data/`, and `ideas/` contains one UTF-8 JSON object per line, in chronological order:
 
-- **`ledger/runs.jsonl`**: Every command or pipeline step executed inside the project (`run_id`, `timestamp`, `command`, `idea_id`, `family`, `params_hash`, `dataset_hashes`, `n_trials`, `n_trials_source`, `cumulative_trials`, `figures`, `verdict`, `engine_version`, `object_sha256`).
+- **`ledger/runs.jsonl`**: Every command or pipeline step executed inside the project (`run_id`, `attempt_id`, `timestamp`, `command`, `idea_id`, `family`, `params_hash`, `dataset_hashes`, `n_trials`, `n_trials_source`, `cumulative_trials`, `duplicate_of`, `figures`, `verdict`, `engine_version`, `manifest_sha256`, `object_sha256`).
+  - **William's trial counting rule:** Every executed trial attempt counts toward project cumulative trials. Identical re-runs record lineage via `duplicate_of` while continuing to increment cumulative trials (`9 -> 18`), eliminating silent trial count deflation.
 - **`ledger/trials.jsonl`**: Per-trial entries (`run_id`, `idea_id`, `family`, `index`, `params_hash`, `sharpe`, `failed`, `timestamp`).
 - **`data/datasets.jsonl`**: Registered local datasets (`name`, `path`, `sha256`, `format`, `n_rows`, `start_date`, `end_date`, `columns`, `checks`, `registered_at`, `object_sha256`).
 - **`ideas/ideas.jsonl`**: Hypothesis creation and status updates (`idea_id`, `thesis`, `family`, `kill_if`, `status`, `created_at`, `updated_at`, `object_sha256`).

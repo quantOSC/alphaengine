@@ -487,12 +487,17 @@ class QuantOSApp(App[None]):
             )
             self.desk.keyed = True
         try:
-            from ..auth import save_key
+            from ..auth import PLAINTEXT_FILE_DISCLOSURE, save_credential
 
-            path = save_key(env, value)
+            stored = save_credential(env, value)
+            storage = stored["storage"]
+            path = stored["path"]
             if prov:
-                save_key("ALPHAENGINE_PROVIDER", prov)
-            log.write(f"{env} accepted.  stored at {path}")
+                save_credential("ALPHAENGINE_PROVIDER", prov, prefer_file=(storage == "file"))
+            if storage == "keyring":
+                log.write(f"{env} accepted.  stored in OS keychain.")
+            else:
+                log.write(f"{env} accepted.  stored at {path}. {PLAINTEXT_FILE_DISCLOSURE}")
         except (OSError, ValueError) as exc:
             log.write(f"{env} accepted for this process.  ({exc})")
         follow = _URL_AFTER.get(env)

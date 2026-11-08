@@ -156,7 +156,7 @@ def test_a_range_dash_is_not_a_minus_sign():
 def test_an_unrecorded_trial_count_caps_the_verdict():
     run = Run({"validate": {"n_trials": None, "n_trials_source": "not_recorded", "deflated_sharpe": None}})
     caveats, ceiling = caveats_of(run)
-    assert ceiling == "inconclusive"
+    assert ceiling == "marginal"
     assert any("edge" in c for c in caveats)
 
 
@@ -210,7 +210,7 @@ def test_an_answer_comes_back_with_its_caveats_attached():
     answer = synthesize("did it work?", run, write=echo("The annualised Sharpe is 1.4."))
     assert isinstance(answer, Answer)
     assert answer.text == "The annualised Sharpe is 1.4."
-    assert answer.verdict_ceiling == "inconclusive"
+    assert answer.verdict_ceiling == "marginal"
     assert answer.caveats, "the caveats did not travel with the answer"
 
 

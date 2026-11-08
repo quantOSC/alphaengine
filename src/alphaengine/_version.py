@@ -159,12 +159,76 @@ is what a changed figure costs. The API may still move underneath it.
 # prior-work warnings, export `[run_id]`-cited committee memos, discover
 # `alphaengine.plugins` entry points, watch datasets, monitor live drift, and
 # sync with quantOS on opt-in (`ae push` / `ae pull`).
-from importlib.metadata import version as _pkg_version
+from __future__ import annotations
 
-__version__ = _pkg_version("alphaengine")
+import json
+import os
+import sys
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import distribution as _pkg_distribution
+from typing import Any
+
+__version__ = "2.0.0"
+
+#: Wire contract version for `ae push` / `ae pull` (`alphaengine.sync.schema`).
+SYNC_CONTRACT_VERSION = 2
+
+#: Schema version for `RunManifest` (`alphaengine.manifest`).
+MANIFEST_VERSION = 1
 
 #: Default workflow/ingest API host until a dedicated qosai.app API host exists.
 #: Overridable via ``ALPHAENGINE_API_URL`` (or ``QUANTOS_API_URL``).
 DEFAULT_API_URL = "https://alpha-backend-production-51df.up.railway.app"
 API_URL_ENV = "ALPHAENGINE_API_URL"
 LEGACY_API_URL_ENV = "QUANTOS_API_URL"
+
+
+def current_engine_version() -> str:
+    """Return the active runtime ``alphaengine.__version__``.
+
+    Reads ``alphaengine.__version__`` from ``sys.modules`` when imported so
+    runtime inspection and monkeypatch tests always propagate to downstream
+    result objects, envelopes, manifests, citations, and sync payloads.
+    """
+    pkg = sys.modules.get("alphaengine")
+    live = getattr(pkg, "__version__", None) if pkg is not None else None
+    if isinstance(live, str) and live.strip():
+        return live
+    return __version__
+
+
+def _discover_wheel_sha256() -> str | None:
+    """Return the installed wheel SHA-256 when known (env override or PEP 610)."""
+    env_sha = os.environ.get("ALPHAENGINE_WHEEL_SHA256", "").strip().lower()
+    if env_sha.startswith("sha256:"):
+        env_sha = env_sha.split(":", 1)[1].strip()
+    if len(env_sha) == 64 and all(c in "0123456789abcdef" for c in env_sha):
+        return env_sha
+    try:
+        dist = _pkg_distribution("alphaengine")
+        raw = dist.read_text("direct_url.json")
+        if raw:
+            info = json.loads(raw)
+            hashes = (info.get("archive_info") or {}).get("hashes") or {}
+            sha = str(hashes.get("sha256") or "").strip().lower()
+            if len(sha) == 64 and all(c in "0123456789abcdef" for c in sha):
+                return sha
+            legacy_hash = str((info.get("archive_info") or {}).get("hash") or "").strip().lower()
+            if legacy_hash.startswith("sha256="):
+                cand = legacy_hash.split("=", 1)[1].strip()
+                if len(cand) == 64 and all(c in "0123456789abcdef" for c in cand):
+                    return cand
+    except (PackageNotFoundError, OSError, ValueError, TypeError):
+        return None
+    return None
+
+
+def engine_info() -> dict[str, Any]:
+    """Return runtime engine metadata for health checks, manifests, and CLI."""
+    return {
+        "engine_version": current_engine_version(),
+        "wheel_sha256": _discover_wheel_sha256(),
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "sync_contract": SYNC_CONTRACT_VERSION,
+        "manifest_version": MANIFEST_VERSION,
+    }

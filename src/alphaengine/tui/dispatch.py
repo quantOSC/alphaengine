@@ -172,6 +172,21 @@ def submit(desk: Desk, line: str) -> bool:
         dir_arg = rest_tokens[0] if rest_tokens else None
         cmd_init(_ns(desk, directory=dir_arg, name=name_arg))
         return False
+    if verb == "version":
+        from ..cli import cmd_version
+
+        cmd_version(_ns(desk))
+        return False
+    if verb == "whoami":
+        from ..cli import cmd_whoami
+
+        cmd_whoami(_ns(desk))
+        return False
+    if verb == "doctor":
+        from ..cli import cmd_doctor
+
+        cmd_doctor(_ns(desk))
+        return False
     if verb == "demo":
         from ..cli import cmd_demo
 
@@ -210,12 +225,23 @@ def submit(desk: Desk, line: str) -> bool:
             toks = shlex.split(rest)
         except ValueError:
             toks = rest.split()
-        kill_arg, toks = pop_flag(toks, "--kill-if")
+        kill_rule_arg, toks = pop_flag(toks, "--kill-rule")
+        kill_if_arg, toks = pop_flag(toks, "--kill-if")
         fam_arg, toks = pop_flag(toks, "--family")
         act = toks[0] if toks else "list"
         tgt = toks[1] if len(toks) > 1 else None
         st = toks[2] if len(toks) > 2 else None
-        cmd_idea(_ns(desk, action=act, target=tgt, state=st, kill_if=kill_arg or "", family=fam_arg))
+        cmd_idea(
+            _ns(
+                desk,
+                action=act,
+                target=tgt,
+                state=st,
+                kill_rule=kill_rule_arg or "",
+                kill_if=kill_if_arg or "",
+                family=fam_arg,
+            )
+        )
         return False
     if verb in ("thesis", "theses"):
         _thesis(desk, rest)
@@ -324,8 +350,19 @@ def submit(desk: Desk, line: str) -> bool:
         toks = rest.split()
         dry = "--dry-run" in toks
         share = "--share-series" in toks
+        show_p = "--show-payload" in toks
+        yes_p = "--yes" in toks or True
         rem = [t for t in toks if not t.startswith("--")]
-        cmd_push(_ns(desk, remote_name=rem[0] if rem else "quantos", dry_run=dry, share_series=share))
+        cmd_push(
+            _ns(
+                desk,
+                remote_name=rem[0] if rem else "quantos",
+                dry_run=dry,
+                share_series=share,
+                show_payload=show_p,
+                yes=yes_p,
+            )
+        )
         return False
     if verb == "pull":
         from ..cli import cmd_pull

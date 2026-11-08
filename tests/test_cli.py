@@ -884,7 +884,7 @@ def test_the_caveats_reach_the_screen_with_it(capsys):
     out = capsys.readouterr().out
     assert "1.4" in out
     assert "trial count" in out.lower()
-    assert "inconclusive" in out
+    assert "marginal" in out
 
 
 def test_an_invented_figure_is_named_rather_than_swallowed(capsys):

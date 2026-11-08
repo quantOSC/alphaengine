@@ -9,22 +9,10 @@ re-typing it.
 Everything here is opt-in and explicit. Importing `alphaengine` still makes no
 network call; nothing reports unless you call this function.
 
-WHAT TRAVELS, AND WHAT CANNOT.
-    A study carries what was TRIED and what came BACK — the trial count and how
-    it was obtained, a content hash of the data, the verdict, the shape of the
-    neighbourhood, the performance figures. It does NOT carry your returns, your
-    prices or your parameter grid.
-
-    That is enforced rather than promised. `_guard` walks the whole payload and
-    refuses anything series-shaped by LENGTH, not by field name, so a renamed
-    key cannot smuggle one through. The same guard runs on the server; the
-    duplication is the design, because a check that only runs on the client is
-    not a check, and one that only runs on the server tells you too late and
-    without naming the field.
-
-NO NEW DEPENDENCIES. urllib from the standard library, not requests. Two runtime
-dependencies is a feature of this package and a third is a cost paid by every
-user of the offline half, who did not ask for this.
+WHAT TRAVELS, AND WHAT CANNOT (`QOS-161`).
+    `_payload(study)` emits the exact `sealed_study_projection(study)` plus
+    `content_sha256`, so the payload received by the server hashes to the exact
+    same `content_sha256` sealed on disk (`best_params` never travels).
 """
 
 from __future__ import annotations
@@ -35,6 +23,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from .._version import API_URL_ENV, DEFAULT_API_URL, LEGACY_API_URL_ENV
+from .schema import compute_content_sha256, sealed_study_projection
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .schema import Study
@@ -53,26 +42,12 @@ class ReportError(RuntimeError):
     """Reporting failed. The study on your disk is untouched."""
 
 
-# The longest list that is still a set of figures rather than a series. Held
-# here rather than imported from `client` so that `alphaengine.study` never
-# pulls the client in — a guarantee `test_client.py` enforces, and one worth
-# more than not repeating fifteen lines.
-#
-# DUPLICATED ON PURPOSE, WHICH MEANS IT CAN DRIFT BY ACCIDENT. Raised with
-# `client.executor.MAX_FIGURE_LIST` on 2026-08-08; `test_client.py` holds the
-# two equal so the deliberate duplication cannot become an accidental
-# disagreement.
+# Held equal with `client.executor.MAX_FIGURE_LIST` (`test_client.py` enforces parity).
 MAX_FIGURE_LIST = 512
 
 
 def _guard(payload: dict[str, Any]) -> dict[str, Any]:
-    """Refuse to send anything series-shaped, whatever it is called.
-
-    Keyed on LENGTH, not on field name, so renaming a key does not get a series
-    past it. Mirrored on the server on purpose: a check that runs only on the
-    client is not a check, and one that runs only on the server tells you too
-    late and without naming the field.
-    """
+    """Refuse to send anything series-shaped, whatever it is called."""
 
     def walk(node: Any, path: str) -> None:
         if isinstance(node, dict):
@@ -97,42 +72,22 @@ def _payload(
     assignment_id: str | None = None,
     thesis_id: str | None = None,
 ) -> dict[str, Any]:
-    """The subset that crosses. Explicit rather than `asdict()`.
+    """Return the exact `sealed_study_projection(study)` + `content_sha256` (`QOS-161`).
 
-    An allowlist, not a denylist: a field added to `Study` later does not start
-    leaving the machine because somebody forgot to exclude it. `best_params` is
-    absent on purpose — the grid is frequently bigger IP than the returns.
+    `best_params` is never included. If `assignment_id` or `thesis_id` are
+    overridden at report time, the projection's `content_sha256` is recomputed
+    over the updated projection so server-side verification still matches.
     """
-    out: dict[str, Any] = {
-        "label": study.label or "(untitled study)",
-        "schema_version": study.schema_version,
-        "engine_version": study.engine_version,
-        "n_trials": study.n_trials,
-        "n_trials_source": study.n_trials_source,
-        "grid_keys": list(study.grid_keys) if study.grid_keys is not None else [],
-        "n_failed_trials": study.n_failed_trials,
-        "data_hash": study.data_hash,
-        "data_description": study.data_description,
-        "verdict": study.verdict,
-        "deflated_sharpe": study.deflated_sharpe,
-        "psr_vs_zero": study.psr_vs_zero,
-        "sr0_expected_max": study.sr0_expected_max,
-        "min_track_record_length": study.min_track_record_length,
-        "selection": study.selection,
-        "surface": study.surface or {},
-        "performance": study.performance or {},
-        "notes": study.notes,
-        "content_sha256": study.content_sha256,
-        "assignment_id": assignment_id if assignment_id is not None else study.assignment_id,
-        "thesis_id": thesis_id if thesis_id is not None else study.thesis_id,
-    }
-    if study.process:
-        out["process"] = study.process
-    if study.charts:
-        out["charts"] = study.charts
-    if study.trial_ledger and len(study.trial_ledger) <= MAX_FIGURE_LIST:
-        out["trial_ledger"] = study.trial_ledger
-    return {k: v for k, v in out.items() if v is not None}
+    proj = sealed_study_projection(study)
+    overridden = False
+    if assignment_id is not None and assignment_id != proj.get("assignment_id"):
+        proj["assignment_id"] = assignment_id
+        overridden = True
+    if thesis_id is not None and thesis_id != proj.get("thesis_id"):
+        proj["thesis_id"] = thesis_id
+        overridden = True
+    sha = compute_content_sha256(proj) if (overridden or not study.content_sha256) else study.content_sha256
+    return {**proj, "content_sha256": sha}
 
 
 def report(
@@ -144,33 +99,11 @@ def report(
     assignment_id: str | None = None,
     thesis_id: str | None = None,
 ) -> dict[str, Any]:
-    """Send a study to your workspace and return what the server recorded.
-
-    Args:
-        study: the study to send. Unchanged by this call.
-        api_key: a portal-issued `ae_live_*` key. Falls back to the
-            ``QUANTOS_API_KEY`` environment variable, which is where a key
-            belongs — a key pasted into a notebook is a key committed to git.
-        base_url: the platform to report to. Falls back to ``ALPHAENGINE_API_URL``,
-            ``QUANTOS_API_URL``, then to the public API. Set it for a self-hosted or VPC deployment.
-        timeout: seconds before giving up.
-        assignment_id: optional portal assignment id this study answers.
-        thesis_id: optional portal thesis id this study was run against.
-
-    Raises:
-        ReportError: no key, the key was rejected, or the server could not be
-            reached. Never raises for a study that is merely unimpressive — a
-            `likely_noise` verdict is a result and reports like any other.
-
-    A failure here costs you nothing. The study is already on your disk; this is
-    a copy travelling, not a handoff.
-    """
-    # Imported here, not at module scope: `import alphaengine` must touch no
-    # networking code at all, which `test_smoke.py` enforces.
+    """Send a study to your workspace and return what the server recorded."""
     import urllib.error
     import urllib.request
 
-    from ..auth import FirmKeyError, redact_secrets, require_firm_key
+    from ..auth import FirmKeyError, redact_secrets, require_firm_key, validate_clean_url
 
     try:
         key = require_firm_key(api_key)
@@ -180,6 +113,11 @@ def report(
     root = (base_url or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL).rstrip(
         "/"
     )
+    try:
+        validate_clean_url(root)
+    except ValueError as exc:
+        raise ReportError(str(exc)) from exc
+
     body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
 
     req = urllib.request.Request(
@@ -198,10 +136,6 @@ def report(
             recorded: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
             return recorded
     except urllib.error.HTTPError as e:
-        # The body is best-effort context for the message. A server that
-        # answers with HTML, an empty body, or nothing at all still has to
-        # produce a usable error rather than a second exception on top of the
-        # first, which is why the failure to read it is suppressed entirely.
         detail = ""
         with contextlib.suppress(Exception):
             detail = redact_secrets(str(json.loads(e.read().decode("utf-8")).get("detail", "")))

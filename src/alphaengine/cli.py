@@ -121,8 +121,11 @@ DEFAULT_BASE_URL = DEFAULT_API_URL
 
 
 def resolve_api_url(explicit: str | None = None) -> str:
-    """Resolve the API URL: explicit argument, ``ALPHAENGINE_API_URL``, ``QUANTOS_API_URL``, then default."""
-    return explicit or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL
+    """Resolve and validate the API URL (`explicit`, `ALPHAENGINE_API_URL`, `QUANTOS_API_URL`, or default)."""
+    from .auth import validate_clean_url
+
+    raw = explicit or os.environ.get(_ENV_API_URL) or os.environ.get(_ENV_URL) or DEFAULT_BASE_URL
+    return validate_clean_url(raw)
 
 
 #: WHERE A RUN IS READ. The CLI printed a bare run id and left the reader to
@@ -920,14 +923,7 @@ def _explain_offline(url: str) -> None:
 
 def cmd_init(args: argparse.Namespace) -> int:
     """Create `.alphaengine/` in the target directory (or current directory)."""
-    from .auth import FirmKeyError, require_firm_key
     from .project import PROJECT_FORMAT_VERSION, init_project
-
-    try:
-        require_firm_key(getattr(args, "key", None))
-    except FirmKeyError as exc:
-        say(red(str(exc)))
-        return 2
 
     target = getattr(args, "directory", None) or "."
     name = getattr(args, "name", None)
@@ -940,11 +936,253 @@ def cmd_init(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_version(_args: argparse.Namespace) -> int:
-    from ._version import __version__
+def cmd_version(args: argparse.Namespace) -> int:
+    import platform
 
-    say(f"alphaengine {__version__}")
+    from ._version import engine_info
+    from .envelope import emit_json
+
+    info = dict(engine_info())
+    info["python_version"] = platform.python_version()
+    if getattr(args, "json_out", False):
+        emit_json(info)
+        return 0
+    wheel_txt = str(info.get("wheel_sha256") or "editable/source")
+    say(
+        f"alphaengine {info['engine_version']}  {dim(DOT)}  "
+        f"sync_contract={info['sync_contract']}  {dim(DOT)}  "
+        f"manifest_version={info['manifest_version']}  {dim(DOT)}  "
+        f"wheel_sha256={wheel_txt}  {dim(DOT)}  "
+        f"python={info['python_version']}"
+    )
     return 0
+
+
+def cmd_whoami(args: argparse.Namespace) -> int:
+    """Display credential source, masked prefix, keyring status, and remote URL (`QOS-155`)."""
+    from .auth import credential_status
+    from .envelope import emit_json
+    from .project import find_project
+    from .sync import resolve_remote_url
+
+    status = credential_status()
+    proj = find_project()
+    try:
+        remote_url = resolve_remote_url(proj, explicit_url=getattr(args, "url", None))
+    except ValueError as exc:
+        say(red(str(exc)))
+        return 2
+
+    payload: dict[str, Any] = {
+        **status,
+        "remote_url": remote_url,
+        "project": proj.name if proj is not None else None,
+    }
+    if getattr(args, "json_out", False):
+        emit_json(payload)
+        return 0
+
+    q = status["quantos"]
+    q_line = (
+        f"{q['source']} ({q['masked']})"
+        if q.get("configured")
+        else "none (run `alphaengine login` or set QUANTOS_API_KEY)"
+    )
+    kr_txt = "available (OS keychain)" if status["keyring_available"] else "unavailable (0600 file fallback)"
+    say("")
+    say(f"  {bold('whoami')}")
+    say(f"    {dim('quantos key')}      {q_line}")
+    say(f"    {dim('keyring')}          {kr_txt}")
+    say(f"    {dim('remote url')}       {remote_url}")
+    if proj is not None:
+        say(f"    {dim('project')}          {proj.name} ({proj.dot_dir})")
+    lit_providers = [
+        f"{k}: {v['source']} ({v['masked']})"
+        for k, v in sorted((status.get("providers") or {}).items())
+        if v.get("configured")
+    ]
+    if lit_providers:
+        say(f"    {dim('model keys')}       {', '.join(lit_providers)}")
+    if status.get("legacy_file_migration_recommended"):
+        say(
+            yellow("    note: ")
+            + "plaintext credentials.json exists while OS keyring is available; "
+            + "run `alphaengine login` to migrate or `alphaengine logout --purge` to clear."
+        )
+    say("")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Keyless diagnostic check for local project, keyring, credentials, and `/api/health` (`QOS-169`)."""
+    import urllib.error
+    import urllib.request
+
+    from ._version import SYNC_CONTRACT_VERSION, engine_info
+    from .auth import credential_status, redact_secrets
+    from .envelope import emit_json
+    from .project import find_project
+    from .sync import resolve_remote_url
+
+    info = engine_info()
+    creds = credential_status()
+    proj = find_project()
+    checks: list[dict[str, Any]] = []
+    exit_code = 0
+
+    checks.append(
+        {
+            "name": "engine",
+            "ok": True,
+            "detail": (
+                f"alphaengine=={info['engine_version']} "
+                f"(sync_contract={info['sync_contract']}, wheel_sha256={info['wheel_sha256'] or 'editable'})"
+            ),
+        }
+    )
+
+    checks.append(
+        {
+            "name": "credentials",
+            "ok": True,
+            "detail": (
+                f"quantos={creds['quantos']['source']}, "
+                f"keyring={'available' if creds['keyring_available'] else 'unavailable'}"
+            ),
+            "warning": (
+                "Plaintext credentials.json present alongside usable OS keyring."
+                if creds.get("legacy_file_migration_recommended")
+                else None
+            ),
+        }
+    )
+
+    if proj is not None:
+        try:
+            runs = proj.read_jsonl("ledger/runs.jsonl", strict=True)
+            trials = proj.read_jsonl("ledger/trials.jsonl", strict=True)
+            checks.append(
+                {
+                    "name": "workspace",
+                    "ok": True,
+                    "detail": f"{proj.dot_dir} ({len(runs)} runs, {len(trials)} trial events)",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            checks.append({"name": "workspace", "ok": False, "detail": str(exc)})
+            exit_code = 1
+    else:
+        checks.append({"name": "workspace", "ok": True, "detail": "no local .alphaengine/ in current tree"})
+
+    explicit_url = getattr(args, "url", None)
+    should_probe = bool(explicit_url) or (proj is not None and bool(proj.remotes))
+    try:
+        remote_url = resolve_remote_url(proj, explicit_url=explicit_url)
+    except ValueError as exc:
+        if getattr(args, "json_out", False):
+            emit_json({"ok": False, "error": str(exc), "checks": checks})
+        else:
+            say(red(str(exc)))
+        return 2
+
+    remediation: str | None = None
+    server_info: dict[str, Any] = {"probed": should_probe, "url": remote_url}
+
+    if should_probe:
+        health_url = f"{remote_url}/api/health"
+        req = urllib.request.Request(
+            health_url,
+            headers={"Accept": "application/json", "User-Agent": f"alphaengine/{info['engine_version']}"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                raw_health = json.loads(resp.read().decode("utf-8") or "{}")
+            srv_eng = raw_health.get("engine_version") or (raw_health.get("engine") or {}).get(
+                "engine_version"
+            )
+            srv_sc = raw_health.get("sync_contract") or (raw_health.get("engine") or {}).get("sync_contract")
+            server_info["reachable"] = True
+            server_info["engine_version"] = srv_eng
+            server_info["sync_contract"] = srv_sc
+
+            drift_reasons: list[str] = []
+            if srv_sc is not None and int(srv_sc) != SYNC_CONTRACT_VERSION:
+                drift_reasons.append(
+                    f"sync_contract mismatch (local={SYNC_CONTRACT_VERSION}, server={srv_sc})"
+                )
+            if srv_eng is not None and str(srv_eng) != str(info["engine_version"]):
+                drift_reasons.append(
+                    f"engine_version mismatch (local={info['engine_version']}, server={srv_eng})"
+                )
+            if drift_reasons:
+                exit_code = 1
+                if srv_eng:
+                    remediation = f'pip install "alphaengine=={srv_eng}"'
+                else:
+                    remediation = 'pip install --upgrade "alphaengine>=2.0.0"'
+                checks.append(
+                    {
+                        "name": "server_parity",
+                        "ok": False,
+                        "detail": "; ".join(drift_reasons),
+                        "remediation": remediation,
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "name": "server_parity",
+                        "ok": True,
+                        "detail": (
+                            f"{health_url} matches engine_version={info['engine_version']} "
+                            f"& sync_contract={SYNC_CONTRACT_VERSION}"
+                        ),
+                    }
+                )
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            server_info["reachable"] = False
+            detail_msg = redact_secrets(str(getattr(exc, "reason", exc)))
+            if explicit_url:
+                exit_code = 1
+                checks.append(
+                    {
+                        "name": "server_parity",
+                        "ok": False,
+                        "detail": f"Could not reach {health_url}: {detail_msg}",
+                    }
+                )
+            else:
+                checks.append(
+                    {
+                        "name": "server_parity",
+                        "ok": True,
+                        "detail": f"Skipped offline remote ({health_url} unreachable)",
+                    }
+                )
+
+    report: dict[str, Any] = {
+        "ok": exit_code == 0,
+        "engine": info,
+        "server": server_info,
+        "checks": checks,
+        "remediation": remediation,
+    }
+    if getattr(args, "json_out", False):
+        emit_json(report)
+        return exit_code
+
+    say("")
+    say(f"  {bold('doctor')}")
+    for chk in checks:
+        mark = green("ok") if chk["ok"] else red("fail")
+        say(f"    [{mark}] {bold(str(chk['name']).ljust(16))}  {chk['detail']}")
+        if chk.get("warning"):
+            say(f"         {yellow('warning:')} {chk['warning']}")
+        if chk.get("remediation"):
+            say(f"         {yellow('fix:')}     {chk['remediation']}")
+    say("")
+    return exit_code
 
 
 def cmd_workflows(args: argparse.Namespace) -> int:
@@ -1853,11 +2091,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         say(f"{bold(args.workflow)} {dim(DOT + ' ' + where)}")
         args._header_printed = True
 
-    try:
-        require_firm_key(getattr(args, "key", None))
-    except FirmKeyError as exc:
-        say(red(str(exc)))
-        return 2
+    if getattr(args, "url", None):
+        try:
+            require_firm_key(getattr(args, "key", None))
+        except FirmKeyError as exc:
+            say(red(str(exc)))
+            return 2
 
     proj = find_project()
     if wf_str.lower().endswith((".yaml", ".yml")):
@@ -1925,6 +2164,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             inputs[k] = v
     if args.label:
         inputs["label"] = args.label
+
+    if getattr(args, "signal", None):
+        return _cmd_run_coded_signal(args, proj, data=data, inputs=inputs)
 
     # Inside a local `.alphaengine/` project, or when `--json` / `--stdin` is passed
     # and no remote `--url` was specified, execute locally after `require_firm_key()`.
@@ -2256,6 +2498,7 @@ def _run_local_in_project(
             repro_spec=repro_spec,
             returns_for_deflation=returns_col,
             already_counted_in_ledger=bool(stdin_in and upstream_env and upstream_env.get("n_trials")),
+            code_target=backtest_fn,
         )
         if trial_rows:
             record_trials(
@@ -2281,6 +2524,7 @@ def _run_local_in_project(
             cumulative_trials=int(rec["cumulative_trials"]),
             project_trials=int(rec["project_trials"]),
             context=pipe_ctx,
+            manifest=rec.get("manifest"),
         )
     else:
         env = build_envelope(
@@ -2301,6 +2545,13 @@ def _run_local_in_project(
 
     if not getattr(args, "quiet", False):
         say(f"  {green(ON)}  {bold(wf)}  {dim(DOT)}  {env['run_id']}")
+        if getattr(args, "project", None) and backtest_fn is not None:
+            say(
+                dim(
+                    "  execution mode: user-owned P&L (not engine-verified; "
+                    "pass --signal for causal engine-verified weight simulation)"
+                )
+            )
         _render_artifact({"figures": {"local": env["figures"]}})
         say("")
         src_note = dim(
@@ -2312,6 +2563,115 @@ def _run_local_in_project(
                 f"  {dim('deflated Sharpe')}       {env['figures']['deflated_sharpe']}  "
                 f"{dim('(' + str(env.get('verdict') or '') + ')')}"
             )
+    return 0
+
+
+def _cmd_run_coded_signal(
+    args: argparse.Namespace,
+    proj: Any,
+    *,
+    data: Any,
+    inputs: dict[str, Any],
+) -> int:
+    """Execute a `coded.run_signal` causal weight backtest locally (`QOS-154`)."""
+    from .coded import CodedSignalError, check_signal_module, run_signal
+    from .envelope import build_envelope, emit_json
+
+    sig_target = str(getattr(args, "signal", "") or "").strip()
+    json_out = bool(getattr(args, "json_out", False))
+
+    check = check_signal_module(sig_target)
+    if not check.ok:
+        diags = [
+            {
+                "code": d.code,
+                "what": d.what,
+                "line": d.line,
+                "col": d.col,
+                "remediation": d.remediation,
+            }
+            for d in check.diagnostics
+        ]
+        if json_out:
+            emit_json({"ok": False, "error": "static_check_failed", "diagnostics": diags, "n_trials": 0})
+        else:
+            say(red(f"Coded signal static validation failed ({sig_target}) - 0 trials recorded:"))
+            for d in check.diagnostics:
+                say(f"  {d.format()}")
+        return 2
+
+    if data is None:
+        from .demo_universe import data as demo_u
+
+        if json_out:
+            data = demo_u
+        else:
+            say(red("`--signal` requires a price panel (`--data prices.csv`)."))
+            return 2
+
+    if not isinstance(data, dict) or not data:
+        say(red("`--signal` expects a multi-asset or keyed price panel (`{ticker: series}`)."))
+        return 2
+
+    params_in = inputs.get("params") if isinstance(inputs.get("params"), dict) else None
+    grid_in = inputs.get("grid") if isinstance(inputs.get("grid"), dict) else None
+    slippage = float(inputs.get("slippage_bps", 5.0))
+    commission = float(inputs.get("commission_bps", 1.0))
+    borrow = float(inputs.get("borrow_bps", 0.0))
+
+    try:
+        res = run_signal(
+            sig_target,
+            prices=data,
+            data=data,
+            params=params_in,
+            grid=grid_in,
+            slippage_bps=slippage,
+            commission_bps=commission,
+            borrow_bps=borrow,
+            idea_id=getattr(args, "idea", None),
+            family=getattr(args, "family", None),
+        )
+    except CodedSignalError as exc:
+        if json_out:
+            emit_json({"ok": False, "error": str(exc)})
+        else:
+            say(red(str(exc)))
+        return 2
+
+    env = build_envelope(
+        command="coded_signal",
+        figures=res["figures"],
+        verdict=res["verdict"],
+        run_id=res.get("run_id"),
+        idea_id=res.get("idea_id"),
+        family=str(res.get("family") or "coded"),
+        dataset_hashes=res.get("dataset_hashes"),
+        n_trials=res.get("n_trials"),
+        n_trials_source=str(res.get("n_trials_source") or "coded_single_run"),
+        cumulative_trials=int(res.get("cumulative_trials") or res.get("run_n_trials") or 1),
+        project_trials=int(res.get("project_trials") or res.get("run_n_trials") or 1),
+        manifest=res.get("manifest"),
+    )
+    if json_out:
+        emit_json(env)
+        return 0
+
+    if not getattr(args, "quiet", False):
+        say(
+            f"  {green(ON)}  {bold('coded_signal')}  {dim(DOT)}  "
+            f"{env['run_id']}  {dim('[engine-verified causal weights]')}"
+        )
+        _render_artifact({"figures": {"coded": env["figures"]}})
+        say("")
+        say(
+            f"  {dim('trials (cumulative)')}   {env['cumulative_trials']}  "
+            f"{dim('(' + env['n_trials_source'] + ', this run ' + str(res.get('run_n_trials')) + ')')}"
+        )
+        say(
+            f"  {dim('dsr_probability')}       {env['figures'].get('dsr_probability')}  "
+            f"{dim('(' + str(env.get('verdict') or '') + ')')}"
+        )
     return 0
 
 
@@ -3331,7 +3691,12 @@ def cmd_commands(args: argparse.Namespace) -> int:
         width = max(len(_signature(c)) for c in rows)
         for c in rows:
             where = "" if c.scope == "both" else dim(f"  ({c.scope})")
-            say(f"    {_signature(c).ljust(width)}   {dim(c.purpose)}{where}")
+            loc_tag = {
+                "local": "[local]",
+                "remote": "[remote]",
+                "hybrid": "[local/remote]",
+            }.get(getattr(c, "locality", "local"), "[local]")
+            say(f"    {_signature(c).ljust(width)}   {dim(loc_tag.ljust(15))} {dim(c.purpose)}{where}")
         say("")
 
     # THE DOORS GET THEIR OWN BLOCK. They are flags rather than verbs, and they
@@ -3754,16 +4119,25 @@ _KEY_PROMPTS: dict[str, tuple[str, str]] = {
 }
 
 
-def enter_key(which: str) -> bool:
-    """Prompt for a key and hold it FOR THIS SESSION ONLY.
+def enter_key(which: str, *, prefer_file: bool = False) -> bool:
+    """Prompt for a key and hold it for this session, or persist keyring-first (`QOS-155`).
 
-    Persistence is optional and lives in `auth.save_key` (mode 0600, user config
-    dir). QuantOS never holds the key.
+    When OS keyring is usable and `prefer_file=False`, writes ONLY to the OS keychain
+    (never creating `credentials.json`). Plaintext `0600` `credentials.json` is written
+    only when no keyring backend is usable or `--no-keyring` is passed, with explicit disclosure.
     """
     import getpass
 
+    from .auth import (
+        PLAINTEXT_FILE_DISCLOSURE,
+        has_legacy_file_credentials,
+        keyring_available,
+        migrate_file_to_keyring,
+        save_credential,
+    )
+
     if which not in _KEY_PROMPTS:
-        say(red(f"unknown key {which!r} — try: {', '.join(_KEY_PROMPTS)}"))
+        say(red(f"unknown key {which!r} - try: {', '.join(_KEY_PROMPTS)}"))
         return False
     env, what = _KEY_PROMPTS[which]
 
@@ -3787,19 +4161,10 @@ def enter_key(which: str) -> bool:
             os.environ.pop("ALPHAENGINE_MODEL", None)
     say(green(f"  {env} accepted."))
 
-    # STAY SIGNED IN. Re-pasting a key into every new terminal is not security,
-    # it is friction — and friction is what puts `QUANTOS_API_KEY=ae_live_...`
-    # into a shell profile or a committed .env, which is strictly worse than a
-    # mode-0600 file this tool manages and can delete.
+    kr_ok = keyring_available() and not prefer_file
+    hint = "(stores in OS keychain)" if kr_ok else "(no OS keyring; writes mode-0600 file)"
     try:
-        keep = (
-            input(
-                bold("  Stay signed in on this machine? ")
-                + dim("[Y/n]  (yes writes a 0600 file to your user profile) ")
-            )
-            .strip()
-            .lower()
-        )
+        keep = input(bold("  Stay signed in on this machine? ") + dim(f"[Y/n]  {hint} ")).strip().lower()
     except (EOFError, KeyboardInterrupt):
         say("")
         keep = "n"
@@ -3807,20 +4172,27 @@ def enter_key(which: str) -> bool:
         say(dim("  Held for this session only."))
         return True
 
-    from .auth import save_key
-
     try:
-        path = save_key(env, value)
+        stored = save_credential(env, value, prefer_file=prefer_file)
         if which != "quantos":
             from .model import provider_for_env
 
             prov = provider_for_env(env)
             if prov:
-                save_key("ALPHAENGINE_PROVIDER", prov)
+                save_credential("ALPHAENGINE_PROVIDER", prov, prefer_file=prefer_file)
+        if stored["storage"] == "keyring" and has_legacy_file_credentials():
+            mig = migrate_file_to_keyring(delete_file=True)
+            if mig.get("deleted_file"):
+                say(dim("  Migrated legacy credentials.json to OS keychain and removed plaintext file."))
     except OSError as exc:
-        say(yellow(f"  Could not write the credentials file ({exc}). Session only."))
+        say(yellow(f"  Could not persist credential ({exc}). Session only."))
         return True
-    say(green("  Signed in.") + dim(f"  {path}  (mode 0600, `logout` to remove)"))
+
+    if stored["storage"] == "keyring":
+        say(green("  Signed in.") + dim("  stored in OS keychain (`logout` to remove)"))
+    else:
+        say(yellow(f"  {PLAINTEXT_FILE_DISCLOSURE}: {stored['path']}"))
+        say(green("  Signed in.") + dim(f"  {stored['path']}  (mode 0600, `logout --purge` to remove)"))
     return True
 
 
@@ -4243,11 +4615,21 @@ def build_parser() -> argparse.ArgumentParser:
     ("unrecognized arguments") points at the wrong thing entirely.
     """
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--url", help=f"workflow server (default ${_ENV_URL} or the public API)")
-    common.add_argument("--key", help=f"portal-issued ae_live_ key (default ${_ENV_KEY})")
-    common.add_argument("--project", help="module exposing `data` and `backtest_fn`, e.g. research.momentum")
+    common.add_argument("--url", help=f"workflow server (default ${_ENV_API_URL} or the public API)")
+    common.add_argument("--key", help=argparse.SUPPRESS)
     common.add_argument(
-        "--data", help="a local CSV: wide (date,AAPL,MSFT), long (date,symbol,close), or one series"
+        "--signal",
+        help=(
+            "coded signal module or .py file exposing signal(data_asof=..., params=...) (engine-verified P&L)"
+        ),
+    )
+    common.add_argument(
+        "--project",
+        help="module exposing `data` and `backtest_fn` (user-owned P&L, not engine-verified)",
+    )
+    common.add_argument(
+        "--data",
+        help="a local CSV or Parquet: wide (date,AAPL,MSFT), long (date,symbol,close), or one series",
     )
     common.add_argument(
         "--universe", help="name or id of a universe registered in the portal; narrows --data to it"
@@ -4259,7 +4641,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument(
         "--share-series",
         action="store_true",
-        help="opt in to uploading full series on run traces (or set ALPHAENGINE_SHARE_SERIES=1)",
+        help="opt in to uploading full series on run/sync payloads (or set ALPHAENGINE_SHARE_SERIES=1)",
     )
     common.add_argument("--idea", help="attach the run or filter the log to a local hypothesis id")
     common.add_argument("--family", help="strategy or experiment family for cumulative trial counting")
@@ -4267,7 +4649,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         dest="json_out",
         action="store_true",
-        help="emit a versioned v1.0 JSON result envelope to stdout",
+        help="emit structured machine-readable JSON to stdout",
     )
     common.add_argument(
         "--stdin",
@@ -4285,27 +4667,49 @@ def build_parser() -> argparse.ArgumentParser:
             "you opt in. Research tool, not investment advice."
         ),
     )
+    p.add_argument(
+        "--version",
+        dest="show_version",
+        action="store_true",
+        help="print engine_version, sync_contract, and wheel_sha256",
+    )
     sub = p.add_subparsers(dest="command")
     ini = sub.add_parser(
         "init",
         parents=[common],
-        help="initialize a local .alphaengine/ research project in this directory",
+        help="[local] initialize a local .alphaengine/ research project in this directory",
     )
     ini.add_argument("directory", nargs="?", default=None, help="directory to initialize (default .)")
     ini.add_argument("--name", help="project name (defaults to directory name)")
-    sub.add_parser("version", parents=[common], help="print the version")
-    sub.add_parser("workflows", parents=[common], help="list what the server offers")
-    sub.add_parser("demo", parents=[common], help="run the built-in example, offline")
+    sub.add_parser(
+        "version",
+        parents=[common],
+        help="[local] print engine_version, wheel_sha256, sync_contract, and Python version",
+    )
+    sub.add_parser(
+        "whoami",
+        parents=[common],
+        help="[local] show credential source, masked prefix, keyring status, and remote URL",
+    )
+    sub.add_parser(
+        "doctor",
+        parents=[common],
+        help="[local/remote] check local project, keyring, credentials, and server version parity",
+    )
+    sub.add_parser("workflows", parents=[common], help="[remote] list what the server offers")
+    sub.add_parser("demo", parents=[common], help="[local] run the built-in example, offline")
     pr = sub.add_parser(
-        "process", parents=[common], help="fit a named process to a series and stress it, offline"
+        "process", parents=[common], help="[local] fit a named process to a series and stress it, offline"
     )
     pr.add_argument("dgp", nargs="?", default="gbm", help="ou, gbm, jump, or garch (default gbm)")
-    rl = sub.add_parser("runs", parents=[common], help="your own week: what ran, and what it decided")
+    rl = sub.add_parser(
+        "runs", parents=[common], help="[remote] your own week: what ran, and what it decided"
+    )
     rl.add_argument("--limit", type=int, default=25, help="how many to show (default 25)")
     lg_cmd = sub.add_parser(
         "log",
         parents=[common],
-        help="list local project ledger runs, trial counts, and verdicts",
+        help="[local] list local project ledger runs, trial counts, and verdicts",
     )
     lg_cmd.add_argument("--since", help="filter to runs on or after YYYY-MM-DD")
     lg_cmd.add_argument("--verdict", help="filter by verdict")
@@ -4313,26 +4717,26 @@ def build_parser() -> argparse.ArgumentParser:
     sh_cmd = sub.add_parser(
         "show",
         parents=[common],
-        help="inspect one recorded project run, its hashes, trials, and figures",
+        help="[local] inspect one recorded project run, its hashes, trials, and figures",
     )
     sh_cmd.add_argument("run_ref", metavar="run", nargs="?", default="HEAD", help="run id, prefix, or HEAD")
     df_cmd = sub.add_parser(
         "diff",
         parents=[common],
-        help="compare data, parameter, trial, and figure changes between two runs",
+        help="[local] compare data, parameter, trial, and figure changes between two runs",
     )
     df_cmd.add_argument("run_a", metavar="run-a", help="first run id or prefix")
     df_cmd.add_argument("run_b", metavar="run-b", help="second run id or prefix")
     rr_cmd = sub.add_parser(
         "rerun",
         parents=[common],
-        help="reproduce a recorded project run from its inputs and check figures",
+        help="[local] re-execute a recorded project run and check hash, figure, and provenance parity",
     )
     rr_cmd.add_argument("run_ref", metavar="run", nargs="?", default="HEAD", help="run id, prefix, or HEAD")
     wt_cmd = sub.add_parser(
         "watch",
         parents=[common],
-        help="re-run a declarative pipeline whenever a registered dataset file changes",
+        help="[local] re-run a declarative pipeline whenever a registered dataset file changes",
     )
     wt_cmd.add_argument("pipeline_path", metavar="pipeline.yaml", help="path to pipeline.yaml")
     wt_cmd.add_argument(
@@ -4350,7 +4754,7 @@ def build_parser() -> argparse.ArgumentParser:
     dt_cmd = sub.add_parser(
         "data",
         parents=[common],
-        help="register, inspect, and trace local CSV/Parquet datasets",
+        help="[local] register, inspect, and trace local CSV/Parquet datasets",
     )
     dt_cmd.add_argument("action", nargs="?", default="list", help="add, list, show, or lineage")
     dt_cmd.add_argument("target", nargs="?", default=None, help="file path, dataset name, or run id")
@@ -4363,25 +4767,28 @@ def build_parser() -> argparse.ArgumentParser:
     id_cmd = sub.add_parser(
         "idea",
         parents=[common],
-        help="create, list, update, and evaluate local research hypotheses",
+        help="[local] create, list, update, and evaluate local research hypotheses",
     )
     id_cmd.add_argument("action", nargs="?", default="list", help="new, list, status, or show")
     id_cmd.add_argument("target", nargs="?", default=None, help="thesis text or idea id")
     id_cmd.add_argument("state", nargs="?", default=None, help="new status: open, testing, killed, promoted")
-    id_cmd.add_argument("--kill-if", dest="kill_if", default="", help="kill rule, e.g. 'DSR < 0.9'")
-    sub.add_parser("gaps", parents=[common], help="what your record says is unanswered")
-    tn = sub.add_parser("tonight", parents=[common], help="what would run unattended, without running it")
+    id_cmd.add_argument("--kill-rule", dest="kill_rule", default="", help="kill rule, e.g. 'DSR < 0.9'")
+    id_cmd.add_argument("--kill-if", dest="kill_if", default="", help=argparse.SUPPRESS)
+    sub.add_parser("gaps", parents=[common], help="[remote] what your record says is unanswered")
+    tn = sub.add_parser(
+        "tonight", parents=[common], help="[remote] what would run unattended, without running it"
+    )
     tn.add_argument("--budget", type=int, default=0, help="how many runs a night is worth")
-    lo = sub.add_parser("logout", parents=[common], help="remove stored credentials")
+    lo = sub.add_parser("logout", parents=[common], help="[local] remove stored credentials")
     lo.add_argument(
         "--purge",
         action="store_true",
-        help="remove ~/.config/alphaengine/credentials.json and clean up its config directory",
+        help="clear OS keyring, remove credentials.json, and unset keys in this process",
     )
     rm_cmd = sub.add_parser(
         "remote",
         parents=[common],
-        help="configure or list remote sync endpoints in .alphaengine/project.toml",
+        help="[local] configure or list remote sync endpoints in .alphaengine/project.toml",
     )
     rm_cmd.add_argument("action", nargs="?", default="list", help="add or list")
     rm_cmd.add_argument("remote_name", nargs="?", default="quantos", help="remote name (default quantos)")
@@ -4389,34 +4796,54 @@ def build_parser() -> argparse.ArgumentParser:
     ps_cmd = sub.add_parser(
         "push",
         parents=[common],
-        help="sync sealed studies, ledger runs, and ideas to quantOS",
+        help="[remote] sync studies, runs, ideas, and trial_events to quantOS (sync_contract=2)",
     )
     ps_cmd.add_argument("remote_name", nargs="?", default="quantos", help="remote name (default quantos)")
     ps_cmd.add_argument(
         "--dry-run",
         dest="dry_run",
         action="store_true",
-        help="print the exact sync payload without making a network call",
+        help="print the sync boundary preview without opening a network socket",
+    )
+    ps_cmd.add_argument(
+        "--show-payload",
+        dest="show_payload",
+        action="store_true",
+        help="include the redacted sync_contract=2 JSON payload in the push preview",
+    )
+    ps_cmd.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        help="skip interactive confirmation prompt on push",
     )
     pl_cmd = sub.add_parser(
         "pull",
         parents=[common],
-        help="pull team runs and ideas from quantOS into the local ledger (read-only)",
+        help="[remote] pull team runs, ideas, and studies from quantOS via cursor pagination",
     )
     pl_cmd.add_argument("remote_name", nargs="?", default="quantos", help="remote name (default quantos)")
+    pl_cmd.add_argument("--since", default=None, help="explicit pull cursor override")
+    pl_cmd.add_argument("--limit", type=int, default=100, help="items per page (default 100)")
     sub.add_parser(
         "shell",
         parents=[common],
-        help="open the interactive research shell with project completion and status",
+        help="[local] open the interactive research shell with project completion and status",
     )
     plg = sub.add_parser(
         "plugin",
         parents=[common],
-        help="list installed loader, method, and report template plugins",
+        help="[local] list installed loader, method, and report template plugins",
     )
     plg.add_argument("action", nargs="?", default="list", help="list (default)")
-    lg = sub.add_parser("login", parents=[common], help="sign in, or enter a model key")
+    lg = sub.add_parser("login", parents=[common], help="[local] sign in, or enter a model key")
     lg.add_argument("provider", nargs="?", default="quantos", help="quantos, anthropic, openai, ...")
+    lg.add_argument(
+        "--no-keyring",
+        dest="no_keyring",
+        action="store_true",
+        help="store credential in mode-0600 credentials.json instead of OS keyring",
+    )
     sub.add_parser("models", parents=[common], help="which model providers this machine can use")
     tr = sub.add_parser("trace", parents=[common], help="local model/run events for a run")
     tr.add_argument("run_id", nargs="?", help="run id; defaults to the latest local dump")
@@ -4604,6 +5031,7 @@ def cmd_process(args: argparse.Namespace, data: Any = None) -> int:
                 "seed": 7,
                 "data_object_sha256": data_sha,
             },
+            code_target=dgp_stress,
         )
         if not json_out:
             say("")
@@ -4683,7 +5111,13 @@ def cmd_demo(args: argparse.Namespace) -> int:
             n_trials_source="derived_from_grid",
             figures={
                 "n_trials": v["n_trials"],
+                "n_ok_trials": v.get("n_ok_trials"),
+                "n_failed_trials": v.get("n_failed_trials"),
                 "n_trials_source": v["n_trials_source"],
+                "n_eff_participation": v.get("n_eff_participation"),
+                "deflated_sharpe_at_n_eff": v.get("deflated_sharpe_at_n_eff"),
+                "n_eff_diagnostic_note": v.get("n_eff_diagnostic_note"),
+                "dsr_probability": v.get("dsr_probability"),
                 "deflated_sharpe": v.get("deflated_sharpe"),
                 "psr_vs_zero": v.get("psr_vs_zero"),
                 "sr0_expected_max": v.get("sr0_expected_max"),
@@ -4695,6 +5129,7 @@ def cmd_demo(args: argparse.Namespace) -> int:
             family=getattr(args, "family", None) or "demo",
             repro_spec={"kind": "demo"},
             returns_for_deflation=res.matrix[:, res.best.index].tolist(),
+            code_target=demo.backtest_fn,
         )
         record_trials(
             proj,
@@ -4739,12 +5174,16 @@ def cmd_trace(args: argparse.Namespace) -> int:
     run_id = getattr(args, "run_id", None)
     root = data_dir() / "runs"
     path = None
-    if run_id:
-        path = root / f"{run_id}.jsonl"
-    elif root.exists():
-        dumps = sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        path = dumps[0] if dumps else None
-    if path is None or not path.exists():
+    try:
+        if run_id:
+            path = root / f"{run_id}.jsonl"
+        elif root.exists():
+            dumps = sorted(root.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+            path = dumps[0] if dumps else None
+        if path is None or not path.exists():
+            say(dim("  no local run events yet"))
+            return 0
+    except OSError:
         say(dim("  no local run events yet"))
         return 0
     say(dim(f"  {path}"))
@@ -4759,19 +5198,21 @@ def cmd_trace(args: argparse.Namespace) -> int:
 
 
 def cmd_logout(args: argparse.Namespace) -> int:
-    """Delete the stored credentials. The file goes, not a flag inside it."""
+    """Delete stored credentials from OS keyring and `credentials.json` (`QOS-155`)."""
     from .auth import clear_stored, config_path
 
     purge = bool(getattr(args, "purge", False))
     target = config_path()
+    had_file = target.is_file()
     if clear_stored(purge=purge):
         action = "Purged." if purge else "Signed out."
-        say(green(action) + dim(f"  removed {target}"))
+        where = f"OS keyring and {target}" if had_file else "OS keyring"
+        say(green(action) + dim(f"  removed {where}"))
     else:
         action = (
-            "Purged — no credentials file was stored."
+            "Purged - no stored credentials were found."
             if purge
-            else "Not signed in — there was nothing stored."
+            else "Not signed in - there was nothing stored."
         )
         say(dim(action))
     say(dim("Any key exported in your parent shell is untouched; unset it there."))
@@ -4781,11 +5222,12 @@ def cmd_logout(args: argparse.Namespace) -> int:
 def cmd_login(args: argparse.Namespace) -> int:
     """Sign in from a shell, without opening a session first."""
     which = getattr(args, "provider", None) or "quantos"
-    return 0 if enter_key(which) else 2
+    prefer_file = bool(getattr(args, "no_keyring", False))
+    return 0 if enter_key(which, prefer_file=prefer_file) else 2
 
 
 def cmd_seal(args: argparse.Namespace) -> int:
-    """Write canonical content_sha256 to a study file, or seal a project `<run|idea>`."""
+    """Write canonical `seal_version=2` `content_sha256` to a study file, or seal `<run|idea>`."""
     import json
 
     from .project import find_project
@@ -4808,7 +5250,7 @@ def cmd_seal(args: argparse.Namespace) -> int:
 
             mode = verify_study_mode(raw_disk) or verify_study_mode(study)
             if mode is not None:
-                mode_label = " (legacy)" if mode == "legacy" else ""
+                mode_label = " (legacy)" if mode in ("legacy", "legacy_v1") else ""
                 say(green(f"Verified{mode_label}.") + f"  {existing}  " + dim(str(path)))
                 return 0
             say(
@@ -4818,9 +5260,9 @@ def cmd_seal(args: argparse.Namespace) -> int:
             )
             return 1
 
-        study.content_sha256 = computed
+        study.seal()
         save(study, path)
-        say(green("Sealed.") + f"  {computed}  " + dim(str(path)))
+        say(green("Sealed.") + f"  {study.content_sha256}  " + dim(str(path)))
         return 0
 
     # If `target` is not an existing file, check if we are inside a project and sealing a `<run|idea>`
@@ -4847,7 +5289,7 @@ def cmd_seal(args: argparse.Namespace) -> int:
 
 
 def cmd_verify(args: argparse.Namespace) -> int:
-    """Verify a `study.json` hash and optionally re-check figures against `--data` or the project ledger."""
+    """Verify a `study.json` across `hash_verified`, `figures_reproduced`, and `provenance_verified`."""
     from .envelope import emit_json
     from .memo import verify_study_file
     from .project import find_project
@@ -4892,12 +5334,25 @@ def cmd_verify(args: argparse.Namespace) -> int:
             say(f"    {k}: recorded {m['recorded']} != reproduced {m['reproduced']}")
         return 1
 
-    mode_label = " (legacy)" if info.get("verification_mode") == "legacy" else ""
-    extra = " + figures reproduced" if info.get("data_verified") is True else ""
+    mode_label = " (legacy)" if info.get("verification_mode") in ("legacy", "legacy_v1") else ""
+    figs_status = info.get("figures_reproduced")
+    prov_status = info.get("provenance_verified")
+    extra_parts: list[str] = ["hash_verified=true"]
+    if figs_status is not None:
+        extra_parts.append(f"figures_reproduced={str(bool(figs_status)).lower()}")
+    else:
+        extra_parts.append("figures_reproduced=unchecked")
+    if prov_status is not None:
+        extra_parts.append(f"provenance_verified={str(bool(prov_status)).lower()}")
+    extra = "  [" + ", ".join(extra_parts) + "]"
     say(
         green(f"Verified{mode_label}.")
         + f"  {info.get('stored_sha256') or info['computed_sha256']}  {dim(str(path) + extra)}"
     )
+    if prov_status is False:
+        prov = info.get("provenance") or {}
+        for d_key, d_val in sorted((prov.get("drift") or {}).items()):
+            say(yellow(f"    provenance drift ({d_key}): {d_val}"))
     return 0
 
 
@@ -5123,8 +5578,9 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 
 def cmd_rerun(args: argparse.Namespace) -> int:
-    """Re-execute a recorded project run from its stored inputs and check figures."""
-    from .ledger import rerun_record, resolve_run
+    """Re-execute a recorded run (`hash_verified`, `figures_reproduced`, `provenance_verified`)."""
+    from .envelope import emit_json
+    from .ledger import rerun_record_report, resolve_run
     from .project import find_project
 
     proj = find_project()
@@ -5138,16 +5594,46 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         say(red(str(exc)))
         return 2
     try:
-        matched, _repro_figs, mismatches = rerun_record(proj, r)
+        rep = rerun_record_report(proj, r)
     except Exception as exc:  # noqa: BLE001
         say(red(f"Could not rerun {r.get('run_id')}: {exc}"))
         return 2
 
-    if matched:
-        say(green("Reproduced.") + f"  {r.get('run_id')} ({r.get('command')}) — all recorded figures match.")
+    hash_ok = bool(rep.get("hash_verified"))
+    figs_ok = bool(rep.get("figures_reproduced"))
+    prov_ok = bool(rep.get("provenance_verified"))
+    all_ok = hash_ok and figs_ok and prov_ok
+
+    if getattr(args, "json_out", False):
+        emit_json(rep)
+        return 0 if all_ok else 1
+
+    status_tag = (
+        f"[hash_verified={str(hash_ok).lower()}, "
+        f"figures_reproduced={str(figs_ok).lower()}, "
+        f"provenance_verified={str(prov_ok).lower()}]"
+    )
+    if all_ok:
+        say(
+            green("Reproduced.")
+            + f"  {r.get('run_id')} ({r.get('command')}) - all recorded figures match.  {dim(status_tag)}"
+        )
         return 0
 
-    say(red("Figure drift detected.") + f"  {r.get('run_id')} ({r.get('command')})")
+    if hash_ok and figs_ok and not prov_ok:
+        say(
+            yellow("Provenance drift detected.")
+            + f"  {r.get('run_id')} ({r.get('command')})  {dim(status_tag)}"
+        )
+        prov = rep.get("provenance") or {}
+        for d_key, d_val in sorted((prov.get("drift") or {}).items()):
+            say(f"    {d_key}: {d_val}")
+        return 1
+
+    say(red("Figure drift detected.") + f"  {r.get('run_id')} ({r.get('command')})  {dim(status_tag)}")
+    for he in rep.get("hash_errors") or []:
+        say(f"    hash: {he}")
+    mismatches = rep.get("mismatches") or {}
     for k, m in sorted(mismatches.items()):
         say(f"    {k}: recorded {m['recorded']} != reproduced {m['reproduced']}")
     return 1
@@ -5288,12 +5774,13 @@ def cmd_idea(args: argparse.Namespace) -> int:
 
     if action == "new":
         if not target:
-            say(red('idea new requires a thesis: alphaengine idea new "<thesis>" [--kill-if "<rule>"]'))
+            say(red('idea new requires a thesis: alphaengine idea new "<thesis>" [--kill-rule "<rule>"]'))
             return 2
+        kill_rule_val = str(getattr(args, "kill_rule", "") or getattr(args, "kill_if", "") or "")
         rec = create_idea(
             proj,
             str(target),
-            kill_if=str(getattr(args, "kill_if", "") or ""),
+            kill_rule=kill_rule_val,
             family=getattr(args, "family", None),
         )
         if json_out:
@@ -5304,8 +5791,9 @@ def cmd_idea(args: argparse.Namespace) -> int:
             + f"  {bold(str(rec['idea_id']))}  {dim(DOT)}  family {rec['family']}  "
             + dim(f"status {rec['status']}")
         )
-        if rec.get("kill_if"):
-            say(f"  {dim('kill_if')}  {rec['kill_if']}")
+        kr_disp = rec.get("kill_rule") or rec.get("kill_if")
+        if kr_disp:
+            say(f"  {dim('kill_rule')}  {kr_disp}")
         return 0
 
     if action == "list":
@@ -5365,7 +5853,10 @@ def cmd_idea(args: argparse.Namespace) -> int:
             f"{dim(DOT)}  family {summary['family']}"
         )
         say(f"    {dim('thesis')}              {summary['thesis']}")
-        say(f"    {dim('kill_if')}             {summary.get('kill_if') or '(none)'}")
+        say(
+            f"    {dim('kill_rule')}            "
+            f"{summary.get('kill_rule') or summary.get('kill_if') or '(none)'}"
+        )
         say(f"    {dim('linked_runs')}         {summary['n_linked_runs']}")
         say(f"    {dim('cumulative_trials')}   {summary['cumulative_trials']}")
         say(f"    {dim('current_verdict')}     {summary.get('current_verdict') or 'none'}")
@@ -5390,7 +5881,7 @@ def cmd_idea(args: argparse.Namespace) -> int:
 
 
 def cmd_remote(args: argparse.Namespace) -> int:
-    """Configure or list remotes in `.alphaengine/project.toml`."""
+    """Configure or list remotes in `.alphaengine/project.toml` (`QOS-155`)."""
     from .project import find_project
     from .sync import remote_add
 
@@ -5402,7 +5893,11 @@ def cmd_remote(args: argparse.Namespace) -> int:
     if action == "add":
         r_name = str(getattr(args, "remote_name", None) or "quantos")
         r_url = getattr(args, "remote_url", None) or getattr(args, "url", None)
-        resolved = remote_add(proj, name=r_name, url=r_url)
+        try:
+            resolved = remote_add(proj, name=r_name, url=r_url)
+        except ValueError as exc:
+            say(red(str(exc)))
+            return 2
         say(green("Remote configured.") + f"  {bold(r_name)} {ARROW} {resolved}")
         return 0
     if action == "list":
@@ -5417,12 +5912,11 @@ def cmd_remote(args: argparse.Namespace) -> int:
 
 
 def cmd_push(args: argparse.Namespace) -> int:
-    """Push sealed studies, allowlisted runs, and ideas to quantOS (or `--dry-run`)."""
-    import json
-
+    """Push sealed studies, runs, ideas, and `trial_events` to quantOS (`sync_contract=2`)."""
+    from .envelope import emit_json
     from .project import find_project
     from .study.report import ReportError
-    from .sync import push_workspace
+    from .sync import SyncError, push_workspace
 
     proj = find_project()
     if proj is None:
@@ -5430,67 +5924,162 @@ def cmd_push(args: argparse.Namespace) -> int:
         return 2
 
     dry_run = bool(getattr(args, "dry_run", False))
+    show_payload = bool(getattr(args, "show_payload", False))
+    json_out = bool(getattr(args, "json_out", False))
+    yes = bool(getattr(args, "yes", False))
+    share_series = bool(getattr(args, "share_series", False))
     r_name = str(getattr(args, "remote_name", None) or "quantos")
+
+    try:
+        preview_res = push_workspace(
+            proj,
+            remote_name=r_name,
+            api_key=getattr(args, "key", None),
+            base_url=getattr(args, "url", None),
+            share_series=share_series,
+            dry_run=True,
+            show_payload=show_payload,
+        )
+    except SyncError as exc:
+        if json_out:
+            emit_json({"ok": False, "error": str(exc), "exit_code": exc.exit_code})
+        else:
+            say(red(str(exc)))
+        return int(exc.exit_code)
+    except (ReportError, ValueError) as exc:
+        if json_out:
+            emit_json({"ok": False, "error": str(exc), "exit_code": 2})
+        else:
+            say(red(str(exc)))
+        return 2
+
+    if dry_run:
+        if json_out:
+            emit_json(preview_res)
+        else:
+            say(str(preview_res["preview"]))
+        return 0
+
+    if not json_out and not getattr(args, "quiet", False):
+        say(str(preview_res["preview"]))
+
+    if sys.stdin.isatty() and sys.stdout.isatty() and not yes and not json_out:
+        try:
+            ans = input("  Proceed with push? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            say("")
+            return 2
+        if ans not in ("y", "yes"):
+            say(dim("  Push cancelled."))
+            return 0
+
     try:
         res = push_workspace(
             proj,
             remote_name=r_name,
             api_key=getattr(args, "key", None),
             base_url=getattr(args, "url", None),
-            share_series=bool(getattr(args, "share_series", False)),
-            dry_run=dry_run,
+            share_series=share_series,
+            dry_run=False,
+            show_payload=show_payload,
         )
+    except SyncError as exc:
+        if json_out:
+            emit_json({"ok": False, "error": str(exc), "exit_code": exc.exit_code})
+        else:
+            say(red(str(exc)))
+        return int(exc.exit_code)
     except (ReportError, ValueError) as exc:
-        say(red(str(exc)))
+        if json_out:
+            emit_json({"ok": False, "error": str(exc), "exit_code": 2})
+        else:
+            say(red(str(exc)))
         return 2
 
-    if dry_run:
-        sys.stdout.write(json.dumps(res["payload"], indent=2, sort_keys=True, default=str) + "\n")
-        sys.stdout.flush()
-        return 0
+    if json_out:
+        emit_json(res)
+        return int(res.get("exit_code", 0))
 
-    if res.get("fallback"):
-        say(
-            yellow("  /api/workspace/sync returned 404; fell back to /api/me/runs/ingest")
-            + f" ({res.get('n_studies')} study(s) ingested)."
-        )
-    else:
+    counts = res.get("counts") or {}
+    exit_code = int(res.get("exit_code", 0))
+    ack_summary = (
+        f"accepted={counts.get('accepted', 0)}, "
+        f"duplicate={counts.get('duplicate', 0)}, "
+        f"rejected={counts.get('rejected', 0)}"
+    )
+    if exit_code == 0:
         say(
             green("Pushed.")
             + f"  {res.get('path_used')}  {dim(DOT)}  "
-            + f"{res.get('n_studies')} studies, {res.get('n_runs')} runs, {res.get('n_ideas')} ideas"
+            + f"{res.get('n_studies')} studies, {res.get('n_runs')} runs, "
+            + f"{res.get('n_ideas')} ideas, {res.get('n_trial_events')} trial_events  "
+            + dim(f"({ack_summary})")
         )
-    return 0
+    else:
+        header = yellow("Partial rejection.") if exit_code == 2 else red("All items rejected.")
+        say(f"{header}  {res.get('path_used')}  {dim('(' + ack_summary + ')')}")
+        for rej in res.get("rejected_items") or []:
+            reason_txt = rej.get("reason") or "rejected"
+            say(f"  {red('rejected')} {rej.get('type')}:{rej.get('local_id')} - {reason_txt}")
+    return exit_code
 
 
 def cmd_pull(args: argparse.Namespace) -> int:
-    """Pull team runs and ideas from quantOS into the local ledger (`read_only: True`)."""
+    """Pull team runs, ideas, and studies from quantOS via cursor pagination (`QOS-162`/`QOS-168`)."""
+    from .envelope import emit_json
     from .project import find_project
     from .study.report import ReportError
-    from .sync import pull_workspace
+    from .sync import SyncError, pull_workspace
 
     proj = find_project()
     if proj is None:
         say(red("Not inside a local project. Run `alphaengine init` first."))
         return 2
     r_name = str(getattr(args, "remote_name", None) or "quantos")
+    json_out = bool(getattr(args, "json_out", False))
     try:
         res = pull_workspace(
             proj,
             remote_name=r_name,
             api_key=getattr(args, "key", None),
             base_url=getattr(args, "url", None),
+            since=getattr(args, "since", None),
+            limit=int(getattr(args, "limit", 100) or 100),
         )
-    except ReportError as exc:
-        say(red(str(exc)))
+    except SyncError as exc:
+        if json_out:
+            emit_json({"ok": False, "error": str(exc), "exit_code": exc.exit_code})
+        else:
+            say(red(str(exc)))
+        return int(exc.exit_code)
+    except (ReportError, ValueError) as exc:
+        if json_out:
+            emit_json({"ok": False, "error": str(exc), "exit_code": 2})
+        else:
+            say(red(str(exc)))
         return 2
 
+    if json_out:
+        emit_json(res)
+        return int(res.get("exit_code", 0))
+
+    counts = res.get("counts") or {}
+    r_c = counts.get("runs") or {}
+    i_c = counts.get("ideas") or {}
+    s_c = counts.get("studies") or {}
     say(
         green("Pulled.")
         + f"  {res.get('path_used')}  {dim(DOT)}  "
-        + f"{res.get('pulled_runs')} runs, {res.get('pulled_ideas')} ideas (marked read-only)"
+        + f"runs (new={r_c.get('new', 0)}, updated={r_c.get('updated', 0)}, "
+        + f"skipped={r_c.get('skipped', 0)}, failed={r_c.get('failed', 0)}), "
+        + f"ideas (new={i_c.get('new', 0)}, updated={i_c.get('updated', 0)}, "
+        + f"skipped={i_c.get('skipped', 0)}, failed={i_c.get('failed', 0)}), "
+        + f"studies (new={s_c.get('new', 0)}, updated={s_c.get('updated', 0)}, "
+        + f"skipped={s_c.get('skipped', 0)}, failed={s_c.get('failed', 0)})"
     )
-    return 0
+    say(f"  {dim('cursor')}  {res.get('cursor') or '(none)'}")
+    say(f"  {dim('note')}    {res.get('read_only_notice')}")
+    return int(res.get("exit_code", 0))
 
 
 def cmd_shell(args: argparse.Namespace) -> int:
@@ -5596,29 +6185,16 @@ def _cmd_monitor_live(args: argparse.Namespace, proj: Any) -> int:
     return 0
 
 
-_GATED_COMMANDS: frozenset[str] = frozenset(
+# Network-only portal commands. Per QOS-180 ("Make everything local free in 2.0;
+# firm key checked server-side only"), all local commands (init, log, show, diff,
+# rerun, idea, data, seal, verify, shell, plugin, remote, report memo, and local
+# run/validate) are 100% free and offline.
+_NETWORK_GATED_COMMANDS: frozenset[str] = frozenset(
     {
-        "run",
-        *QUESTION_VERBS.keys(),
         "workflows",
         "runs",
         "gaps",
         "tonight",
-        "init",
-        "log",
-        "show",
-        "diff",
-        "rerun",
-        "watch",
-        "data",
-        "idea",
-        "seal",
-        "report",
-        "remote",
-        "push",
-        "pull",
-        "plugin",
-        "shell",
     }
 )
 
@@ -5631,15 +6207,26 @@ def main(argv: list[str] | None = None) -> int:
     # The environment always wins over the file — CI, a VPC deploy and a
     # colleague's machine all set the variable, and a stale file silently
     # overriding it is a bug that takes a day to find.
-    from .auth import FirmKeyError, apply_stored, require_firm_key
+    from .auth import KEY_FLAG_WARNING, FirmKeyError, apply_stored, require_firm_key
     from .model import NoModelConfigured
+    from .sync.schema import EXIT_AUTH_ERROR
+
+    raw_argv = list(argv) if argv is not None else sys.argv[1:]
+    if any(tok == "--key" or tok.startswith("--key=") for tok in raw_argv):
+        sys.stderr.write(KEY_FLAG_WARNING + "\n")
+        sys.stderr.flush()
 
     apply_stored()
 
     args = build_parser().parse_args(argv)
+    if getattr(args, "show_version", False):
+        return cmd_version(args)
+
     handlers: dict[str | None, Callable[[argparse.Namespace], int]] = {
         "init": cmd_init,
         "version": cmd_version,
+        "whoami": cmd_whoami,
+        "doctor": cmd_doctor,
         "workflows": cmd_workflows,
         "runs": cmd_runs,
         "log": cmd_log,
@@ -5673,17 +6260,31 @@ def main(argv: list[str] | None = None) -> int:
         handlers[verb] = cmd_run
     handler = handlers[args.command]
     try:
-        if args.command in _GATED_COMMANDS:
-            if (
-                args.command in ("run", *QUESTION_VERBS.keys())
-                and getattr(args, "url", None)
-                and not getattr(args, "json_out", False)
-            ):
+        if args.command in ("push", "pull") and not (
+            args.command == "push" and getattr(args, "dry_run", False)
+        ):
+            try:
+                require_firm_key(getattr(args, "key", None))
+            except FirmKeyError as exc:
+                if getattr(args, "json_out", False):
+                    from .envelope import emit_json
+
+                    emit_json({"ok": False, "error": str(exc), "exit_code": EXIT_AUTH_ERROR})
+                else:
+                    say(red(str(exc)))
+                return EXIT_AUTH_ERROR
+        elif args.command in _NETWORK_GATED_COMMANDS:
+            require_firm_key(getattr(args, "key", None))
+        elif args.command in ("run", *QUESTION_VERBS.keys()) and getattr(args, "url", None):
+            if not getattr(args, "json_out", False):
                 say(f"{bold(args.workflow)} {dim(DOT + ' ' + resolve_api_url(args.url))}")
                 args._header_printed = True
             require_firm_key(getattr(args, "key", None))
         return handler(args)
     except FirmKeyError as exc:
+        say(red(str(exc)))
+        return 2
+    except ValueError as exc:
         say(red(str(exc)))
         return 2
     except KeyboardInterrupt:

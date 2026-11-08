@@ -1,0 +1,135 @@
+{
+  "01_next_open_and_missing_open_fallback": {
+    "aapl_fill_date": "2025-01-03",
+    "aapl_ref_price": 102.051,
+    "fill_timing": "next_open",
+    "final_equity": 101969.0,
+    "msft_fill_date": "2025-01-02",
+    "msft_ref_price": 199.59975,
+    "n_trades": 2,
+    "total_return_pct": 1.969
+  },
+  "02_same_close_fills": {
+    "aapl_fill_date": "2025-01-02",
+    "aapl_ref_price": 103.0515,
+    "differs_from_next_open": true,
+    "fill_timing": "close",
+    "final_equity": 101222.55,
+    "msft_fill_date": "2025-01-01",
+    "msft_ref_price": 199.0995,
+    "total_return_pct": 1.2226
+  },
+  "03_final_liquidation_cost": {
+    "final_equity_liquidated": 106199.42,
+    "final_equity_unliquidated": 106459.35,
+    "liquidate_final_lower_equity": true,
+    "liquidation_drag_dollars": 259.93
+  },
+  "04_borrow_bps_accrual": {
+    "borrow_drag_dollars": 52.59,
+    "borrow_reduces_short_equity": true,
+    "final_equity_300bps_borrow": 102766.96,
+    "final_equity_no_borrow": 102819.55
+  },
+  "05_dated_adv_participation_caps": {
+    "adv_cap_splits_order": false,
+    "capped_final_equity": 1560936.81,
+    "capped_trades": 1,
+    "uncapped_final_equity": 2092621.18,
+    "uncapped_trades": 1
+  },
+  "06_flat_and_near_flat_vol_floor": {
+    "flat_dsr": 0.0,
+    "flat_sharpe_annualized": 0.0,
+    "flat_vol_pct": 0.0,
+    "min_vol_floor": 1e-06,
+    "near_flat_dsr": 0.0,
+    "near_flat_sharpe_annualized": 0.0,
+    "near_flat_vol_pct": 0.0
+  },
+  "07_misaligned_datasets_align_market": {
+    "end": "2025-01-06",
+    "gaps": {
+      "MSFT": 1,
+      "NVDA": 1
+    },
+    "n_common": 4,
+    "n_names": 3,
+    "start": "2025-01-02"
+  },
+  "08_sweep_failed_grid_combinations": {
+    "best_params": {
+      "k": 5
+    },
+    "best_sharpe": 0.1517,
+    "deflated_sharpe": 0.9354,
+    "failed_indices": [
+      1,
+      3
+    ],
+    "grid_size": 5,
+    "sr_n_trials": 5,
+    "verdict_n_trials": 5
+  },
+  "09_repeated_identical_project_runs": {
+    "cumulative_counts": [
+      4,
+      8,
+      12
+    ],
+    "dsrs_over_repeats": [
+      0.6234,
+      0.6151,
+      0.6108
+    ],
+    "monotone_non_increasing_dsr": true
+  },
+  "10_risk_free_rate_consistency": {
+    "dsr_rf_source": "caller",
+    "dsr_sharpe_per_period": 0.0797,
+    "perf_rf_source": "caller",
+    "perf_sharpe_ratio": 0.0797,
+    "sharpe_matches_across_all_three": true,
+    "sweep_best_sharpe": 0.0797,
+    "sweep_rf_source": "caller"
+  },
+  "11_walk_forward_purge_bars": {
+    "no_purge_mean_oos_sharpe": 0.282388,
+    "no_purge_n_windows": 4,
+    "purged_gaps": [
+      5,
+      5,
+      5,
+      5
+    ],
+    "purged_mean_oos_sharpe": 0.282388,
+    "purged_n_trials": 8,
+    "purged_n_windows": 4
+  },
+  "12_single_trial_marginal_cap": {
+    "deflated_sharpe": 1.0,
+    "deflation_applied": false,
+    "n_trials": 1,
+    "psr_vs_zero": 1.0,
+    "sr0_expected_max": 0.0,
+    "verdict": "marginal"
+  },
+  "13_dsr_psr_pbo_pinned_matrices": {
+    "deflated_sharpe": 0.3449,
+    "dsr_matches_alias": true,
+    "dsr_verdict": "likely_noise",
+    "pbo": 0.45,
+    "pbo_logit_mean": -0.3405,
+    "pbo_verdict": "marginal",
+    "psr_vs_zero": 0.7237,
+    "sr0_expected_max": 0.0738
+  },
+  "14_coded_run_signal_equity_and_trials": {
+    "best_trial_index": 1,
+    "causal_bar_growth": true,
+    "deflated_sharpe": 0.8306,
+    "engine_verified": true,
+    "n_trials": 3,
+    "verdict": "marginal"
+  }
+}

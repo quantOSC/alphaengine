@@ -15,7 +15,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from ._version import __version__
+from ._version import current_engine_version
+from .manifest import RunManifest, build_run_manifest
 
 ENVELOPE_SCHEMA_VERSION = "1.0"
 
@@ -44,24 +45,36 @@ def build_envelope(
     cumulative_trials: int | None = None,
     project_trials: int | None = None,
     context: dict[str, Any] | None = None,
+    manifest: RunManifest | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Construct a versioned `v1.0` result envelope."""
+    """Construct a versioned `v1.0` result envelope with live `engine_version` & `manifest`."""
+    ds_hashes = list(dataset_hashes or [])
+    if isinstance(manifest, RunManifest):
+        manifest_summary: dict[str, Any] = manifest.to_wire_summary()
+    elif isinstance(manifest, dict):
+        manifest_summary = dict(manifest)
+    else:
+        manifest_summary = build_run_manifest(dataset_hashes=ds_hashes).to_wire_summary()
+        if params_hash:
+            manifest_summary["params_hash"] = params_hash
+
     return {
         "schema_version": ENVELOPE_SCHEMA_VERSION,
-        "engine_version": __version__,
+        "engine_version": current_engine_version(),
         "run_id": run_id or f"run_{uuid.uuid4().hex[:12]}",
         "timestamp": timestamp or datetime.now(timezone.utc).isoformat(),
         "command": command,
         "idea_id": idea_id,
         "family": family or command,
-        "params_hash": params_hash or "",
-        "dataset_hashes": list(dataset_hashes or []),
+        "params_hash": params_hash or str(manifest_summary.get("params_hash") or ""),
+        "dataset_hashes": ds_hashes,
         "n_trials": n_trials,
         "n_trials_source": n_trials_source,
         "cumulative_trials": cumulative_trials if cumulative_trials is not None else (n_trials or 0),
         "project_trials": project_trials if project_trials is not None else (n_trials or 0),
         "verdict": verdict,
         "figures": dict(figures or {}),
+        "manifest": manifest_summary,
         "context": dict(context or {}),
     }
 
@@ -72,7 +85,6 @@ def read_stdin_envelope(stream: Any = None) -> dict[str, Any]:
     raw = src.read().strip()
     if not raw:
         raise ValueError("--stdin expected a JSON result envelope on standard input, got empty input.")
-    # If narration lines preceded the JSON object, extract from first '{' to last '}'
     start = raw.find("{")
     end = raw.rfind("}")
     if start < 0 or end <= start:

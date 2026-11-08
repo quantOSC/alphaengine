@@ -1,15 +1,17 @@
 """
 Validation tools, the moat: tell the caller when an idea is probably noise.
 
-Lifted verbatim (math-identical) from backend/quant/overfitting.py:
-  - Deflated Sharpe Ratio (DSR) + Probabilistic Sharpe Ratio (PSR), Bailey & López de Prado (2014). Corrects the Sharpe for the number of
+Pure numpy/scipy:
+  - Deflated Sharpe Ratio (DSR probability) + Probabilistic Sharpe Ratio (PSR),
+    Bailey & López de Prado (2014). Corrects the Sharpe for the number of
     trials and for non-normal returns.
   - Probability of Backtest Overfitting (PBO) via Combinatorially Symmetric
     Cross-Validation (CSCV), Bailey, Borwein, López de Prado, Zhu (2017).
+  - Combinatorial Out-of-Sample Stability, López de Prado (2018).
+  - Minimum Track Record Length (MinTRL), Bailey & López de Prado (2012).
+  - Harvey & Liu (2015) multiple-testing Sharpe ratio haircuts.
 
-Pure numpy/scipy. No look-ahead, no LLM, no I/O. Deterministic given inputs on
-the pinned stack. The public names match the build spec's 6-tool beta cut
-(`deflated_sharpe`, `pbo_cscv`); behaviour is unchanged from the source.
+No look-ahead, no LLM, no I/O. Deterministic given inputs on the pinned stack.
 """
 
 from __future__ import annotations
@@ -17,17 +19,110 @@ from __future__ import annotations
 import itertools
 import math
 import warnings
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike
 from scipy import special, stats
 
+from .._version import current_engine_version
+from .conventions import (
+    Verdict,
+    build_annualization_spec,
+    build_costs_model_spec,
+    build_risk_free_spec,
+    verdict_from_dsr,
+)
 from .rates import cash_rate, rate_fields
 from .trace import record
 
 _EULER = 0.5772156649015329
+
+#: Volatility floor (per-period return std). Streams below 1e-6 are treated as
+#: flat/degenerate rather than dividing by floating-point rounding noise.
+VOL_FLOOR = 1e-6
+
+_SESSION_LEDGER_PROVIDER: Callable[[], int | None] | None = None
+
+
+def set_session_ledger_provider(provider: Callable[[], int | None] | None) -> None:
+    """Register a provider that reports cumulative attempts executed in this session (`QOS-181`)."""
+    global _SESSION_LEDGER_PROVIDER
+    _SESSION_LEDGER_PROVIDER = provider
+
+
+def get_session_ledger_floor() -> int | None:
+    """Return the active session ledger trial count if registered, else None."""
+    if _SESSION_LEDGER_PROVIDER is not None:
+        try:
+            val = _SESSION_LEDGER_PROVIDER()
+            if val is not None and not isinstance(val, bool) and int(val) >= 1:
+                return int(val)
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def trials_for_deflated_sharpe(
+    n_trials: int | None = None,
+    *,
+    n_trials_source: str | None = None,
+    sweep_trials: int | None = None,
+    ledger_trials: int | None = None,
+    ledger_runs: Sequence[Mapping[str, Any]] | int | None = None,
+) -> tuple[int | None, str]:
+    """Resolve ``(n_trials, n_trials_source)`` applying any recorded ledger floor.
+
+    Rules (``QOS-151`` / ``QOS-153`` / ``QOS-181``):
+    - Never invents ``1`` when unrecorded and never applies a synthetic baseline-120
+      floor: only real executed attempts in ``sweep_trials``, ``n_trials``,
+      ``ledger_trials``, ``ledger_runs``, or an active session hook contribute.
+    - ``monte_carlo`` stress runs inside ``ledger_runs`` contribute ``0`` strategy
+      trials; every other executed attempt contributes ``max(1, r["n_trials"])``.
+    - When the ledger holds strictly more attempts than the single-run ``n_trials``
+      (or when ``n_trials`` was omitted), the ledger floor wins with source
+      ``"derived_from_ledger"``.
+    """
+    ledger_floor: int | None = None
+    session_floor = get_session_ledger_floor()
+    if session_floor is not None:
+        ledger_floor = session_floor
+    if isinstance(ledger_runs, int) and not isinstance(ledger_runs, bool):
+        if ledger_runs >= 1:
+            ledger_floor = int(ledger_runs)
+    elif isinstance(ledger_runs, Sequence):
+        counted = 0
+        for row in ledger_runs:
+            if not isinstance(row, Mapping):
+                counted += 1
+                continue
+            src = str(row.get("n_trials_source") or "")
+            if src == "monte_carlo":
+                continue
+            raw_nt = row.get("n_trials")
+            if isinstance(raw_nt, (int, float)) and not isinstance(raw_nt, bool) and int(raw_nt) >= 1:
+                counted += int(raw_nt)
+            else:
+                counted += 1
+        if counted >= 1:
+            ledger_floor = counted
+
+    if ledger_trials is not None and not isinstance(ledger_trials, bool) and int(ledger_trials) >= 1:
+        ledger_floor = max(ledger_floor or 0, int(ledger_trials))
+
+    base: int | None = None
+    base_src = "not_recorded"
+    if sweep_trials is not None and not isinstance(sweep_trials, bool) and int(sweep_trials) >= 1:
+        base = int(sweep_trials)
+        base_src = "derived_from_grid"
+    elif n_trials is not None and not isinstance(n_trials, bool) and int(n_trials) >= 1:
+        base = int(n_trials)
+        base_src = str(n_trials_source or "asserted")
+
+    if ledger_floor is not None and ledger_floor >= 1 and (base is None or ledger_floor > base):
+        return ledger_floor, "derived_from_ledger"
+    return base, base_src
 
 
 def _harmonic_number(m: float) -> float:
@@ -78,13 +173,11 @@ def harvey_liu_haircut(
 
         if trial_pvalues is not None and len(trial_pvalues) >= 2:
             p_sorted = sorted(max(0.0, min(1.0, float(p))) for p in trial_pvalues)
-            k_len = len(p_sorted)
-            # Locate the target p-value rank (0-indexed) in p_sorted
+            k_len = len(trial_pvalues)
             idx = max(0, min(int(trial_rank) - 1, k_len - 1))
             if int(trial_rank) == 1:
                 diffs = [abs(p - p_single) for p in p_sorted]
                 idx = int(np.argmin(diffs))
-            # Step-down Holm and step-up BHY scaled to multiplicity m_f
             holm_steps = []
             for j in range(idx + 1):
                 mult_j = max(1.0, m_f - j * (m_f - 1.0) / max(k_len - 1, 1))
@@ -97,14 +190,11 @@ def harvey_liu_haircut(
                 bhy_steps.append(min(1.0, (m_f * c_m / rank_j) * p_sorted[j]))
             p_bhy = min(bhy_steps) if bhy_steps else min(1.0, m_f * c_m * p_single)
         else:
-            # Single-strategy summary statistics: Harvey & Liu (2015) eqs. (10)-(14)
-            # Construct HL synthetic ordered p-value schedule across M tests when M >= 2
             m_int = max(int(round(m_f)), 1)
             if m_int <= 1:
                 p_holm = p_single
                 p_bhy = p_single
             else:
-                # Synthetic uniform order-statistic p-values anchored at p_(1) = p_single
                 p_sched = [
                     p_single if j == 0 else min(1.0, p_single + (j / m_f) * (1.0 - p_single))
                     for j in range(m_int)
@@ -144,6 +234,7 @@ def harvey_liu_haircut(
     neff_val = float(n_eff_participation) if n_eff_participation is not None else float(n_trials)
     at_neff = _at_multiplicity(neff_val)
     return {
+        "engine_version": current_engine_version(),
         "sharpe_annualized": round(sr_ann, 4),
         "t_stat": round(t_stat, 4),
         "p_value_single": round(p_single, 6),
@@ -177,13 +268,13 @@ def _as_1d_float(values: ArrayLike | Sequence[float] | None) -> np.ndarray:
 def _per_period_sharpe(returns: np.ndarray, *, risk_free_per_period: float = 0.0) -> float:
     """Mean excess over a constant per-period cash rate, divided by sample vol.
 
-    An explicit 0 is excess of zero. The bill, when one is used, is subtracted
-    by the caller before this function sees the series. Vol is the sample
-    standard deviation of the returns (ddof=1); subtracting a constant does
-    not change it, or the skew, or the kurtosis.
+    Applies ``VOL_FLOOR = 1e-6`` so flat or near-flat rounding noise never
+    produces an unbounded Sharpe ratio.
     """
-    sd = returns.std(ddof=1)
-    if sd == 0 or not math.isfinite(sd):
+    if returns.size < 2:
+        return 0.0
+    sd = float(returns.std(ddof=1))
+    if not math.isfinite(sd) or sd < VOL_FLOOR:
         return 0.0
     return float((returns.mean() - float(risk_free_per_period)) / sd)
 
@@ -199,12 +290,16 @@ def probabilistic_sharpe_ratio(
 
     `kurtosis` is Pearson (normal = 3). Returns a probability in [0, 1].
     """
-    if n_obs < 2:
+    if n_obs < 2 or not math.isfinite(sharpe):
         return 0.0
-    denom = 1.0 - skew * sharpe + ((kurtosis - 1.0) / 4.0) * sharpe**2
-    if denom <= 0:
+    sk = skew if math.isfinite(skew) else 0.0
+    ku = kurtosis if math.isfinite(kurtosis) else 3.0
+    denom = 1.0 - sk * sharpe + ((ku - 1.0) / 4.0) * sharpe**2
+    if denom <= 0 or not math.isfinite(denom):
         denom = 1e-9
     z = (sharpe - sr_benchmark) * math.sqrt(n_obs - 1) / math.sqrt(denom)
+    if not math.isfinite(z):
+        return 0.0
     return float(stats.norm.cdf(z))
 
 
@@ -265,75 +360,142 @@ def deflated_sharpe(
     trials_sharpe_std: float | None = None,
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
+    matrix: ArrayLike | None = None,
+    n_eff: float | None = None,
+    n_eff_method: str | None = None,
 ) -> dict[str, Any]:
-    """Deflated Sharpe Ratio for a return stream.
+    """Deflated Sharpe Ratio probability for a return stream.
 
-    DSR = PSR(SR0), where SR0 = expected max Sharpe across `n_trials`. A DSR
-    near 1 means the result survives the multiple-testing correction; near 0
-    means it's probably noise. `trials_sharpe_std` should come from the
-    caller's hypothesis ledger; when absent we estimate it from the result's
-    own sampling error (a conservative lower bound on selection variance).
+    DSR = PSR(SR0), where SR0 = expected max Sharpe across ``n_trials``.
+    Emits ``dsr_probability`` as the canonical [0, 1] probability field and keeps
+    ``deflated_sharpe`` as a deprecated 2.0 alias. At ``n_trials <= 1``,
+    ``deflation_applied`` is ``False`` and ``verdict`` cannot reach ``robust``.
+    When ``matrix`` or ``n_eff`` is supplied (`QOS-181`), reports both raw
+    ``n_trials`` and ``n_eff`` with ``n_eff_method`` labeled.
     """
     arr = _as_1d_float(returns)
     n = arr.size
     if n < 8:
-        return {"error": "need >= 8 observations", "n_obs": int(n)}
+        return {
+            "error": "need >= 8 observations",
+            "n_obs": int(n),
+            "engine_version": current_engine_version(),
+        }
 
     ppy = max(int(periods_per_year), 1)
     annual, _, _ = cash_rate(risk_free_rate)
     rf_per = annual / ppy
-    sr = _per_period_sharpe(arr, risk_free_per_period=rf_per)
-    skew = float(stats.skew(arr, bias=False)) if n > 2 else 0.0
-    kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
-    psr0 = probabilistic_sharpe_ratio(sr, n, skew, kurt, 0.0)
+    sd = float(arr.std(ddof=1))
+    vol_floored = bool(not math.isfinite(sd) or sd < VOL_FLOOR)
 
-    # Sampling SD of the Sharpe estimator under the null (Lo, 2002), used as
-    # fallback only when cross-trial Sharpe dispersion is not supplied (e.g.
-    # fewer than 2 valid trials). When trials_sharpe_std > 0 is supplied, use
-    # it directly so correlated trials are not over-penalized by the single-series SE floor.
-    sr_est_sd = math.sqrt((1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) / (n - 1)) if n > 1 else 0.0
-    std_for_max = (
-        float(trials_sharpe_std)
-        if (trials_sharpe_std is not None and float(trials_sharpe_std) > 0)
-        else sr_est_sd
-    )
     n_f = float(n_trials)
-    if n_f <= 1.0:
+    trials_out: int | float = int(n_f) if n_f.is_integer() else round(n_f, 4)
+
+    if vol_floored:
+        sr = 0.0
+        skew = 0.0
+        kurt = 3.0
+        psr0 = 0.0
         sr0 = 0.0
-        dsr = psr0
+        dsr = 0.0
+        std_for_max = (
+            float(trials_sharpe_std)
+            if (trials_sharpe_std is not None and float(trials_sharpe_std) > 0)
+            else 0.0
+        )
+        deflation_applied = bool(n_f > 1.0)
+        verdict = Verdict.LIKELY_NOISE.value
         no_deflation_note: str | None = (
-            "n_trials=1: no multiple-testing deflation applies; deflated_sharpe equals psr_vs_zero."
+            f"volatility below VOL_FLOOR ({VOL_FLOOR:g}); Sharpe and DSR floored to 0.0."
         )
     else:
-        sr0 = expected_max_sharpe(n_f, std_for_max)
-        dsr = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0)
-        no_deflation_note = None
+        sr = _per_period_sharpe(arr, risk_free_per_period=rf_per)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            raw_skew = float(stats.skew(arr, bias=False)) if n > 2 else 0.0
+            raw_kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
+        skew = raw_skew if math.isfinite(raw_skew) else 0.0
+        kurt = raw_kurt if math.isfinite(raw_kurt) else 3.0
+        psr0 = probabilistic_sharpe_ratio(sr, n, skew, kurt, 0.0)
 
-    trials_out: int | float = int(n_f) if n_f.is_integer() else round(n_f, 4)
-    out = {
+        sr_est_sd = (
+            math.sqrt(max(0.0, 1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) / (n - 1)) if n > 1 else 0.0
+        )
+        std_for_max = (
+            float(trials_sharpe_std)
+            if (trials_sharpe_std is not None and float(trials_sharpe_std) > 0)
+            else sr_est_sd
+        )
+        if n_f <= 1.0:
+            sr0 = 0.0
+            dsr = psr0
+            no_deflation_note = (
+                "n_trials=1: no multiple-testing deflation applies; dsr_probability equals psr_vs_zero "
+                "and verdict cannot exceed marginal."
+            )
+        else:
+            sr0 = expected_max_sharpe(n_f, std_for_max)
+            dsr = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0)
+            no_deflation_note = None
+        verdict, deflation_applied = verdict_from_dsr(
+            dsr,
+            n_trials=n_f,
+            n_trials_source="asserted",
+        )
+
+    dsr_rounded = round(dsr, 4)
+    out: dict[str, Any] = {
+        "engine_version": current_engine_version(),
         "n_obs": int(n),
         "n_trials": trials_out,
+        "deflation_applied": deflation_applied,
+        "vol_floored": vol_floored,
         "sharpe_per_period": round(sr, 4),
         "sharpe_annualized": round(sr * math.sqrt(ppy), 4),
         **rate_fields(risk_free_rate),
         "periods_per_year": ppy,
+        "annualization": build_annualization_spec(ppy),
+        "risk_free": build_risk_free_spec(risk_free_rate, ppy),
+        "costs_model": build_costs_model_spec(mode="pre_netted_returns"),
         "skew": round(skew, 4),
         "kurtosis": round(kurt, 4),
         "psr_vs_zero": round(psr0, 4),
         "sr0_expected_max": round(sr0, 4),
-        "deflated_sharpe": round(dsr, 4),
+        "dsr_probability": dsr_rounded,
+        "deflated_sharpe": dsr_rounded,
         "trials_sharpe_std": round(std_for_max, 4),
         # The headline shown INSTEAD of raw Sharpe.
-        "verdict": ("likely_noise" if dsr < 0.5 else "marginal" if dsr < 0.9 else "robust"),
+        "verdict": verdict,
     }
     if no_deflation_note is not None:
         out["note"] = no_deflation_note
+
+    if matrix is not None and n_eff is None:
+        n_eff = round(n_eff_participation(matrix), 4)
+
+    if n_eff is not None:
+        neff_val = float(n_eff)
+        neff_method = n_eff_method or "eigenvalue_participation_ratio"
+        if vol_floored:
+            dsr_neff = 0.0
+        elif neff_val <= 1.0:
+            dsr_neff = psr0
+        else:
+            sr0_neff = expected_max_sharpe(neff_val, std_for_max)
+            dsr_neff = probabilistic_sharpe_ratio(sr, n, skew, kurt, sr0_neff)
+        dsr_neff_rounded = round(dsr_neff, 4)
+        neff_out: int | float = int(neff_val) if neff_val.is_integer() else round(neff_val, 4)
+        out["n_eff"] = neff_out
+        out["n_eff_participation"] = neff_out
+        out["n_eff_method"] = neff_method
+        out["deflated_sharpe_at_n_eff"] = dsr_neff_rounded
+        out["dsr_probability_at_n_eff"] = dsr_neff_rounded
     record(
         "deflated_sharpe",
         "PSR(SR*) where SR* is the expected maximum Sharpe across n_trials",
         inputs={"n_obs": int(n), "n_trials": trials_out, "sharpe_per_period": round(sr, 4)},
         series={"returns": arr},
-        result=round(dsr, 4),
+        result=dsr_rounded,
     )
     record(
         "psr_vs_zero",
@@ -362,35 +524,46 @@ def min_track_record_length(
 ) -> dict[str, Any]:
     """Minimum Track Record Length (Bailey & López de Prado, 2012): the number of
     observations needed for the observed Sharpe to be statistically greater than
-    `sr_benchmark` at `confidence`. Answers "is this backtest long enough to trust,
-    or do I need more history before believing the Sharpe?"
+    `sr_benchmark` at `confidence`.
 
     MinTRL = 1 + [1 - γ3·SR + ((γ4-1)/4)·SR²] · (Z_α / (SR - SR*))²  (per-period).
-    Returns the required count + whether the actual sample already clears it.
     """
     arr = _as_1d_float(returns)
     n = arr.size
     if n < 8:
-        return {"error": "need >= 8 observations", "n_obs": int(n)}
+        return {
+            "error": "need >= 8 observations",
+            "n_obs": int(n),
+            "engine_version": current_engine_version(),
+        }
     ppy = max(int(periods_per_year), 1)
     annual, _, _ = cash_rate(risk_free_rate)
     sr = _per_period_sharpe(arr, risk_free_per_period=annual / ppy)
     if sr <= sr_benchmark:
         return {
+            "engine_version": current_engine_version(),
             "n_obs": int(n),
             "sharpe_per_period": round(sr, 4),
             **rate_fields(risk_free_rate),
             "periods_per_year": ppy,
+            "annualization": build_annualization_spec(ppy),
+            "risk_free": build_risk_free_spec(risk_free_rate, ppy),
+            "costs_model": build_costs_model_spec(mode="pre_netted_returns"),
             "min_track_record_length": None,
             "sufficient": False,
             "note": "observed Sharpe <= benchmark; not distinguishable at any length",
         }
-    skew = float(stats.skew(arr, bias=False)) if n > 2 else 0.0
-    kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        skew = float(stats.skew(arr, bias=False)) if n > 2 else 0.0
+        kurt = float(stats.kurtosis(arr, fisher=False, bias=False)) if n > 3 else 3.0
+    skew = skew if math.isfinite(skew) else 0.0
+    kurt = kurt if math.isfinite(kurt) else 3.0
     z = float(stats.norm.ppf(confidence))
     mintrl = 1.0 + (1.0 - skew * sr + ((kurt - 1.0) / 4.0) * sr**2) * (z / (sr - sr_benchmark)) ** 2
     mintrl = max(1.0, float(mintrl))
     out = {
+        "engine_version": current_engine_version(),
         "n_obs": int(n),
         "sharpe_per_period": round(sr, 4),
         "confidence": confidence,
@@ -398,6 +571,9 @@ def min_track_record_length(
         "min_track_record_years": round(mintrl / ppy, 2),
         **rate_fields(risk_free_rate),
         "periods_per_year": ppy,
+        "annualization": build_annualization_spec(ppy),
+        "risk_free": build_risk_free_spec(risk_free_rate, ppy),
+        "costs_model": build_costs_model_spec(mode="pre_netted_returns"),
         "sufficient": bool(n >= mintrl),
         "shortfall_obs": max(0, int(math.ceil(mintrl - n))),
     }
@@ -423,7 +599,7 @@ def _block_sharpe(sums: np.ndarray, sqs: np.ndarray, counts: np.ndarray, blocks:
     var = q / c - mean**2
     sd = np.sqrt(np.maximum(var, 0.0))
     with np.errstate(divide="ignore", invalid="ignore"):
-        return np.where(sd > 0, mean / sd, 0.0)
+        return np.where(sd >= VOL_FLOOR, mean / sd, 0.0)
 
 
 def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
@@ -434,6 +610,10 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
     contiguous blocks, enumerates balanced in-sample/out-of-sample partitions,
     and for each picks the IS-best config and measures its OOS rank. PBO =
     fraction of partitions where the IS-best config lands below the OOS median.
+
+    Uses the unified 2.0 ``Verdict`` vocabulary:
+    ``pbo > 0.5 -> "likely_noise"``, ``0.2 < pbo <= 0.5 -> "marginal"``,
+    ``pbo <= 0.2 -> "robust"``.
     """
     if isinstance(n_splits, bool) or not isinstance(n_splits, int) or n_splits < 2 or n_splits % 2 != 0:
         raise ValueError(
@@ -441,14 +621,21 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
             "CSCV partitions blocks into equal in-sample and out-of-sample halves."
         )
     if pnl_matrix is None:
-        return {"error": "need (T>=2S observations, N>=2 configs)", "shape": [0]}
+        return {
+            "error": "need (T>=2S observations, N>=2 configs)",
+            "shape": [0],
+            "engine_version": current_engine_version(),
+        }
     M = np.asarray(pnl_matrix, dtype=float)
     if M.ndim != 2 or M.shape[1] < 2 or M.shape[0] < n_splits * 2:
-        return {"error": "need (T>=2S observations, N>=2 configs)", "shape": list(M.shape)}
+        return {
+            "error": "need (T>=2S observations, N>=2 configs)",
+            "shape": list(M.shape),
+            "engine_version": current_engine_version(),
+        }
     T, N = M.shape
 
     blocks = np.array_split(np.arange(T), n_splits)
-    # Precompute per-block moments per config.
     sums = np.vstack([M[b].sum(axis=0) for b in blocks])  # (S, N)
     sqs = np.vstack([(M[b] ** 2).sum(axis=0) for b in blocks])  # (S, N)
     counts = np.array([len(b) for b in blocks], dtype=float)  # (S,)
@@ -457,7 +644,6 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
     half = n_splits // 2
     combos = list(itertools.combinations(block_ids, half))
     if len(combos) > max_combos:
-        # Deterministic subsample to bound cost on large S.
         step = max(1, len(combos) // max_combos)
         combos = combos[::step][:max_combos]
 
@@ -467,7 +653,6 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
         is_perf = _block_sharpe(sums, sqs, counts, list(is_blocks))
         oos_perf = _block_sharpe(sums, sqs, counts, oos_blocks)
         n_star = int(np.argmax(is_perf))
-        # Rank of the IS-best config OOS (1 = worst .. N = best).
         order = np.argsort(np.argsort(oos_perf))  # ranks 0..N-1
         rank = order[n_star] + 1
         w = rank / (N + 1)
@@ -476,13 +661,25 @@ def pbo_cscv(pnl_matrix, n_splits: int = 10, max_combos: int = 2000) -> dict:
 
     logits_arr = np.asarray(logits)
     pbo = float(np.mean(logits_arr <= 0.0)) if logits_arr.size else float("nan")
+    verdict = (
+        Verdict.LIKELY_NOISE.value
+        if pbo > 0.5
+        else Verdict.MARGINAL.value
+        if pbo > 0.2
+        else Verdict.ROBUST.value
+    )
+    n_eff = round(n_eff_participation(M), 4)
     out = {
+        "engine_version": current_engine_version(),
         "pbo": round(pbo, 4),
         "n_partitions": int(logits_arr.size),
         "n_configs": int(N),
+        "n_eff": n_eff,
+        "n_eff_participation": n_eff,
+        "n_eff_method": "eigenvalue_participation_ratio",
         "n_splits": int(n_splits),
         "logit_mean": round(float(np.mean(logits_arr)), 4) if logits_arr.size else None,
-        "verdict": ("overfit" if pbo > 0.5 else "acceptable" if pbo > 0.2 else "robust"),
+        "verdict": verdict,
     }
     record(
         "pbo",
@@ -509,40 +706,38 @@ def combinatorial_oos_stability(
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
 ) -> dict[str, Any]:
-    """Combinatorial out-of-sample stability over a single pre-computed return stream.
-
-    WHAT THIS MEASURES (AND HOW IT DIFFERS FROM FULL CPCV):
-    True Combinatorial Purged Cross-Validation (López de Prado, 2018) fits a model
-    on each training partition, purges/embargoes the training labels around test
-    boundaries, predicts on the held-out test groups, and stitches test predictions
-    into full-length backtest paths.
-
-    Because AlphaEngine evaluates an already-computed return stream without a
-    re-trainable model, this function measures **combinatorial out-of-sample
-    stability**: it splits the `T` returns into `n_groups` contiguous blocks,
-    enumerates `C(n_groups, n_test_groups)` held-out block combinations, trims
-    `purge` observations from the leading edge and `embargo` observations from
-    the trailing edge of each held-out block, concatenates the held-out blocks
-    in time order, and computes the distribution of annualized Sharpe and
-    deflated Sharpe (haircut by `n_trials`) across all held-out sub-sample
-    combinations.
-    """
+    """Combinatorial out-of-sample stability over a single pre-computed return stream."""
     arr = _as_1d_float(returns)
     n = arr.size
     if n < 8:
-        return {"error": "need >= 8 observations", "n_obs": int(n)}
+        return {
+            "error": "need >= 8 observations",
+            "n_obs": int(n),
+            "engine_version": current_engine_version(),
+        }
     n_groups = int(n_groups)
     n_test_groups = int(n_test_groups)
     if n_groups < 2 or n_groups > n:
-        return {"error": "need 2 <= n_groups <= n_obs", "n_obs": int(n), "n_groups": n_groups}
+        return {
+            "error": "need 2 <= n_groups <= n_obs",
+            "n_obs": int(n),
+            "n_groups": n_groups,
+            "engine_version": current_engine_version(),
+        }
     if not (1 <= n_test_groups < n_groups):
-        return {"error": "need 1 <= n_test_groups < n_groups", "n_test_groups": n_test_groups}
+        return {
+            "error": "need 1 <= n_test_groups < n_groups",
+            "n_test_groups": n_test_groups,
+            "engine_version": current_engine_version(),
+        }
     purge = max(0, int(purge))
     embargo = max(0, int(embargo))
+    ppy = max(int(periods_per_year), 1)
+    annual, _, _ = cash_rate(risk_free_rate)
 
     groups = list(np.array_split(np.arange(n), n_groups))
     combos = list(itertools.combinations(range(n_groups), n_test_groups))
-    if len(combos) > max_paths:  # deterministic subsample to bound cost
+    if len(combos) > max_paths:
         step = max(1, len(combos) // max_paths)
         combos = combos[::step][:max_paths]
 
@@ -563,8 +758,6 @@ def combinatorial_oos_stability(
         path = arr[np.sort(np.concatenate(parts))]
         if path.size < 2:
             continue
-        ppy = max(int(periods_per_year), 1)
-        annual, _, _ = cash_rate(risk_free_rate)
         sharpes.append(_per_period_sharpe(path, risk_free_per_period=annual / ppy) * math.sqrt(ppy))
         if path.size >= 8:
             try:
@@ -575,9 +768,9 @@ def combinatorial_oos_stability(
                     periods_per_year=ppy,
                 )
             except (ValueError, FloatingPointError):
-                d = {"error": "dsr undefined for this path"}  # e.g. degenerate/near-riskless path
+                d = {"error": "dsr undefined for this path"}
             if "error" not in d:
-                dsrs.append(d["deflated_sharpe"])
+                dsrs.append(float(d["dsr_probability"]))
         else:
             n_short += 1
 
@@ -586,20 +779,26 @@ def combinatorial_oos_stability(
             "error": "no evaluable CPCV paths (groups too small after purge/embargo)",
             "n_obs": int(n),
             "n_groups": n_groups,
+            "engine_version": current_engine_version(),
         }
 
     sh = np.asarray(sharpes)
-    out = {
+    deflation_applied = bool(int(n_trials) > 1)
+    out: dict[str, Any] = {
+        "engine_version": current_engine_version(),
         "n_obs": int(n),
         "n_groups": n_groups,
         "n_test_groups": n_test_groups,
         "purge": purge,
         "embargo": embargo,
         "n_trials": int(n_trials),
+        "deflation_applied": deflation_applied,
         **rate_fields(risk_free_rate),
-        "periods_per_year": max(int(periods_per_year), 1),
+        "periods_per_year": ppy,
+        "annualization": build_annualization_spec(ppy),
+        "risk_free": build_risk_free_spec(risk_free_rate, ppy),
+        "costs_model": build_costs_model_spec(mode="pre_netted_returns"),
         "n_paths": int(sh.size),
-        # LdP's reconstructed-path count, reported for reference.
         "n_backtest_paths_theoretical": int(math.comb(n_groups, n_test_groups) * n_test_groups // n_groups),
         "sharpe_annualized": {
             "mean": round(float(sh.mean()), 4),
@@ -616,23 +815,25 @@ def combinatorial_oos_stability(
     med_sr = float(np.median(sh))
     if dsrs:
         d = np.asarray(dsrs)
-        out["deflated_sharpe"] = {
+        dsr_dist = {
             "mean": round(float(d.mean()), 4),
             "min": round(float(d.min()), 4),
             "median": round(float(np.percentile(d, 50)), 4),
             "max": round(float(d.max()), 4),
             "pct_paths_robust": round(float(np.mean(d >= 0.9)), 4),
         }
-        med_dsr = float(np.median(d))
+        out["dsr_probability"] = dsr_dist
+        out["deflated_sharpe"] = dict(dsr_dist)
+        med_dsr = float(np.percentile(d, 50))
         out["verdict"] = (
-            "likely_noise"
+            Verdict.LIKELY_NOISE.value
             if (med_sr <= 0 or med_dsr < 0.5)
-            else "robust"
-            if med_dsr >= 0.9
-            else "inconclusive"
+            else Verdict.ROBUST.value
+            if (deflation_applied and med_dsr >= 0.9)
+            else Verdict.MARGINAL.value
         )
     else:
-        out["verdict"] = "likely_noise" if med_sr <= 0 else "inconclusive"
+        out["verdict"] = Verdict.LIKELY_NOISE.value if med_sr <= 0 else Verdict.MARGINAL.value
     record(
         "cpcv_sharpe",
         "annualised Sharpe of each purged and embargoed held-out path",
@@ -661,12 +862,7 @@ def cpcv_score(
     risk_free_rate: float | None = None,
     periods_per_year: int = 252,
 ) -> dict[str, Any]:
-    """Deprecated alias for :func:`combinatorial_oos_stability`.
-
-    Measures combinatorial out-of-sample sub-sample stability on a single return
-    stream (no model re-training, paths are held-out block combinations with
-    purge/embargo trimmed from each test block).
-    """
+    """Deprecated alias for :func:`combinatorial_oos_stability`."""
     warnings.warn(
         "cpcv_score is deprecated and will be removed in a future major release; "
         "use combinatorial_oos_stability instead.",
@@ -684,3 +880,7 @@ def cpcv_score(
         risk_free_rate=risk_free_rate,
         periods_per_year=periods_per_year,
     )
+
+
+#: Explicit probability-named alias (`QOS-156`): DSR in [0, 1] is a probability, not an annualized Sharpe.
+dsr_probability = deflated_sharpe

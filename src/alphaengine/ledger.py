@@ -5,25 +5,34 @@ append-only run record to `.alphaengine/ledger/runs.jsonl` (and per-trial
 records to `.alphaengine/ledger/trials.jsonl`), backed by content-addressed
 SHA-256 objects in `.alphaengine/objects/`.
 
-Trial counts accumulate across runs on the same `idea_id` or `family` so
-repeatedly testing variations one run at a time still deflates by the cumulative
-search effort.
+Trial counts follow William's rule (`QOS-153`): **every executed attempt counts**,
+including identical reruns and failed grid points. Deduplication occurs ONLY on
+exact `attempt_id` / `run_id` transport redelivery. Any ledger read or write
+failure raises `LedgerError` (fail-closed) rather than silently returning `N=1`.
 """
 
 from __future__ import annotations
 
 import contextvars
 import uuid
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from ._version import __version__
+from ._version import current_engine_version
+from .core.conventions import Verdict
+from .manifest import (
+    RunManifest,
+    build_run_manifest,
+    check_manifest_provenance,
+)
 from .project import Project, sha256_hex
 
 __all__ = [
+    "LedgerError",
     "record_run",
     "record_trials",
     "cumulative_trials_for",
@@ -31,12 +40,43 @@ __all__ = [
     "resolve_run",
     "diff_runs",
     "rerun_record",
+    "rerun_record_report",
     "execute_local_workflow",
     "suppress_auto_sweep_record",
 ]
 
+
+class LedgerError(RuntimeError):
+    """Raised when reading or writing `.alphaengine/ledger/` fails (fail-closed)."""
+
+
 _SUPPRESS_SWEEP_RECORD: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "alphaengine_suppress_sweep_record", default=False
+)
+
+_LEDGER_META_KEYS = frozenset(
+    {
+        "n_trials",
+        "run_n_trials",
+        "run_deflated_sharpe",
+        "run_dsr_probability",
+        "deflated_sharpe",
+        "dsr_probability",
+        "deflation_applied",
+        "sr0_expected_max",
+        "verdict",
+        "cumulative_trials",
+        "family_trials",
+        "project_trials",
+        "duplicate_of",
+        "cumulative_deflated_sharpe",
+        "cumulative_dsr_probability",
+        "cumulative_sr0_expected_max",
+        "cumulative_verdict",
+        "engine_version",
+        "risk_free_rate",
+        "periods_per_year",
+    }
 )
 
 
@@ -56,6 +96,20 @@ class suppress_auto_sweep_record:
 
 def is_auto_sweep_suppressed() -> bool:
     return _SUPPRESS_SWEEP_RECORD.get()
+
+
+def _read_ledger_jsonl(proj: Project, rel_path: str) -> list[dict[str, Any]]:
+    try:
+        return proj.read_jsonl(rel_path, strict=True)
+    except (OSError, ValueError) as exc:
+        raise LedgerError(f"Failed reading ledger {proj.dot_dir / rel_path}: {exc}") from exc
+
+
+def _append_ledger_jsonl(proj: Project, rel_path: str, record: dict[str, Any]) -> str:
+    try:
+        return proj.append_jsonl(rel_path, record)
+    except (OSError, ValueError) as exc:
+        raise LedgerError(f"Failed writing ledger {proj.dot_dir / rel_path}: {exc}") from exc
 
 
 def hash_dataset_any(data: Any) -> list[str]:
@@ -89,31 +143,35 @@ def cumulative_trials_for(
     idea_id: str | None = None,
     family: str | None = None,
 ) -> tuple[int, int]:
-    """Return `(family_or_idea_trials, project_cumulative_trials)` across distinct configs in the ledger.
+    """Return `(family_or_idea_trials, project_cumulative_trials)` across all executed attempts.
 
+    Per William's trial counting rule (`QOS-153`), **every executed attempt counts**,
+    including identical reruns and failed grid points. Deduplication occurs ONLY
+    on exact `attempt_id` / `run_id` transport redelivery:
     - ``monte_carlo`` runs add 0 to both family and project trial counts.
     - ``derived_from_universe`` (universe screening) counts toward the screened
       idea or family only, not toward ``project_trials``.
     """
-    runs = proj.read_jsonl("ledger/runs.jsonl")
+    runs = _read_ledger_jsonl(proj, "ledger/runs.jsonl")
     family_total = 0
     project_total = 0
     target_idea = (idea_id or "").strip() or None
     target_family = (family or "").strip() or None
-    seen_configs: set[str] = set()
+    seen_run_ids: set[str] = set()
+    seen_attempt_ids: set[str] = set()
+
     for row in runs:
-        if row.get("duplicate_of"):
-            continue
-        sig = str(row.get("config_sha256") or "")
-        if not sig:
-            sig = _run_config_signature(
-                str(row.get("command") or ""),
-                str(row.get("params_hash") or ""),
-                list(row.get("dataset_hashes") or []),
-            )
-        if sig in seen_configs:
-            continue
-        seen_configs.add(sig)
+        rid = str(row.get("run_id") or "").strip()
+        if rid:
+            if rid in seen_run_ids:
+                continue
+            seen_run_ids.add(rid)
+        aid = str(row.get("attempt_id") or "").strip()
+        if aid:
+            if aid in seen_attempt_ids:
+                continue
+            seen_attempt_ids.add(aid)
+
         src = str(row.get("n_trials_source") or "")
         if src == "monte_carlo":
             continue
@@ -140,24 +198,45 @@ def record_trials(
     idea_id: str | None = None,
     family: str = "default",
     timestamp: str | None = None,
-) -> None:
-    """Append per-trial records to `.alphaengine/ledger/trials.jsonl`."""
+) -> list[dict[str, Any]]:
+    """Append per-attempt trial events to `.alphaengine/ledger/trials.jsonl` (`QOS-153`, `QOS-164`).
+
+    Idempotent by `attempt_id`: re-recording an already-persisted `attempt_id`
+    is skipped, whereas every new attempt (including identical parameter hashes
+    and failed executions) is appended and counted.
+    """
     ts = timestamp or datetime.now(timezone.utc).isoformat()
+    existing = _read_ledger_jsonl(proj, "ledger/trials.jsonl")
+    seen_attempts = {str(r.get("attempt_id")) for r in existing if r.get("attempt_id")}
+    written: list[dict[str, Any]] = []
+
     for t in trials:
-        entry = {
+        aid = str(t.get("attempt_id") or uuid.uuid4())
+        if aid in seen_attempts:
+            continue
+        seen_attempts.add(aid)
+        failed_msg = t.get("failed")
+        status = "failed" if failed_msg is not None else str(t.get("status") or "ok")
+        exec_at = str(t.get("executed_at") or ts)
+        entry: dict[str, Any] = {
+            "attempt_id": aid,
             "run_id": run_id,
             "timestamp": ts,
+            "executed_at": exec_at,
             "idea_id": idea_id,
             "family": family,
             "index": t.get("index"),
             "params_hash": t.get("params_hash"),
+            "status": status,
             "n_obs": t.get("n_obs"),
             "sharpe": t.get("sharpe"),
             "sharpe_annualized": t.get("sharpe_annualized"),
             "total_return_pct": t.get("total_return_pct"),
-            "failed": t.get("failed"),
+            "failed": failed_msg,
         }
-        proj.append_jsonl("ledger/trials.jsonl", entry)
+        _append_ledger_jsonl(proj, "ledger/trials.jsonl", entry)
+        written.append(entry)
+    return written
 
 
 def record_run(
@@ -178,11 +257,17 @@ def record_run(
     risk_free_rate: float | None = None,
     periods_per_year: int | None = None,
     run_id: str | None = None,
+    attempt_id: str | None = None,
     already_counted_in_ledger: bool = False,
+    code_target: Any = None,
+    code_sha256: str | None = None,
+    costs_model: Mapping[str, Any] | None = None,
+    manifest: RunManifest | None = None,
 ) -> dict[str, Any]:
-    """Write a run record to `.alphaengine/ledger/runs.jsonl` and return the stored dict."""
+    """Write a run record (and CAS `RunManifest`) to `.alphaengine/ledger/runs.jsonl`."""
     ts = datetime.now(timezone.utc).isoformat()
     rid = run_id or f"run_{uuid.uuid4().hex[:12]}"
+    aid = attempt_id or str(uuid.uuid4())
     clean_params = dict(params or {})
     params_hash = sha256_hex(clean_params)
     ds_hashes = list(dataset_hashes or [])
@@ -205,9 +290,16 @@ def record_run(
     idea_id = resolved_idea_id
 
     config_sha = _run_config_signature(command, params_hash, ds_hashes)
-    existing_runs = proj.read_jsonl("ledger/runs.jsonl")
+    existing_runs = _read_ledger_jsonl(proj, "ledger/runs.jsonl")
+
+    # `duplicate_of` records prior-work config lineage for researcher visibility,
+    # while STILL counting every executed attempt per William's rule (`QOS-153`).
     duplicate_of: str | None = None
+    already_persisted: dict[str, Any] | None = None
     for prev in existing_runs:
+        if prev.get("run_id") == rid or (prev.get("attempt_id") and prev.get("attempt_id") == aid):
+            already_persisted = prev
+            break
         prev_sig = str(prev.get("config_sha256") or "")
         if not prev_sig:
             prev_sig = _run_config_signature(
@@ -215,9 +307,11 @@ def record_run(
                 str(prev.get("params_hash") or ""),
                 list(prev.get("dataset_hashes") or []),
             )
-        if prev_sig == config_sha:
+        if prev_sig == config_sha and duplicate_of is None:
             duplicate_of = str(prev.get("run_id") or "")
-            break
+
+    if already_persisted is not None:
+        return already_persisted
 
     prior_fam, prior_proj = cumulative_trials_for(
         proj,
@@ -227,7 +321,7 @@ def record_run(
     this_trials = (
         int(n_trials) if isinstance(n_trials, int) and not isinstance(n_trials, bool) and n_trials > 0 else 0
     )
-    if duplicate_of is not None or already_counted_in_ledger or n_trials_source == "monte_carlo":
+    if already_counted_in_ledger or n_trials_source == "monte_carlo":
         added_fam = 0
         added_proj = 0
     elif n_trials_source == "derived_from_universe":
@@ -237,8 +331,6 @@ def record_run(
         added_fam = this_trials
         added_proj = this_trials
 
-    # Project-wide cumulative trial ledger feeds DSR, while monte_carlo adds 0
-    # and universe screens count only toward their idea/family.
     proj_trials = prior_proj + added_proj
     fam_trials = max(
         prior_fam + added_fam,
@@ -248,7 +340,6 @@ def record_run(
 
     figs = dict(figures or {})
     if returns_for_deflation and len(returns_for_deflation) >= 8 and trials_sharpe_std is None:
-        # Preserve trial Sharpe dispersion from the single-run figures if already computed
         raw_std = figs.get("trials_sharpe_std")
         if isinstance(raw_std, (int, float)) and not isinstance(raw_std, bool) and float(raw_std) > 0:
             trials_sharpe_std = float(raw_std)
@@ -267,10 +358,9 @@ def record_run(
     if ppy_eff is None:
         ppy_eff = 252
 
-    # Enforce verdict refusal when trial count is not_recorded on validation/sweep runs
     if n_trials_source == "not_recorded":
-        if verdict == "edge":
-            verdict = None
+        if verdict in ("edge", Verdict.ROBUST.value):
+            verdict = Verdict.UNVERIFIED.value
         figs["n_trials"] = None
         figs["run_n_trials"] = None
         figs["n_trials_source"] = "not_recorded"
@@ -278,6 +368,8 @@ def record_run(
         figs["run_n_trials"] = this_trials
         if "deflated_sharpe" in figs:
             figs["run_deflated_sharpe"] = figs["deflated_sharpe"]
+        if "dsr_probability" in figs:
+            figs["run_dsr_probability"] = figs["dsr_probability"]
         figs["n_trials"] = cum_trials
         figs["n_trials_source"] = n_trials_source
 
@@ -302,19 +394,41 @@ def record_run(
             periods_per_year=ppy_eff,
         )
         if "deflated_sharpe" in cum_dsr:
-            # Headline DSR, SR0, and verdict use the cumulative trial count everywhere
+            figs["dsr_probability"] = cum_dsr.get("dsr_probability")
             figs["deflated_sharpe"] = cum_dsr["deflated_sharpe"]
+            figs["deflation_applied"] = cum_dsr.get("deflation_applied")
             figs["sr0_expected_max"] = cum_dsr["sr0_expected_max"]
             figs["verdict"] = cum_dsr["verdict"]
             figs["risk_free_rate"] = cum_dsr.get("risk_free_rate")
             figs["periods_per_year"] = cum_dsr.get("periods_per_year")
+            figs["cumulative_dsr_probability"] = cum_dsr.get("dsr_probability")
             figs["cumulative_deflated_sharpe"] = cum_dsr["deflated_sharpe"]
             figs["cumulative_sr0_expected_max"] = cum_dsr["sr0_expected_max"]
             figs["cumulative_verdict"] = cum_dsr["verdict"]
             verdict = str(cum_dsr["verdict"])
 
+    manifest_obj = (
+        manifest
+        if isinstance(manifest, RunManifest)
+        else build_run_manifest(
+            params=clean_params,
+            dataset_hashes=ds_hashes,
+            code_target=code_target,
+            code_sha256=code_sha256,
+            costs_model=costs_model,
+            periods_per_year=ppy_eff,
+            risk_free_rate=rf_eff,
+        )
+    )
+    try:
+        manifest_sha = proj.put_object(manifest_obj.to_cas_dict())
+    except OSError as exc:
+        raise LedgerError(f"Failed storing RunManifest in {proj.objects_dir}: {exc}") from exc
+
+    eng_ver = current_engine_version()
     record: dict[str, Any] = {
         "run_id": rid,
+        "attempt_id": aid,
         "timestamp": ts,
         "command": command,
         "idea_id": idea_id,
@@ -332,12 +446,14 @@ def record_run(
         "project_trials": proj_trials,
         "figures": figs,
         "verdict": verdict,
-        "engine_version": __version__,
+        "engine_version": eng_ver,
+        "manifest_sha256": manifest_sha,
+        "manifest": manifest_obj.to_wire_summary(),
     }
     if repro_spec is not None:
         record["repro_spec"] = repro_spec
 
-    obj_sha = proj.append_jsonl("ledger/runs.jsonl", record)
+    obj_sha = _append_ledger_jsonl(proj, "ledger/runs.jsonl", record)
     record["object_sha256"] = obj_sha
     return record
 
@@ -352,7 +468,7 @@ def list_runs(
     limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Filter and return project runs (newest first)."""
-    rows = list(reversed(proj.read_jsonl("ledger/runs.jsonl")))
+    rows = list(reversed(_read_ledger_jsonl(proj, "ledger/runs.jsonl")))
     out: list[dict[str, Any]] = []
     for row in rows:
         if idea_id and str(row.get("idea_id") or "") != idea_id:
@@ -372,7 +488,7 @@ def list_runs(
 def resolve_run(proj: Project, run_ref: str) -> dict[str, Any]:
     """Find a run in `proj` by exact `run_id`, prefix, or `HEAD` / `latest`."""
     ref = (run_ref or "").strip()
-    rows = proj.read_jsonl("ledger/runs.jsonl")
+    rows = _read_ledger_jsonl(proj, "ledger/runs.jsonl")
     if not rows:
         raise KeyError("No runs recorded in this project yet.")
     if ref.lower() in ("head", "latest", "last"):
@@ -444,27 +560,36 @@ def diff_runs(run_a: dict[str, Any], run_b: dict[str, Any]) -> dict[str, Any]:
 def _flatten_scalars(d: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in sorted(d.items(), key=lambda item: str(item[0])):
-        if k in (
-            "n_trials",
-            "run_n_trials",
-            "run_deflated_sharpe",
-            "deflated_sharpe",
-            "sr0_expected_max",
-            "verdict",
-            "cumulative_trials",
-            "family_trials",
-            "project_trials",
-            "duplicate_of",
-            "cumulative_deflated_sharpe",
-            "cumulative_sr0_expected_max",
-            "cumulative_verdict",
-        ):
+        if k in _LEDGER_META_KEYS:
             continue
         key = f"{prefix}.{k}" if prefix else str(k)
         if isinstance(v, dict):
             out.update(_flatten_scalars(v, key))
         elif isinstance(v, (int, float, str, bool)) or v is None:
             out[key] = v
+    return out
+
+
+def _flatten_figures(node: Any, prefix: str = "") -> dict[str, Any]:
+    """Flatten both scalars and list/curve figures so `rerun_record` verifies every recorded figure."""
+    out: dict[str, Any] = {}
+    if isinstance(node, dict):
+        for k, v in sorted(node.items(), key=lambda item: str(item[0])):
+            if not prefix and k in _LEDGER_META_KEYS:
+                continue
+            key = f"{prefix}.{k}" if prefix else str(k)
+            if isinstance(v, (dict, list, tuple)):
+                out.update(_flatten_figures(v, key))
+            elif isinstance(v, (int, float, str, bool)) or v is None:
+                out[key] = v
+    elif isinstance(node, (list, tuple)):
+        out[f"{prefix}.__len__"] = len(node)
+        for idx, item in enumerate(node):
+            key = f"{prefix}[{idx}]"
+            if isinstance(item, (dict, list, tuple)):
+                out.update(_flatten_figures(item, key))
+            elif isinstance(item, (int, float, str, bool)) or item is None:
+                out[key] = item
     return out
 
 
@@ -551,7 +676,8 @@ def execute_local_workflow(
                     figures["n_eff_participation"] = sv.get("n_eff_participation")
                     figures["deflated_sharpe_at_n_eff"] = sv.get("deflated_sharpe_at_n_eff")
                     figures["n_eff_diagnostic_note"] = sv.get("n_eff_diagnostic_note")
-                    n_trials = len(ok_trials)
+                    # William's rule (`QOS-153`): count all attempted grid combos, including failures
+                    n_trials = int(sweep_res.n_trials)
             else:
                 perf = ex.execute("compute.performance_report", no_trials_inp)
                 mintrl = ex.execute("compute.min_track_record_length", no_trials_inp)
@@ -641,15 +767,46 @@ def execute_local_workflow(
     return figures, verdict, n_trials, source, returns_col, trial_rows
 
 
-def rerun_record(proj: Project, run_rec: dict[str, Any]) -> tuple[bool, dict[str, Any], dict[str, Any]]:
-    """Re-execute a recorded run from its `repro_spec` and compare figures.
+def rerun_record_report(proj: Project, run_rec: dict[str, Any]) -> dict[str, Any]:
+    """Re-execute a recorded run and evaluate all 3 `QOS-158` verification statuses:
 
-    Returns `(matched, reproduced_figures, diff_map)`.
+    1. ``hash_verified``: CAS object integrity (`object_sha256` & `manifest_sha256`).
+    2. ``figures_reproduced``: Re-executes from inputs and compares EVERY recorded
+       scalar and curve/list figure within `1e-6`, failing immediately if any
+       recorded key is missing in the reproduced output.
+    3. ``provenance_verified``: Compares recorded `RunManifest` (`engine_version`,
+       `wheel_sha256`, `code_sha256`, `dataset_hashes`, conventions) against the
+       active runtime environment.
     """
+    if run_rec.get("read_only"):
+        raise ValueError(
+            "Pulled remote runs are read-only summaries without local code or data "
+            "and cannot be rerun locally."
+        )
+
+    hash_ok = True
+    hash_errors: list[str] = []
+    obj_sha = run_rec.get("object_sha256")
+    if isinstance(obj_sha, str) and obj_sha:
+        try:
+            proj.get_object(obj_sha)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            hash_ok = False
+            hash_errors.append(f"object_sha256: {exc}")
+
+    man_sha = run_rec.get("manifest_sha256")
+    if isinstance(man_sha, str) and man_sha:
+        try:
+            proj.get_object(man_sha)
+        except (FileNotFoundError, ValueError, OSError) as exc:
+            hash_ok = False
+            hash_errors.append(f"manifest_sha256: {exc}")
+
     spec = run_rec.get("repro_spec") or {}
     kind = str(spec.get("kind") or run_rec.get("command") or "")
     data: Any = None
     backtest_fn: Any = None
+    code_target: Any = None
 
     if spec.get("data_object_sha256"):
         data = proj.get_object(str(spec["data_object_sha256"]))
@@ -665,6 +822,7 @@ def rerun_record(proj: Project, run_rec: dict[str, Any]) -> tuple[bool, dict[str
         from .cli import load_project, project_grid
 
         mod_data, backtest_fn = load_project(str(spec["project_module"]))
+        code_target = backtest_fn
         if data is None:
             data = mod_data
         grid = spec.get("grid") or project_grid()
@@ -675,22 +833,31 @@ def rerun_record(proj: Project, run_rec: dict[str, Any]) -> tuple[bool, dict[str
         from . import demo
         from .sweep import sweep
 
+        code_target = demo.backtest_fn
         with suppress_auto_sweep_record():
             res = sweep(demo.backtest_fn, demo.GRID, data=demo.data)
             v = res.verdict()
-            repro_figs = {
+            repro_figs: dict[str, Any] = {
                 "n_trials": v["n_trials"],
+                "n_ok_trials": v.get("n_ok_trials"),
+                "n_failed_trials": v.get("n_failed_trials"),
                 "n_trials_source": v["n_trials_source"],
+                "n_eff_participation": v.get("n_eff_participation"),
+                "deflated_sharpe_at_n_eff": v.get("deflated_sharpe_at_n_eff"),
+                "n_eff_diagnostic_note": v.get("n_eff_diagnostic_note"),
+                "dsr_probability": v.get("dsr_probability"),
                 "deflated_sharpe": v.get("deflated_sharpe"),
                 "psr_vs_zero": v.get("psr_vs_zero"),
                 "sr0_expected_max": v.get("sr0_expected_max"),
                 "performance": v.get("performance", {}),
                 "surface": res.surface(),
             }
+            ds_hashes = hash_dataset_any(demo.data)
     elif kind == "process":
         from .cli import _process_series
         from .core.process import dgp_stress
 
+        code_target = dgp_stress
         if data is None:
             from . import demo
 
@@ -700,8 +867,8 @@ def rerun_record(proj: Project, run_rec: dict[str, Any]) -> tuple[bool, dict[str
         repro_figs = dgp_stress(
             series, dgp=dgp, n_paths=int(spec.get("n_paths") or 80), seed=int(spec.get("seed") or 7)
         )
+        ds_hashes = hash_dataset_any(series)
     elif kind == "sweep" and spec.get("matrix_object_sha256"):
-        # Direct Python `sweep()` call recorded its trial matrix and trials in local CAS
         from .sweep.runner import SweepResult, Trial
 
         saved_obj = proj.get_object(str(spec["matrix_object_sha256"]))
@@ -713,17 +880,51 @@ def rerun_record(proj: Project, run_rec: dict[str, Any]) -> tuple[bool, dict[str
             data_hash=str(saved_obj.get("data_hash") or ""),
             grid_keys=list(saved_obj.get("grid_keys") or []),
             store_params=bool(saved_obj.get("store_params", False)),
+            risk_free_rate=saved_obj.get("risk_free_rate"),
+            periods_per_year=int(saved_obj.get("periods_per_year") or 252),
         )
-        v = sr.verdict(risk_free_rate=spec.get("risk_free_rate"))
+        v = sr.verdict(
+            risk_free_rate=spec.get("risk_free_rate", saved_obj.get("risk_free_rate")),
+            periods_per_year=spec.get("periods_per_year", saved_obj.get("periods_per_year")),
+        )
         repro_figs = {
             "n_trials": v["n_trials"],
+            "n_ok_trials": v.get("n_ok_trials"),
+            "n_failed_trials": v.get("n_failed_trials"),
             "n_trials_source": v["n_trials_source"],
+            "n_eff_participation": v.get("n_eff_participation"),
+            "deflated_sharpe_at_n_eff": v.get("deflated_sharpe_at_n_eff"),
+            "n_eff_diagnostic_note": v.get("n_eff_diagnostic_note"),
+            "dsr_probability": v.get("dsr_probability"),
             "deflated_sharpe": v.get("deflated_sharpe"),
             "psr_vs_zero": v.get("psr_vs_zero"),
             "sr0_expected_max": v.get("sr0_expected_max"),
             "performance": v.get("performance", {}),
             "surface": sr.surface(),
         }
+        ds_hashes = [sr.data_hash] if sr.data_hash else []
+    elif kind == "coded_signal":
+        from .coded import run_signal
+
+        sig_target = spec.get("signal_target")
+        if not sig_target:
+            raise ValueError("coded_signal repro_spec is missing `signal_target`.")
+        code_target = sig_target
+        with suppress_auto_sweep_record():
+            coded_prices = data.get("prices") if isinstance(data, dict) and "prices" in data else data
+            coded_res = run_signal(
+                sig_target,
+                prices=coded_prices,
+                data=data,
+                params=spec.get("params"),
+                grid=spec.get("grid"),
+                slippage_bps=float(spec.get("slippage_bps", 5.0)),
+                commission_bps=float(spec.get("commission_bps", 1.0)),
+                borrow_bps=float(spec.get("borrow_bps", 0.0)),
+                record_in_project=False,
+            )
+            repro_figs = dict(coded_res.get("figures") or {})
+            ds_hashes = list(coded_res.get("dataset_hashes") or [])
     else:
         wf = str(spec.get("workflow") or kind)
         repro_figs, _verdict, _nt, _src, _rets, _tr = execute_local_workflow(
@@ -733,21 +934,69 @@ def rerun_record(proj: Project, run_rec: dict[str, Any]) -> tuple[bool, dict[str
             grid=grid,
             inputs=spec.get("inputs"),
         )
+        ds_hashes = hash_dataset_any(data)
 
-    orig_flat = _flatten_scalars(run_rec.get("figures") or {})
-    repro_flat = _flatten_scalars(repro_figs)
+    orig_flat = _flatten_figures(run_rec.get("figures") or {})
+    repro_flat = _flatten_figures(repro_figs)
     mismatches: dict[str, dict[str, Any]] = {}
     for k, orig_v in orig_flat.items():
         if k not in repro_flat:
+            mismatches[k] = {
+                "recorded": orig_v,
+                "reproduced": None,
+                "reason": "missing_in_reproduction",
+            }
             continue
         new_v = repro_flat[k]
         if (
             isinstance(orig_v, (int, float))
             and isinstance(new_v, (int, float))
             and not isinstance(orig_v, bool)
+            and not isinstance(new_v, bool)
         ):
             if abs(float(orig_v) - float(new_v)) > 1e-6:
                 mismatches[k] = {"recorded": orig_v, "reproduced": new_v}
         elif orig_v != new_v:
             mismatches[k] = {"recorded": orig_v, "reproduced": new_v}
-    return len(mismatches) == 0, repro_figs, mismatches
+
+    figures_ok = len(mismatches) == 0
+
+    rec_manifest = run_rec.get("manifest") if isinstance(run_rec.get("manifest"), Mapping) else None
+    rec_rf = (rec_manifest or {}).get("risk_free") or {}
+    rf_arg = rec_rf.get("annual_rate") if rec_rf.get("source") == "caller" else None
+    cur_manifest = build_run_manifest(
+        params=dict(run_rec.get("params") or {}),
+        dataset_hashes=ds_hashes or list(run_rec.get("dataset_hashes") or []),
+        code_target=code_target,
+        costs_model=(rec_manifest.get("costs_model") if isinstance(rec_manifest, Mapping) else None),
+        periods_per_year=int(
+            ((rec_manifest or {}).get("annualization") or {}).get("periods_per_year") or 252
+        ),
+        risk_free_rate=rf_arg,
+    )
+    prov_ok, prov_diag = check_manifest_provenance(rec_manifest, current=cur_manifest)
+
+    return {
+        "run_id": run_rec.get("run_id"),
+        "command": run_rec.get("command"),
+        "hash_verified": hash_ok,
+        "hash_errors": hash_errors,
+        "figures_reproduced": figures_ok,
+        "provenance_verified": prov_ok,
+        "provenance": prov_diag,
+        "reproduced_figures": repro_figs,
+        "mismatches": mismatches,
+    }
+
+
+def rerun_record(proj: Project, run_rec: dict[str, Any]) -> tuple[bool, dict[str, Any], dict[str, Any]]:
+    """Re-execute a recorded run from its `repro_spec` and compare all recorded figures.
+
+    Returns `(matched, reproduced_figures, diff_map)` where `matched` requires
+    both `hash_verified` and `figures_reproduced`. Use `rerun_record_report()`
+    for the full 3-status (`hash_verified`, `figures_reproduced`,
+    `provenance_verified`) dictionary.
+    """
+    rep = rerun_record_report(proj, run_rec)
+    matched = bool(rep["hash_verified"] and rep["figures_reproduced"])
+    return matched, dict(rep["reproduced_figures"]), dict(rep["mismatches"])

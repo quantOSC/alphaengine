@@ -34,6 +34,15 @@ everyone who does not need them:
 from .active import breadth_ir, grinold_alpha
 from .allocate import hrp_weights, risk_parity_weights, vol_target
 from .backtest import run_backtest, score_backtest
+from .conventions import (
+    DEPRECATED_VERDICT_ALIASES,
+    Verdict,
+    build_annualization_spec,
+    build_costs_model_spec,
+    build_risk_free_spec,
+    normalize_verdict,
+    verdict_from_dsr,
+)
 from .covariance import denoise_cov, detone_cov, ewma_cov, ledoit_wolf_cov, variance_explained
 from .cross_section import fama_macbeth, quantile_book
 from .panel import cs_rank, cs_winsorize, cs_zscore, neutralize
@@ -55,20 +64,34 @@ from .signals import information_coefficient, quantile_returns, signal_decay, si
 from .stress import cost_ladder, drawdown_anatomy, overlap_stats, subperiod_stability
 from .technical import technical_features
 from .validation import (
+    VOL_FLOOR,
     combinatorial_oos_stability,
     cpcv_score,
     deflated_sharpe,
+    dsr_probability,
     expected_max_sharpe,
     harvey_liu_haircut,
     min_track_record_length,
     n_eff_participation,
     pbo_cscv,
     probabilistic_sharpe_ratio,
+    trials_for_deflated_sharpe,
 )
 
 __all__ = [
+    # conventions & verdict vocabulary (2.0)
+    "Verdict",
+    "DEPRECATED_VERDICT_ALIASES",
+    "normalize_verdict",
+    "verdict_from_dsr",
+    "build_annualization_spec",
+    "build_risk_free_spec",
+    "build_costs_model_spec",
+    "VOL_FLOOR",
+    "trials_for_deflated_sharpe",
     # validation, the honesty layer
     "deflated_sharpe",
+    "dsr_probability",
     "probabilistic_sharpe_ratio",
     "expected_max_sharpe",
     "harvey_liu_haircut",
