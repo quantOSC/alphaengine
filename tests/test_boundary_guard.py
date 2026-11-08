@@ -38,6 +38,10 @@ def test_seeded_server_only_module_violation(tmp_path: Path, monkeypatch: pytest
     violations = guard.check_forbidden_modules_and_secrets()
     assert any("supabase" in v for v in violations)
     assert any("trial_ledger_db" in v for v in violations)
+    # Messages must never echo the scanned source line (CodeQL clear-text logging).
+    for v in violations:
+        assert "import supabase" not in v
+        assert "from trial_ledger_db" not in v
 
 
 def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -47,10 +51,9 @@ def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.Mon
     fake_src = tmp_path / "src" / "alphaengine"
     fake_src.mkdir(parents=True)
     violation_file = fake_src / "credentials_leak.py"
+    live_key = "ae_live_0123456789abcdef0123456789"
     violation_file.write_text(
-        'SUPABASE_URL = "https://myproject.supabase.co"\n'
-        'ROLE = "service_role"\n'
-        'LIVE_KEY = "ae_live_0123456789abcdef0123456789"\n',
+        f'SUPABASE_URL = "https://myproject.supabase.co"\nROLE = "service_role"\nLIVE_KEY = "{live_key}"\n',
         encoding="utf-8",
     )
 
@@ -58,7 +61,13 @@ def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.Mon
     violations = guard.check_forbidden_modules_and_secrets()
     assert any("Supabase project URL" in v for v in violations)
     assert any("service_role" in v for v in violations)
-    assert any("Live ae_live_* secret literal" in v for v in violations)
+    assert any("Live ae_live_* literal" in v for v in violations)
+    # Logged messages are built from path/line/constant labels only — never the match.
+    for v in violations:
+        assert live_key not in v
+        assert "myproject.supabase.co" not in v
+        assert "SUPABASE_URL" not in v
+        assert "LIVE_KEY" not in v
 
 
 def test_seeded_local_command_paid_gate_violation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -100,3 +109,21 @@ def test_seeded_import_network_violation(monkeypatch: pytest.MonkeyPatch):
     res = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True)
     assert res.returncode == 1
     assert "Network socket call during import!" in res.stderr
+
+
+def test_import_network_check_omits_stderr(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Import-network failures must not echo subprocess stderr into violation text."""
+    import scripts.check_public_boundary as guard
+
+    class FakeResult:
+        returncode = 7
+        stdout = ""
+        stderr = "leak ae_live_0123456789abcdef0123456789 and password=supersecret"
+
+    monkeypatch.setattr(guard.subprocess, "run", lambda *a, **k: FakeResult())
+    violations = guard.check_import_no_networking()
+    assert len(violations) == 1
+    assert "exit 7" in violations[0]
+    assert "ae_live_" not in violations[0]
+    assert "supersecret" not in violations[0]
+    assert "stderr omitted" in violations[0]
