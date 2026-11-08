@@ -1066,7 +1066,8 @@ def run_signal(
         selection = pbo_cscv(mat.tolist())
 
     scored_sealable = bool(scored.get("sealable", True))
-    validation = scored.get("validation") if isinstance(scored.get("validation"), dict) else {}
+    raw_validation = scored.get("validation")
+    validation: dict[str, Any] = raw_validation if isinstance(raw_validation, dict) else {}
     scored_reason = validation.get("verdict_reason")
     borrow_withheld = (not scored_sealable) or (
         str(scored_reason or "") == "borrow not supplied for short positions"
