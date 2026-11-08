@@ -697,7 +697,13 @@ def test_research_shell_tab_completion_status_line_inline_commands_and_agent_rec
     assert "log" in pool and "/log" in pool
 
     comp = make_completer(verbs=verbs, symbols=["AAPL"], proj=proj)
-    assert comp(r_a[:6], 0) == r_a
+    # `run_` plus two hex digits collides often enough to return the other run.
+    prefix = r_a
+    for n in range(1, len(r_a) + 1):
+        prefix = r_a[:n]
+        if not r_b.startswith(prefix):
+            break
+    assert comp(prefix, 0) == r_a
     assert comp("eq_pa", 0) == "eq_panel"
     assert comp(idea_id[:7], 0) == idea_id
     assert comp("nonexistent_prefix_xyz", 0) is None

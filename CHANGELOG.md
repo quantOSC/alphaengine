@@ -30,6 +30,13 @@ treated as part of the public contract).
 - Single-trial unrecorded trial counts cap verdicts at `marginal` (previously `inconclusive`).
 - Failed grid combinations in sweeps are preserved in `n_trials` denominator rather than discarded.
 
+## [1.1.11] - 2026-11-04
+
+### Fixed
+- **Zero-volatility Sharpe tolerance (`core/performance.py`, `core/validation.py` — WIL-22 0.3):** Sample volatility below `1e-6` is treated as zero for Sharpe in `performance_report`, `_per_period_sharpe`, and the CSCV block Sharpe. Exactly `1e-6` still divides. A constant series whose float64 sample std is a positive residual no longer divides into a meaningless ratio. Series with volatility at or above `1e-6` are unchanged. Pinned goldens do not move.
+- **Transaction cost on the final close (`core/backtest.py` — WIL-22 0.4):** A position still open on the last bar is closed at that bar's close and charged the same slippage, commission, and impact as any other fill. The last equity mark and `costs_per_bar` include that cost. A zero-cost close still leaves the mark unchanged.
+- **One-trial verdict (`core/backtest.py` — WIL-23 0.9):** A missing trial count or a count of 1 stays `inconclusive` when the figure is not already `likely_noise`, and that validation result carries `deflation_applied: false`. A recorded count above 1 is unchanged and does not gain the flag.
+
 ## [1.1.10] - 2026-10-27
 
 ### Fixed

@@ -264,6 +264,12 @@ def _as_1d_float(values: ArrayLike | Sequence[float] | None) -> np.ndarray:
 
 # ── Sharpe statistics ───────────────────────────────────────────────────
 
+# Sample volatility below this is zero for a Sharpe. Exactly 1e-6 still
+# divides. A constant series is not always ``std == 0`` in float64, and
+# dividing by that residual prints a ratio with no economic meaning. Same
+# tolerance in ``core.performance``.
+_ZERO_VOL = 1e-6
+
 
 def _per_period_sharpe(returns: np.ndarray, *, risk_free_per_period: float = 0.0) -> float:
     """Mean excess over a constant per-period cash rate, divided by sample vol.

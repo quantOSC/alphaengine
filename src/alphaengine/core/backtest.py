@@ -382,6 +382,8 @@ def run_backtest(
     for tk in tickers:
         if pos[tk]["shares"] != 0.0 and prices_n[tk].get(last):
             fillp = prices_n[tk][last]["close"]
+            if not fillp or fillp <= 0:
+                continue
             delta = -pos[tk]["shares"]
             exec_price = fillp * (1 + slip) if delta > 0 else fillp * (1 - slip)
             notional = abs(delta) * exec_price
