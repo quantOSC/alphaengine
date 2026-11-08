@@ -4,7 +4,7 @@
 Asserts that:
 1. `constraints/engine.txt` pins the exact version from `_version.py`.
 2. The wheel and sdist hashes in `constraints/engine.txt` match built distribution files.
-3. Every consumer using this constraints file is guaranteed parity on alphaengine 2.0.0.
+3. Every consumer using this constraints file is guaranteed parity on alphaengine 2.0.x.
 """
 
 from __future__ import annotations

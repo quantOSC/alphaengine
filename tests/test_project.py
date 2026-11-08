@@ -568,7 +568,7 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
 
         ack = {
             "sync_contract": 2,
-            "engine_version": "2.0.0",
+            "engine_version": "2.0.1",
             "items": [
                 {"type": "study", "local_id": "s1", "status": "accepted"},
                 {"type": "run", "local_id": "r1", "status": "accepted"},
@@ -609,7 +609,7 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
 
         body = {
             "sync_contract": 2,
-            "engine_version": "2.0.0",
+            "engine_version": "2.0.1",
             "studies": [],
             "next_cursor": None,
             "runs": [
@@ -1044,7 +1044,7 @@ def test_require_firm_key_choke_point_keyring_and_no_key_leak(
     assert cli.main(["init", "--name", "free-project"]) == 0
     capsys.readouterr()
     assert cli.main(["version"]) == 0
-    assert "2.0.0" in capsys.readouterr().out
+    assert "2.0.1" in capsys.readouterr().out
     assert cli.main(["whoami"]) == 0
     capsys.readouterr()
     assert cli.main(["doctor"]) == 0
@@ -1181,7 +1181,7 @@ def test_end_to_end_signed_in_runs_sealed_portal_trace_and_rich_pdfs(
                 return False
 
         resp_body = (
-            b'{"sync_contract": 2, "engine_version": "2.0.0", "items": [], '
+            b'{"sync_contract": 2, "engine_version": "2.0.1", "items": [], '
             b'"ok": true, "id": "run_portal_1", "study_id": "st_portal_1"}'
         )
         return _Resp(resp_body)

@@ -130,6 +130,6 @@
     "deflated_sharpe": 0.8306,
     "engine_verified": true,
     "n_trials": 3,
-    "verdict": "marginal"
+    "verdict": "unverified"
   }
 }

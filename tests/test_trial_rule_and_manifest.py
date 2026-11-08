@@ -113,27 +113,44 @@ def test_run_manifest_cas_and_three_status_verification_and_drift(
     man_dict = head.get("manifest")
     assert isinstance(man_dict, dict)
     man = RunManifest.from_dict(man_dict)
-    assert man.engine_version == "2.0.0"
+    assert man.engine_version == "2.0.1"
     assert man.manifest_version == 1
     man_sha = head.get("manifest_sha256")
     assert isinstance(man_sha, str) and len(man_sha) == 64
-    assert proj.get_object(man_sha)["engine_version"] == "2.0.0"
+    assert proj.get_object(man_sha)["engine_version"] == "2.0.1"
 
     # Rerun checks all 3 statuses: hash_verified, figures_reproduced, provenance_verified
-    prior_fam, prior_proj = cumulative_trials_for(proj)
+    run_family = str(head.get("family") or "demo")
+    prior_fam, prior_proj = cumulative_trials_for(proj, family=run_family)
     rep = rerun_record_report(proj, head)
     assert rep["hash_verified"] is True
     assert rep["figures_reproduced"] is True
     assert rep["provenance_verified"] is True
+    assert rep["n_trials_added"] == 1
+    after_api_fam, after_api_proj = cumulative_trials_for(proj, family=run_family)
+    assert after_api_proj == prior_proj + 1
+    assert after_api_fam == prior_fam + 1
 
-    # ae rerun re-executes without adding a trial!
+    # ae rerun counts as exactly 1 new trial (William's 2.0.1 decision)
     assert cli.main(["rerun", "HEAD", "--json"]) == 0
     cli_rep = json.loads(capsys.readouterr().out)
     assert cli_rep["hash_verified"] is True
     assert cli_rep["figures_reproduced"] is True
     assert cli_rep["provenance_verified"] is True
-    after_rerun_fam, after_rerun_proj = cumulative_trials_for(proj)
-    assert after_rerun_proj == prior_proj, "ae rerun must NOT add a trial to project cumulative trials"
+    assert cli_rep["n_trials_added"] == 1
+    after_rerun_fam, after_rerun_proj = cumulative_trials_for(proj, family=run_family)
+    assert after_rerun_proj == after_api_proj + 1
+    assert after_rerun_fam == after_api_fam + 1
+
+    # Two more reruns add exactly 2
+    before_two_fam, before_two_proj = cumulative_trials_for(proj, family=run_family)
+    assert cli.main(["rerun", "HEAD", "--json"]) == 0
+    capsys.readouterr()
+    assert cli.main(["rerun", "HEAD", "--json"]) == 0
+    capsys.readouterr()
+    after_two_fam, after_two_proj = cumulative_trials_for(proj, family=run_family)
+    assert after_two_proj == before_two_proj + 2
+    assert after_two_fam == before_two_fam + 2
 
     # Seal study from run and verify 3 statuses via `verify_study_file` and `ae verify`
     study, study_path = seal_from_project(proj, "HEAD")
@@ -176,5 +193,5 @@ def test_run_manifest_cas_and_three_status_verification_and_drift(
 
     # Standalone `build_run_manifest` helper works cleanly outside any project
     standalone = build_run_manifest(params={"lookback": 20}, dataset_hashes=["deadbeef"])
-    assert standalone.engine_version == "2.0.0"
+    assert standalone.engine_version == "2.0.1"
     assert standalone.annualization["periods_per_year"] == 252
