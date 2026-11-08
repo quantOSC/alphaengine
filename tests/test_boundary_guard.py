@@ -61,7 +61,7 @@ def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.Mon
     violations = guard.check_forbidden_modules_and_secrets()
     assert any("Supabase project URL" in v for v in violations)
     assert any("service_role" in v for v in violations)
-    assert any("Live ae_live_* secret literal" in v for v in violations)
+    assert any("Live ae_live_* literal" in v for v in violations)
     # Logged messages are built from path/line/constant labels only — never the match.
     for v in violations:
         assert live_key not in v
