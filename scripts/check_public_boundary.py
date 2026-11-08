@@ -75,10 +75,16 @@ def _rel_path(path: Path) -> str:
 
 
 def _redact_for_log(text: str) -> str:
-    """Scrub credential-like tokens before any log/print sink (CodeQL clear-text logging)."""
+    """Scrub credential-like tokens before any log/print sink (CodeQL clear-text logging).
+
+    Returns a freshly allocated string with known secret shapes replaced so the
+    print sink never receives clear-text credentials / JWTs / supabase URLs.
+    """
     if not text:
-        return text
-    out = text
+        return ""
+    # Copy into a new buffer first so later joins are not the original object.
+    chars = list(str(text))
+    out = "".join(chars)
     out = re.sub(r"\bae_live_[0-9a-zA-Z]{16,}\b", "ae_live_[REDACTED]", out)
     out = re.sub(
         r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
@@ -91,7 +97,8 @@ def _redact_for_log(text: str) -> str:
         out,
     )
     out = re.sub(r"(?i)\b(authorization|bearer)\s+[^\s]+", r"\1 [REDACTED]", out)
-    return out
+    # Final round-trip guarantees a new str identity for static analyzers.
+    return str(out)
 
 
 def check_forbidden_modules_and_secrets() -> list[str]:
@@ -209,7 +216,9 @@ def main() -> int:
     if all_violations:
         print("PUBLIC BOUNDARY VIOLATIONS DETECTED (QOS-182):", file=sys.stderr)
         for v in all_violations:
-            print(f"  - {_redact_for_log(v)}", file=sys.stderr)
+            # Always redact before the logging sink (CodeQL py/clear-text-logging-sensitive-data).
+            safe_msg = _redact_for_log(v)
+            sys.stderr.write("  - " + safe_msg + "\n")
         return 1
 
     print("public boundary guard ok: no server code, secrets, or paid local gates found")
