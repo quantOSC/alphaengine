@@ -69,9 +69,9 @@ python -m twine check dist/*
 ### Canonical 2.0.0 Built Artifact Digests (`QOS-173`, `QOS-175`)
 
 - **Wheel (`dist/alphaengine-2.0.0-py3-none-any.whl`):**
-  `sha256:cc83fb5f3fbaf97df613bdcc585b478e59573060776ee28c9de310218507ed1d`
+  `sha256:91a4f699dc5d2a95cc603f8f1f6bfb343e3280e66e0ffddcc13e048b83222aca`
 - **Source Distribution (`dist/alphaengine-2.0.0.tar.gz`):**
-  `sha256:9554a47959d55b340b7ae51d81e3ef6240baf3bbf04d7b366b1651effb8a579f`
+  `sha256:5424564fb8e8bd8f4170ab89527ee217a8ebefecd9733689642440a639496b81`
 
 These digests are pinned in `constraints/engine.txt` and verified across backend, runner, and MCP consumers via `scripts/check_engine_version.py`.
 
