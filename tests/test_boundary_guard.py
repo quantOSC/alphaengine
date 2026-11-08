@@ -47,10 +47,9 @@ def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.Mon
     fake_src = tmp_path / "src" / "alphaengine"
     fake_src.mkdir(parents=True)
     violation_file = fake_src / "credentials_leak.py"
+    live_key = "ae_live_0123456789abcdef0123456789"
     violation_file.write_text(
-        'SUPABASE_URL = "https://myproject.supabase.co"\n'
-        'ROLE = "service_role"\n'
-        'LIVE_KEY = "ae_live_0123456789abcdef0123456789"\n',
+        f'SUPABASE_URL = "https://myproject.supabase.co"\nROLE = "service_role"\nLIVE_KEY = "{live_key}"\n',
         encoding="utf-8",
     )
 
@@ -59,6 +58,31 @@ def test_seeded_secret_pattern_violation(tmp_path: Path, monkeypatch: pytest.Mon
     assert any("Supabase project URL" in v for v in violations)
     assert any("service_role" in v for v in violations)
     assert any("Live ae_live_* secret literal" in v for v in violations)
+    # Logged messages must never echo the raw credential (CodeQL clear-text logging).
+    for v in violations:
+        logged = guard._redact_for_log(v)
+        assert live_key not in logged
+        assert "myproject.supabase.co" not in logged
+
+
+def test_redact_for_log_scrubs_credential_shaped_text() -> None:
+    import scripts.check_public_boundary as guard
+
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dGVzdHNpZ25hdHVyZQ"
+    raw = (
+        "leak ae_live_0123456789abcdef0123456789 and "
+        "https://abc123.supabase.co/rest plus "
+        f"Bearer {jwt}"
+    )
+    scrubbed = guard._redact_for_log(raw)
+    assert "ae_live_0123456789abcdef0123456789" not in scrubbed
+    assert "ae_live_[REDACTED]" in scrubbed
+    assert "supabase.co" not in scrubbed
+    assert "[SUPABASE_URL_REDACTED]" in scrubbed
+    assert jwt not in scrubbed
+    assert "Bearer [REDACTED]" in scrubbed
+    # Standalone JWT (no Bearer prefix) is also scrubbed.
+    assert "[JWT_REDACTED]" in guard._redact_for_log(f"token={jwt}")
 
 
 def test_seeded_local_command_paid_gate_violation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
