@@ -74,6 +74,26 @@ def _rel_path(path: Path) -> str:
         return path.name
 
 
+def _redact_for_log(text: str) -> str:
+    """Scrub credential-like tokens before any log/print sink (CodeQL clear-text logging)."""
+    if not text:
+        return text
+    out = text
+    out = re.sub(r"\bae_live_[0-9a-zA-Z]{16,}\b", "ae_live_[REDACTED]", out)
+    out = re.sub(
+        r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}",
+        "[JWT_REDACTED]",
+        out,
+    )
+    out = re.sub(
+        r"https?://[a-zA-Z0-9_-]+\.supabase\.co[^\s\"']*",
+        "[SUPABASE_URL_REDACTED]",
+        out,
+    )
+    out = re.sub(r"(?i)\b(authorization|bearer)\s+[^\s]+", r"\1 [REDACTED]", out)
+    return out
+
+
 def check_forbidden_modules_and_secrets() -> list[str]:
     """Scan all Python files in src/ for forbidden server modules and secret patterns."""
     violations: list[str] = []
@@ -166,7 +186,11 @@ def check_import_no_networking() -> list[str]:
         text=True,
     )
     if res.returncode != 0:
-        return [f"Network access attempted during `import alphaengine`: {res.stderr.strip()}"]
+        # Never echo raw stderr: it may carry env, paths, or credential-shaped text.
+        return [
+            "Network access attempted during `import alphaengine` "
+            f"(subprocess exit {res.returncode}; stderr redacted)"
+        ]
     return []
 
 
@@ -185,7 +209,7 @@ def main() -> int:
     if all_violations:
         print("PUBLIC BOUNDARY VIOLATIONS DETECTED (QOS-182):", file=sys.stderr)
         for v in all_violations:
-            print(f"  - {v}", file=sys.stderr)
+            print(f"  - {_redact_for_log(v)}", file=sys.stderr)
         return 1
 
     print("public boundary guard ok: no server code, secrets, or paid local gates found")
