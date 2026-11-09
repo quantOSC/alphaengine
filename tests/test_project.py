@@ -499,6 +499,7 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     import io
     import json
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     from alphaengine.client.session import MAX_FIGURE_LIST
@@ -528,7 +529,8 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     # 1. `ae remote add quantos <url>`
     assert cli.main(["remote", "add", "quantos", "https://sync.example.invalid"]) == 0
     rem_out = capsys.readouterr().out
-    assert "https://sync.example.invalid" in rem_out
+    parsed_urls = [urllib.parse.urlparse(tok.strip("()[]<>\"'.,")) for tok in rem_out.split()]
+    assert any(u.scheme == "https" and u.hostname == "sync.example.invalid" for u in parsed_urls)
 
     # 2. `ae push --dry-run` prints preview offline; `--dry-run --json` emits structured payload
     assert cli.main(["push", "--dry-run"]) == 0
