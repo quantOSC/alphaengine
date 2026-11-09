@@ -338,3 +338,20 @@ def test_pull_cursor_pagination_idea_upsert_and_optional_none_metrics(
     )
     rc = cli.main(["pull"])
     assert rc == EXIT_NETWORK_OR_SERVER_ERROR == 5
+
+
+def test_unreachable_host_is_not_a_contract_upgrade() -> None:
+    from alphaengine.sync import PullResponse, describe_unreachable, portal_host_note
+
+    msg = describe_unreachable(
+        "https://api.qosai.app",
+        OSError("[Errno 11001] getaddrinfo failed"),
+    )
+    assert "does not resolve" in msg
+    assert "not a sync-contract mismatch" in msg
+    assert "ae remote add quantos" in msg
+    assert portal_host_note("https://api.qosai.app")
+    assert portal_host_note("https://api.quantos.example") is None
+
+    with pytest.raises(SyncContractMismatchError, match="not the quantOS sync API"):
+        PullResponse.from_dict({"runs": [], "ideas": [], "studies": []})

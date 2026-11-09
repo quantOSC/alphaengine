@@ -16,7 +16,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["Command", "COMMANDS", "DATA_DOORS", "GROUPS", "Flag", "FLAGS", "by_verb", "in_group"]
+__all__ = [
+    "Command",
+    "COMMANDS",
+    "DATA_DOORS",
+    "GROUPS",
+    "Flag",
+    "FLAGS",
+    "access_word",
+    "by_verb",
+    "in_group",
+    "slash_entries",
+]
 
 
 @dataclass(frozen=True)
@@ -874,7 +885,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         ),
         examples=(
             "alphaengine remote add quantos",
-            "alphaengine remote add quantos https://qosai.app",
+            "alphaengine remote list",
         ),
         flags=("url",),
     ),
@@ -885,7 +896,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         scope="both",
         locality="remote",
         supports_json=True,
-        purpose="sync studies, runs, ideas, and trial_events to quantOS (sync_contract=2)",
+        purpose="send this project's summaries to the firm workspace",
         body=(
             "Posts sealed studies (`seal_version = 2`), allowlisted ledger runs, ideas "
             "(`idea_id`, `kill_rule`), and idempotent `trial_events` to "
@@ -910,12 +921,15 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         scope="both",
         locality="remote",
         supports_json=True,
-        purpose="pull team runs, ideas, and studies from quantOS via cursor pagination",
+        purpose="copy team run, idea, and study summaries into this project",
         body=(
-            "Fetches team runs, ideas, and studies from `GET /api/workspace/pull` using "
-            "the per-remote cursor saved in `.alphaengine/project.toml` (`[sync_cursors]`). "
-            "Pulled records are marked `read_only: true` (summary figures only; code and "
-            "raw datasets are never fetched and cannot be rerun locally without local inputs)."
+            "The inbound half of workspace sync. `push` sends this machine's summaries up; "
+            "`pull` copies the team's runs, ideas, and sealed studies down from "
+            "`GET /api/workspace/pull`, continuing from the cursor in "
+            "`.alphaengine/project.toml`.\n\n"
+            "Pulled records are marked read-only. Code and price files are not downloaded. "
+            "Needs a firm `ae_live_` key. The portal website is not the sync API: "
+            "`remote add quantos` with no URL stores the firm API."
         ),
         examples=("alphaengine pull", "alphaengine pull --limit 50"),
         flags=("since", "limit", "url", "json"),
@@ -1048,6 +1062,50 @@ DATA_DOORS: tuple[tuple[str, str], ...] = (
     ),
     ("--universe NAME", "a universe you registered in the portal, with the closes you stored."),
 )
+
+
+def access_word(locality: str) -> str:
+    """One word for the directory and the `/` picker.
+
+    `free` never calls the portal. `firm` does, and needs a signed-in key.
+    `both` runs on this machine until a flag sends it to the portal.
+    """
+    if locality == "remote":
+        return "firm"
+    if locality == "hybrid":
+        return "both"
+    return "free"
+
+
+_SLASH_FIRST = (
+    "demo",
+    "login",
+    "load",
+    "screen",
+    "validate",
+    "push",
+    "pull",
+    "commands",
+    "help",
+)
+
+
+def slash_entries() -> tuple[tuple[str, str, str], ...]:
+    """Rows for the session `/` picker: verb, access word, one-line purpose."""
+    pool: dict[str, tuple[str, str, str]] = {}
+    for command in COMMANDS:
+        if command.scope == "cli":
+            continue
+        pool[command.verb] = (command.verb, access_word(command.locality), command.purpose)
+    ordered: list[tuple[str, str, str]] = []
+    for verb in _SLASH_FIRST:
+        row = pool.pop(verb, None)
+        if row is not None:
+            ordered.append(row)
+    ordered.extend(pool.values())
+    ordered.append(("view", "free", "the books on this account"))
+    ordered.append(("details", "free", "version and what stays on this machine"))
+    return tuple(ordered)
 
 
 def by_verb(verb: str) -> Command | None:

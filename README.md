@@ -441,8 +441,8 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | Command | Does | Boundary | Where |
 |---|---|---|---|
 | `remote add <name> [url] \| list` | configure or list remote sync endpoints in .alphaengine/project.toml | `local` | shell + session |
-| `push [remote] [--dry-run] [--show-payload] [--yes] [--share-series]` | sync studies, runs, ideas, and trial_events to quantOS (sync_contract=2) | `remote` | shell + session |
-| `pull [remote] [--since CURSOR] [--limit N]` | pull team runs, ideas, and studies from quantOS via cursor pagination | `remote` | shell + session |
+| `push [remote] [--dry-run] [--show-payload] [--yes] [--share-series]` | send this project's summaries to the firm workspace | `remote` | shell + session |
+| `pull [remote] [--since CURSOR] [--limit N]` | copy team run, idea, and study summaries into this project | `remote` | shell + session |
 | `whoami [--json]` | show credential source, masked prefix, keyring status, and remote URL | `local` | shell + session |
 | `doctor [--url URL] [--json]` | check local project, keyring, credentials, and server version parity | `local/remote` | shell + session |
 | `plugin list` | list installed loader, method, and report template plugins | `local` | shell + session |
@@ -553,7 +553,7 @@ alphaengine data list
 alphaengine data show equities
 alphaengine data lineage HEAD
 alphaengine remote add quantos
-alphaengine remote add quantos https://qosai.app
+alphaengine remote list
 alphaengine push --dry-run
 alphaengine push --dry-run --show-payload
 alphaengine push --yes

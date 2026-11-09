@@ -11,12 +11,13 @@ from typing import Any
 from rich.text import Text
 from textual import events
 from textual.app import App, ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, ListItem, ListView, RichLog, Static
 
 from .._version import __version__
 from ..cli import narration_to, resolve_data, thesis_id_of
+from ..commands import slash_entries
 from .dispatch import Desk, submit
 from .mark import details_text, seal
 from .typeface import SPIN, body_line, meta_line, spin_line, tool_line, user_line
@@ -79,9 +80,19 @@ Screen { background: #0b0d10; }
 }
 #prompt-row {
     dock: bottom;
-    height: 7;
+    height: auto;
+    max-height: 22;
     background: #0b0d10;
-    padding: 1 2;
+    padding: 0 2 1 2;
+}
+#palette {
+    height: auto;
+    max-height: 14;
+    margin: 0 0 1 0;
+    background: #10141a;
+    border: tall #3d7ea6;
+    padding: 0 1;
+    display: none;
 }
 #prompt {
     width: 100%;
@@ -174,6 +185,41 @@ def _styled(plain: str) -> Text:
     return body_line(stripped)
 
 
+_ASK = "Ask, or type /"
+_PALETTE_WINDOW = 8
+
+
+def _match_slash(query: str, rows: tuple[tuple[str, str, str], ...]) -> list[tuple[str, str, str]]:
+    """Prefer a verb that starts with the query, then one that contains it."""
+    q = query.lower().strip()
+    if not q:
+        return list(rows)
+    starts = [row for row in rows if row[0].startswith(q)]
+    contains = [row for row in rows if q in row[0] and row not in starts]
+    about = [row for row in rows if q in row[2].lower() and row not in starts and row not in contains]
+    return starts + contains + about
+
+
+class Prompt(Input):
+    """The session prompt. Arrow keys move the `/` picker instead of the cursor."""
+
+    async def _on_key(self, event: events.Key) -> None:
+        app = self.app
+        if isinstance(app, QuantOSApp) and app.palette_open and event.key in {"up", "down", "tab", "escape"}:
+            if event.key == "up":
+                app.palette_move(-1)
+            elif event.key == "down":
+                app.palette_move(1)
+            elif event.key == "tab":
+                app.palette_complete()
+            else:
+                app.palette_dismiss()
+            event.stop()
+            event.prevent_default()
+            return
+        await super()._on_key(event)
+
+
 def _fit(text: str, width: int = 22) -> str:
     text = " ".join(str(text).split())
     if len(text) <= width:
@@ -246,6 +292,10 @@ class QuantOSApp(App[None]):
         self.load_label = ""
         self.spin_label = ""
         self._spin_i = 0
+        self.palette_open = False
+        self._palette_rows: list[tuple[str, str, str]] = []
+        self._palette_index = 0
+        self._slash_rows = slash_entries()
 
     def compose(self) -> ComposeResult:
         yield Static("", id="status")
@@ -258,8 +308,9 @@ class QuantOSApp(App[None]):
                 yield Static("", id="formula")
                 yield Static("", id="inputs")
                 yield DataTable(id="series", zebra_stripes=True)
-        with Horizontal(id="prompt-row"):
-            yield Input(placeholder="Ask", id="prompt")
+        with Vertical(id="prompt-row"):
+            yield Static("", id="palette")
+            yield Prompt(placeholder=_ASK, id="prompt")
 
     def on_mount(self) -> None:
         self.query_one("#series", DataTable).cursor_type = "row"
@@ -279,7 +330,7 @@ class QuantOSApp(App[None]):
         self._paint_empty()
         prompt = self.query_one(Input)
         if not (self.desk.pending_secret or self.desk.pending_provider or self.desk.pending_url):
-            prompt.placeholder = "Ask"
+            prompt.placeholder = _ASK
 
     def _project_trials(self, proj: Any) -> int:
         """Ledger size is read off the UI tick. Cache it so the spinner is not blocked on disk."""
@@ -382,11 +433,96 @@ class QuantOSApp(App[None]):
             bits.append("  ".join(shown))
         return " · ".join(bits)
 
+    def _sync_palette(self, value: str) -> None:
+        blocked = self.busy or self.desk.pending_secret or self.desk.pending_provider or self.desk.pending_url
+        if blocked or not value.startswith("/"):
+            self._hide_palette()
+            return
+        query = value[1:].split(" ", 1)[0]
+        self._palette_rows = _match_slash(query, self._slash_rows)
+        if self._palette_index >= len(self._palette_rows):
+            self._palette_index = 0
+        self._paint_palette()
+
+    def _hide_palette(self) -> None:
+        self.palette_open = False
+        self._palette_rows = []
+        self._palette_index = 0
+        node = self.query_one("#palette", Static)
+        node.display = False
+        node.update("")
+
+    def _paint_palette(self) -> None:
+        node = self.query_one("#palette", Static)
+        rows = self._palette_rows
+        if not rows:
+            node.update(Text("  no matching command", style="#8b949e"))
+            node.display = True
+            self.palette_open = True
+            return
+        index = self._palette_index
+        start = max(0, min(index - 1, max(0, len(rows) - _PALETTE_WINDOW)))
+        window = rows[start : start + _PALETTE_WINDOW]
+        verb_w = max(len(verb) for verb, _, _ in window)
+        out = Text()
+        out.append("  commands\n", style="#8b949e")
+        for offset, (verb, badge, purpose) in enumerate(window):
+            absolute = start + offset
+            selected = absolute == index
+            out.append("> " if selected else "  ", style="bold #7ec8c4" if selected else "#6b7380")
+            out.append(verb.ljust(verb_w), style="bold #e8eef2" if selected else "#c5cdd6")
+            out.append("  ")
+            badge_style = "#e8b15a" if badge == "firm" else "#7ec8c4" if badge == "free" else "#9ecbff"
+            out.append(badge.ljust(4), style=badge_style)
+            out.append("  ")
+            out.append(purpose + "\n", style="#8b949e")
+        out.append(
+            f"  {index + 1} of {len(rows)}    up/down    tab completes    enter runs",
+            style="#6b7380",
+        )
+        node.update(out)
+        node.display = True
+        self.palette_open = True
+
+    def palette_move(self, step: int) -> None:
+        if not self._palette_rows:
+            return
+        self._palette_index = (self._palette_index + step) % len(self._palette_rows)
+        self._paint_palette()
+
+    def palette_complete(self) -> None:
+        if not self._palette_rows:
+            return
+        verb = self._palette_rows[self._palette_index][0]
+        prompt = self.query_one(Prompt)
+        filled = f"/{verb} "
+        prompt.value = filled
+        prompt.cursor_position = len(filled)
+
+    def palette_dismiss(self) -> None:
+        prompt = self.query_one(Prompt)
+        prompt.value = ""
+        self._hide_palette()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id != "prompt":
+            return
+        self._sync_palette(event.value)
+
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
+        chosen: str | None = None
+        if self.palette_open and text.startswith("/") and " " not in text[1:] and self._palette_rows:
+            chosen = self._palette_rows[self._palette_index][0]
         event.input.value = ""
+        self._hide_palette()
         if not text or self.busy:
             return
+        if chosen == "details" or text.lower() in {"/details", "details"}:
+            self.push_screen(Details())
+            return
+        if chosen:
+            text = chosen
         if self.desk.pending_secret:
             self._accept_secret(text)
             return
@@ -395,9 +531,6 @@ class QuantOSApp(App[None]):
             return
         if self.desk.pending_url:
             self._accept_url(text)
-            return
-        if text.lower() in {"/details", "details"}:
-            self.push_screen(Details())
             return
         self.turns += 1
         self.busy = True
@@ -421,7 +554,7 @@ class QuantOSApp(App[None]):
         self.desk.pending_secret = None
         prompt = self.query_one(Input)
         prompt.password = False
-        prompt.placeholder = "Ask"
+        prompt.placeholder = _ASK
         log = self.query_one("#transcript", RichLog)
         self._reveal_trace()
         if env is None or not value:
@@ -457,7 +590,7 @@ class QuantOSApp(App[None]):
         value = self.desk.held_key or ""
         self.desk.held_key = None
         self.desk.pending_provider = False
-        prompt.placeholder = "Ask"
+        prompt.placeholder = _ASK
         if not value:
             log.write("nothing entered.")
             return
@@ -516,7 +649,7 @@ class QuantOSApp(App[None]):
         env = self.desk.pending_url
         self.desk.pending_url = None
         prompt = self.query_one(Input)
-        prompt.placeholder = "Ask"
+        prompt.placeholder = _ASK
         log = self.query_one("#transcript", RichLog)
         self._reveal_trace()
         if env is None or not value:

@@ -578,8 +578,8 @@ class PushRequest:
         sc = int(raw.get("sync_contract") or 0)
         if sc != SYNC_CONTRACT_VERSION:
             raise SyncContractMismatchError(
-                f"Expected sync_contract={SYNC_CONTRACT_VERSION}, got {sc!r}. "
-                "Upgrade alphaengine and quantOS to matching 2.x versions."
+                f"This payload speaks sync_contract={sc}, and this engine requires "
+                f"sync_contract={SYNC_CONTRACT_VERSION}."
             )
         proj = dict(raw["project"]) if isinstance(raw.get("project"), Mapping) else {}
         studies = [dict(s) for s in (raw.get("studies") or []) if isinstance(s, Mapping)]
@@ -694,14 +694,15 @@ class PushResponse:
     def from_dict(cls, raw: Mapping[str, Any], *, submitted_count: int = 0) -> PushResponse:
         if "sync_contract" not in raw:
             raise SyncContractMismatchError(
-                "Server response is missing `sync_contract` (expected sync_contract=2). "
-                "Upgrade quantOS backend or check your remote URL."
+                "This response has no sync contract, so the URL is not the quantOS sync API. "
+                "The portal site is not that API. Reset with `ae remote add quantos` (no URL)."
             )
         sc = int(raw.get("sync_contract") or 0)
         if sc != SYNC_CONTRACT_VERSION:
             raise SyncContractMismatchError(
-                f"Server speaks sync_contract={sc}, but alphaengine {current_engine_version()} "
-                f"requires sync_contract={SYNC_CONTRACT_VERSION}."
+                f"This engine speaks sync contract {SYNC_CONTRACT_VERSION}. The server speaks {sc}. "
+                "Upgrade the quantOS backend to contract 2, or install the alphaengine build "
+                "that server expects (`ae doctor`)."
             )
         raw_items = raw.get("items")
         if not isinstance(raw_items, list):
@@ -746,14 +747,15 @@ class PullResponse:
     def from_dict(cls, raw: Mapping[str, Any]) -> PullResponse:
         if "sync_contract" not in raw:
             raise SyncContractMismatchError(
-                "Server pull response is missing `sync_contract` (expected sync_contract=2). "
-                "Upgrade quantOS backend or check your remote URL."
+                "This pull response has no sync contract, so the URL is not the quantOS sync API. "
+                "The portal site is not that API. Reset with `ae remote add quantos` (no URL)."
             )
         sc = int(raw.get("sync_contract") or 0)
         if sc != SYNC_CONTRACT_VERSION:
             raise SyncContractMismatchError(
-                f"Server speaks sync_contract={sc}, but alphaengine {current_engine_version()} "
-                f"requires sync_contract={SYNC_CONTRACT_VERSION}."
+                f"This engine speaks sync contract {SYNC_CONTRACT_VERSION}. The server speaks {sc}. "
+                "Upgrade the quantOS backend to contract 2, or install the alphaengine build "
+                "that server expects (`ae doctor`)."
             )
         nxt = raw.get("next_cursor")
         cursor_str = str(nxt).strip() if isinstance(nxt, str) and nxt.strip() else None

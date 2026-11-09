@@ -638,7 +638,7 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen_pull)
     assert cli.main(["pull", "--key", "ae_live_test"]) == 0
     pull_out = capsys.readouterr().out
-    assert "runs (new=1," in pull_out and "ideas (new=1," in pull_out and "read_only" in pull_out
+    assert "runs" in pull_out and "new 1" in pull_out and "ideas" in pull_out and "read_only" in pull_out
 
     proj = find_project(tmp_path)
     assert proj is not None
