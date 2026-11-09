@@ -237,7 +237,7 @@ def _open_sync(req: urllib.request.Request, timeout: int) -> Any:
             transient = "timed out" in reason or "timeout" in reason
             if not transient or attempt == 1:
                 raise
-    raise last  # pragma: no cover
+    raise AssertionError("sync request ended without a response")
 
 
 def firm_api_url() -> str:

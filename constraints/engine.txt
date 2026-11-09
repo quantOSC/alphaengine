@@ -1,4 +1,4 @@
 # Canonical engine pin and hashes for quantOS backend, isolated runner, and MCP service (QOS-175 / QOS-176)
 alphaengine==2.0.3 \
-    --hash=sha256:6ad6183f9c53abb297c1326afee089096372790708f377d4aa741b4e0ace4d83 \
-    --hash=sha256:8bb21be7f8f3bf32b73f49ee0dc6be6fc08d449af02d90df881ec3cd821c7e49
+    --hash=sha256:85153fa9701c44e4d20f205f763c4b7d214c51dc17443916cb2dfd794417883d \
+    --hash=sha256:2864e25f7a7581c13103f5f3a86eb01f3318313a0c25e854661d9fc579407b81

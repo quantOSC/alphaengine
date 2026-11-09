@@ -101,10 +101,10 @@ def report(
 ) -> dict[str, Any]:
     """Send a study to your workspace and return what the server recorded."""
     import urllib.error
+    import urllib.parse
     import urllib.request
 
     from ..auth import FirmKeyError, redact_secrets, require_firm_key, validate_clean_url
-    from ..sync import firm_api_url, portal_host_note, scrub_sync_host
 
     try:
         key = require_firm_key(api_key)
@@ -118,8 +118,9 @@ def report(
         root = validate_clean_url(root).rstrip("/")
     except ValueError as exc:
         raise ReportError(str(exc)) from exc
-    if portal_host_note(root):
-        root = firm_api_url()
+    host = urllib.parse.urlparse(root).hostname or ""
+    if host.lower() in {"api.qosai.app", "www.qosai.app", "alpha-backend-production-51df.up.railway.app"}:
+        root = DEFAULT_BASE_URL.rstrip("/")
 
     body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
 
@@ -149,5 +150,11 @@ def report(
             ) from e
         raise ReportError(f"The server refused the study ({e.code}). {detail}".strip()) from e
     except urllib.error.URLError as e:
-        reason = scrub_sync_host(redact_secrets(str(e.reason)))
+        reason = redact_secrets(str(e.reason))
+        for hidden in (
+            DEFAULT_BASE_URL,
+            "alpha-backend-production-51df.up.railway.app",
+            "api.qosai.app",
+        ):
+            reason = reason.replace(hidden, "the firm API")
         raise ReportError(f"Could not reach the firm API: {reason}. Your study is still on your disk.") from e
