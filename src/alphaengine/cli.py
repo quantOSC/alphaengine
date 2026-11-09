@@ -959,11 +959,11 @@ def cmd_version(args: argparse.Namespace) -> int:
 
 
 def cmd_whoami(args: argparse.Namespace) -> int:
-    """Display credential source, masked prefix, keyring status, and remote URL (`QOS-155`)."""
+    """Display credential source, masked prefix, keyring status, and remote name (`QOS-155`)."""
     from .auth import credential_status
     from .envelope import emit_json
     from .project import find_project
-    from .sync import resolve_remote_url
+    from .sync import remote_public_name, resolve_remote_url
 
     status = credential_status()
     proj = find_project()
@@ -975,7 +975,7 @@ def cmd_whoami(args: argparse.Namespace) -> int:
 
     payload: dict[str, Any] = {
         **status,
-        "remote_url": remote_url,
+        "remote": "firm API" if "firm API" in remote_public_name(remote_url) else "custom",
         "project": proj.name if proj is not None else None,
     }
     if getattr(args, "json_out", False):
@@ -993,7 +993,7 @@ def cmd_whoami(args: argparse.Namespace) -> int:
     say(f"  {bold('whoami')}")
     say(f"    {dim('quantos key')}      {q_line}")
     say(f"    {dim('keyring')}          {kr_txt}")
-    say(f"    {dim('remote url')}       {remote_url}")
+    say(f"    {dim('remote')}           {remote_public_name(remote_url)}")
     if proj is not None:
         say(f"    {dim('project')}          {proj.name} ({proj.dot_dir})")
     lit_providers = [
@@ -1022,7 +1022,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     from .auth import credential_status, redact_secrets
     from .envelope import emit_json
     from .project import find_project
-    from .sync import resolve_remote_url
+    from .sync import resolve_remote_url, scrub_sync_host
 
     info = engine_info()
     creds = credential_status()
@@ -1086,7 +1086,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return 2
 
     remediation: str | None = None
-    server_info: dict[str, Any] = {"probed": should_probe, "url": remote_url}
+    server_info: dict[str, Any] = {"probed": should_probe, "remote": scrub_sync_host(remote_url)}
 
     if should_probe:
         health_url = f"{remote_url}/api/health"
@@ -1161,6 +1161,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                     }
                 )
 
+    for chk in checks:
+        chk["detail"] = scrub_sync_host(str(chk.get("detail") or ""))
     report: dict[str, Any] = {
         "ok": exit_code == 0,
         "engine": info,
@@ -1176,7 +1178,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     say(f"  {bold('doctor')}")
     for chk in checks:
         mark = green("ok") if chk["ok"] else red("fail")
-        say(f"    [{mark}] {bold(str(chk['name']).ljust(16))}  {chk['detail']}")
+        say(f"    [{mark}] {bold(str(chk['name']).ljust(16))}  {scrub_sync_host(str(chk['detail']))}")
         if chk.get("warning"):
             say(f"         {yellow('warning:')} {chk['warning']}")
         if chk.get("remediation"):
@@ -5960,7 +5962,7 @@ def cmd_idea(args: argparse.Namespace) -> int:
 def cmd_remote(args: argparse.Namespace) -> int:
     """Configure or list remotes in `.alphaengine/project.toml` (`QOS-155`)."""
     from .project import find_project
-    from .sync import portal_host_note, remote_add
+    from .sync import portal_host_note, remote_add, remote_public_name
 
     proj = find_project()
     if proj is None:
@@ -5976,7 +5978,7 @@ def cmd_remote(args: argparse.Namespace) -> int:
         except ValueError as exc:
             say(red(str(exc)))
             return 2
-        say(green("Remote configured.") + f"  {bold(r_name)} {ARROW} {resolved}")
+        say(green("Remote configured.") + f"  {bold(remote_public_name(resolved, r_name))}")
         if portal_host_note(previous) or portal_host_note(str(r_url or "")):
             say(yellow(f"  That host is the portal, not the sync API. {r_name} now points at the firm API."))
         return 0
@@ -5985,7 +5987,7 @@ def cmd_remote(args: argparse.Namespace) -> int:
             say(dim("  no remotes configured (run `alphaengine remote add quantos`)"))
             return 0
         for k, v in sorted(proj.remotes.items()):
-            say(f"  {bold(k.ljust(12))}  {v}")
+            say(f"  {bold(remote_public_name(v, k))}")
         return 0
     say(red(f"Unknown remote action {action!r}. Use `remote add <name> [url]` or `remote list`."))
     return 2
@@ -6119,14 +6121,14 @@ def cmd_pull(args: argparse.Namespace) -> int:
     json_out = bool(getattr(args, "json_out", False))
     if not json_out and not getattr(args, "quiet", False):
         try:
-            root = resolve_remote_url(proj, remote_name=r_name, explicit_url=getattr(args, "url", None))
+            resolve_remote_url(proj, remote_name=r_name, explicit_url=getattr(args, "url", None))
         except ValueError as exc:
             say(red(str(exc)))
             return 2
         say("  pull")
         say("    Copies team runs, ideas, and sealed studies into this project.")
         say("    They are marked read-only. Code and price files are not downloaded.")
-        say(f"    remote           {r_name}  {root}/api/workspace/pull")
+        say(f"    remote           {r_name}")
     try:
         res = pull_workspace(
             proj,

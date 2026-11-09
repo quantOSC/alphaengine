@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [2.0.3] - 2026-11-09
+
+### Fixed
+- **Sync host:** `ae pull` and `ae push` use the public firm API. A saved internal host is replaced and is not printed. A slow answer is retried once.
+
 ## [2.0.2] - 2026-11-09
 
 ### Fixed

@@ -104,6 +104,7 @@ def report(
     import urllib.request
 
     from ..auth import FirmKeyError, redact_secrets, require_firm_key, validate_clean_url
+    from ..sync import firm_api_url, portal_host_note, scrub_sync_host
 
     try:
         key = require_firm_key(api_key)
@@ -114,9 +115,11 @@ def report(
         "/"
     )
     try:
-        validate_clean_url(root)
+        root = validate_clean_url(root).rstrip("/")
     except ValueError as exc:
         raise ReportError(str(exc)) from exc
+    if portal_host_note(root):
+        root = firm_api_url()
 
     body = _guard(_payload(study, assignment_id=assignment_id, thesis_id=thesis_id))
 
@@ -146,5 +149,5 @@ def report(
             ) from e
         raise ReportError(f"The server refused the study ({e.code}). {detail}".strip()) from e
     except urllib.error.URLError as e:
-        reason = redact_secrets(str(e.reason))
-        raise ReportError(f"Could not reach {root}: {reason}. Your study is still on your disk.") from e
+        reason = scrub_sync_host(redact_secrets(str(e.reason)))
+        raise ReportError(f"Could not reach the firm API: {reason}. Your study is still on your disk.") from e

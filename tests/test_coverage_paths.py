@@ -199,7 +199,7 @@ def test_study_report_error_paths_and_nested_list_guard(monkeypatch: pytest.Monk
         raise urllib.error.URLError("connection refused")
 
     monkeypatch.setattr(urllib.request, "urlopen", raise_url_err)
-    with pytest.raises(ReportError, match="Could not reach https://api.example.invalid"):
+    with pytest.raises(ReportError, match="Could not reach the firm API"):
         report(study, api_key="ae_live_ok", base_url="https://api.example.invalid")
 
 

@@ -144,7 +144,7 @@ def test_keyless_diagnostics_whoami_version_doctor_and_secret_redaction_sweep(
     # 1. `ae version`, `ae whoami`, and `ae doctor` MUST succeed (`exit 0`) WITHOUT `QUANTOS_API_KEY`!
     assert cli.main(["version", "--json"]) == 0
     v_json = json.loads(capsys.readouterr().out)
-    assert v_json["engine_version"] == "2.0.2"
+    assert v_json["engine_version"] == "2.0.3"
     assert v_json["sync_contract"] == 2
     assert v_json["manifest_version"] == 1
 
@@ -154,7 +154,7 @@ def test_keyless_diagnostics_whoami_version_doctor_and_secret_redaction_sweep(
 
     assert cli.main(["doctor", "--json"]) == 0
     d_json = json.loads(capsys.readouterr().out)
-    assert d_json["engine"]["engine_version"] == "2.0.2"
+    assert d_json["engine"]["engine_version"] == "2.0.3"
 
     # 2. Plant a live secret in env and sweep `whoami`, `doctor`, and error paths:
     # the raw secret MUST NEVER appear anywhere in stdout, stderr, or JSON!

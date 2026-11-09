@@ -174,7 +174,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import distribution as _pkg_distribution
 from typing import Any
 
-__version__ = "2.0.2"
+__version__ = "2.0.3"
 
 #: Wire contract version for `ae push` / `ae pull` (`alphaengine.sync.schema`).
 SYNC_CONTRACT_VERSION = 2
@@ -182,9 +182,9 @@ SYNC_CONTRACT_VERSION = 2
 #: Schema version for `RunManifest` (`alphaengine.manifest`).
 MANIFEST_VERSION = 1
 
-#: Default workflow/ingest API host until a dedicated qosai.app API host exists.
+#: Public sync origin. The CLI names this "the firm API" and does not print the host.
 #: Overridable via ``ALPHAENGINE_API_URL`` (or ``QUANTOS_API_URL``).
-DEFAULT_API_URL = "https://alpha-backend-production-51df.up.railway.app"
+DEFAULT_API_URL = "https://qosai.app"
 API_URL_ENV = "ALPHAENGINE_API_URL"
 LEGACY_API_URL_ENV = "QUANTOS_API_URL"
 

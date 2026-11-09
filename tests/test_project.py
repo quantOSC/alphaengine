@@ -528,7 +528,7 @@ def test_sync_remote_push_dry_run_404_fallback_pull_and_512_no_dataset_rows_guar
     # 1. `ae remote add quantos <url>`
     assert cli.main(["remote", "add", "quantos", "https://sync.example.invalid"]) == 0
     rem_out = capsys.readouterr().out
-    assert rem_out.split()[-1] == "https://sync.example.invalid"
+    assert "https://sync.example.invalid" in rem_out
 
     # 2. `ae push --dry-run` prints preview offline; `--dry-run --json` emits structured payload
     assert cli.main(["push", "--dry-run"]) == 0
@@ -1044,7 +1044,7 @@ def test_require_firm_key_choke_point_keyring_and_no_key_leak(
     assert cli.main(["init", "--name", "free-project"]) == 0
     capsys.readouterr()
     assert cli.main(["version"]) == 0
-    assert "2.0.2" in capsys.readouterr().out
+    assert "2.0.3" in capsys.readouterr().out
     assert cli.main(["whoami"]) == 0
     capsys.readouterr()
     assert cli.main(["doctor"]) == 0

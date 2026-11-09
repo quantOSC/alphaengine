@@ -118,9 +118,8 @@ def resolve_remote_url(
 ) -> str:
     """Resolve and validate the remote URL from explicit flag, `project.toml`, env, or default.
 
-    A stored portal host (``qosai.app`` / ``api.qosai.app``) is not the sync API.
-    It is replaced with the firm API so `remote add` without a URL, and the next
-    `pull` / `push`, do not keep dialing a name that does not resolve.
+    A stored legacy host is replaced with the firm API so the next `pull` or
+    `push` does not keep dialing an address that times out or does not resolve.
     """
     from ..auth import validate_clean_url
 
@@ -143,18 +142,50 @@ def resolve_remote_url(
     return firm
 
 
-_PORTAL_HOSTS = frozenset({"qosai.app", "www.qosai.app", "api.qosai.app"})
+# Hosts that must not be dialed or printed. The public sync origin is DEFAULT_API_URL.
+_LEGACY_SYNC_HOSTS = frozenset(
+    {
+        "api.qosai.app",
+        "www.qosai.app",
+        "alpha-backend-production-51df.up.railway.app",
+    }
+)
+
+
+def _hostname(url: str) -> str:
+    return (urllib.parse.urlparse(url).hostname or "").lower()
+
+
+def scrub_sync_host(text: str) -> str:
+    """Remove sync hosts from text that a person will read."""
+    cleaned = str(text or "")
+    cleaned = cleaned.replace(DEFAULT_API_URL, "the firm API")
+    default_host = _hostname(DEFAULT_API_URL)
+    for host in _LEGACY_SYNC_HOSTS:
+        cleaned = cleaned.replace(f"https://{host}", "the firm API")
+        cleaned = cleaned.replace(f"http://{host}", "the firm API")
+        cleaned = cleaned.replace(host, "the firm API")
+    if default_host:
+        cleaned = cleaned.replace(default_host, "the firm API")
+    return cleaned
+
+
+def remote_public_name(url: str, name: str = "quantos") -> str:
+    """A label safe to print. The firm API host stays off the screen."""
+    host = _hostname(url)
+    if host == _hostname(DEFAULT_API_URL) or host in _LEGACY_SYNC_HOSTS:
+        return f"{name} (firm API)"
+    return f"{name} ({url})"
 
 
 def describe_unreachable(root: str, reason: object) -> str:
     """Turn a socket failure into a sentence a researcher can act on.
 
-    A missing DNS name is not a sync-contract mismatch. The preview that prints
-    ``sync_contract`` is a label, not an instruction to upgrade the backend.
+    The host is not included. A missing name is not a sync-contract mismatch.
     """
-    text = str(reason or "").strip()
+    _ = root
+    text = scrub_sync_host(str(reason or "").strip())
     low = text.lower()
-    host = urllib.parse.urlparse(root).hostname or root
     dns = any(
         token in low
         for token in (
@@ -166,29 +197,47 @@ def describe_unreachable(root: str, reason: object) -> str:
             "no address associated",
         )
     )
+    timed_out = "timed out" in low or "timeout" in low
     if dns:
-        why = (
-            f"{host} does not resolve. This is not a sync-contract mismatch, "
-            "and the package does not need an upgrade."
+        return (
+            "The firm API address does not resolve. "
+            "This is not a sync-contract mismatch, and the package does not need an upgrade.\n"
+            "  Run `ae remote add quantos` with no URL, then `ae pull` again."
         )
-    elif text:
-        why = f"The connection failed ({text})."
-    else:
-        why = "The connection failed."
+    if timed_out:
+        return (
+            "The firm API did not respond in time.\n"
+            "  pull copies team summaries into this project. The request was retried.\n"
+            "  Run `ae pull` again in a moment. Your key stays stored."
+        )
+    detail = f" ({text})" if text else ""
     return (
-        f"Could not reach {root}. {why}\n"
+        f"The firm API could not be reached{detail}.\n"
         "  pull copies team summaries into this project. push sends yours the other way.\n"
-        "  The portal (https://qosai.app) is not the sync API.\n"
-        "  Reset the remote to the firm API with `ae remote add quantos` and no URL."
+        "  Run `ae pull` again. Local research stays on this machine."
     )
 
 
 def portal_host_note(url: str) -> str | None:
-    """Warn when a remote was pointed at the portal site instead of the sync API."""
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if host not in _PORTAL_HOSTS:
+    """Warn when a remote was pointed at a host that is not the sync API."""
+    if _hostname(url) not in _LEGACY_SYNC_HOSTS:
         return None
-    return f"{host} is the portal, not the sync API. push and pull use the firm API instead of that host."
+    return "That address is not the sync API. push and pull use the firm API instead."
+
+
+def _open_sync(req: urllib.request.Request, timeout: int) -> Any:
+    """Open a sync request, retrying once when the firm API is slow to answer."""
+    last: Exception | None = None
+    for attempt in range(2):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            last = err
+            reason = str(getattr(err, "reason", err)).lower()
+            transient = "timed out" in reason or "timeout" in reason
+            if not transient or attempt == 1:
+                raise
+    raise last  # pragma: no cover
 
 
 def firm_api_url() -> str:
@@ -470,7 +519,7 @@ def format_push_preview(
     lines = [
         "  push preview",
         f"    Sends summaries to {remote_name}. Code and raw datasets stay local.",
-        f"    remote           {endpoint}",
+        f"    remote           {remote_public_name(endpoint, remote_name)}",
         f"    project          {proj.name}",
         f"    sending          {len(studies)} studies, {len(runs)} runs, "
         f"{len(ideas)} ideas, {len(trial_events)} trial events",
@@ -509,7 +558,7 @@ def push_workspace(
     share_series: bool = False,
     dry_run: bool = False,
     show_payload: bool = False,
-    timeout: int = 30,
+    timeout: int = 60,
 ) -> dict[str, Any]:
     """Push studies, runs, ideas, and `trial_events` to `POST /api/workspace/sync` (`QOS-161`–`QOS-167`).
 
@@ -565,7 +614,7 @@ def push_workspace(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _open_sync(req, timeout) as resp:
             raw_resp = json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as err:
         detail, parsed_err = _extract_http_detail(err)
@@ -624,7 +673,7 @@ def pull_workspace(
     since: str | None = None,
     limit: int = 100,
     max_pages: int = 50,
-    timeout: int = 30,
+    timeout: int = 60,
 ) -> dict[str, Any]:
     """Pull team runs, ideas, and studies via `GET /api/workspace/pull` with cursor pagination (`QOS-162`).
 
@@ -665,7 +714,7 @@ def pull_workspace(
         url = f"{root}{_SYNC_PULL_PATH}?{qs}"
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with _open_sync(req, timeout) as resp:
                 raw_page = json.loads(resp.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as err:
             detail, parsed_err = _extract_http_detail(err)

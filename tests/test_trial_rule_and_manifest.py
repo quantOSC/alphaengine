@@ -113,11 +113,11 @@ def test_run_manifest_cas_and_three_status_verification_and_drift(
     man_dict = head.get("manifest")
     assert isinstance(man_dict, dict)
     man = RunManifest.from_dict(man_dict)
-    assert man.engine_version == "2.0.2"
+    assert man.engine_version == "2.0.3"
     assert man.manifest_version == 1
     man_sha = head.get("manifest_sha256")
     assert isinstance(man_sha, str) and len(man_sha) == 64
-    assert proj.get_object(man_sha)["engine_version"] == "2.0.2"
+    assert proj.get_object(man_sha)["engine_version"] == "2.0.3"
 
     # Rerun checks all 3 statuses: hash_verified, figures_reproduced, provenance_verified
     run_family = str(head.get("family") or "demo")
@@ -193,5 +193,5 @@ def test_run_manifest_cas_and_three_status_verification_and_drift(
 
     # Standalone `build_run_manifest` helper works cleanly outside any project
     standalone = build_run_manifest(params={"lookback": 20}, dataset_hashes=["deadbeef"])
-    assert standalone.engine_version == "2.0.2"
+    assert standalone.engine_version == "2.0.3"
     assert standalone.annualization["periods_per_year"] == 252

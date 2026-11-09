@@ -112,7 +112,7 @@ def test_sync_v2_payload_schema_share_series_and_json_schema_export(
     # Default `share_series=False`: series (>512) stripped, forbidden v1 keys absent!
     payload_no_series = build_sync_payload(proj, share_series=False)
     assert payload_no_series["sync_contract"] == SYNC_CONTRACT_VERSION == 2
-    assert payload_no_series["engine_version"] == "2.0.2"
+    assert payload_no_series["engine_version"] == "2.0.3"
     assert len(payload_no_series["studies"]) == 1
     assert len(payload_no_series["runs"]) == 1
     assert len(payload_no_series["ideas"]) == 1
@@ -350,8 +350,13 @@ def test_unreachable_host_is_not_a_contract_upgrade() -> None:
     assert "does not resolve" in msg
     assert "not a sync-contract mismatch" in msg
     assert "ae remote add quantos" in msg
+    assert "http" not in msg
+    assert "railway" not in msg
     assert portal_host_note("https://api.qosai.app")
     assert portal_host_note("https://api.quantos.example") is None
+    legacy = "https://alpha-backend-production-51df.up.railway.app"
+    assert portal_host_note(legacy)
+    assert "railway" not in (portal_host_note(legacy) or "")
     with pytest.raises(SyncContractMismatchError, match="not the quantOS sync API"):
         PullResponse.from_dict({"runs": [], "ideas": [], "studies": []})
 
@@ -371,6 +376,11 @@ def test_remote_add_without_url_replaces_a_portal_host(
     resolved = remote_add(proj, "quantos")
     assert resolved == DEFAULT_API_URL.rstrip("/")
     assert proj.remotes["quantos"] == resolved
+
+    proj.remotes["quantos"] = "https://alpha-backend-production-51df.up.railway.app"
+    proj.save_config()
+    assert resolve_remote_url(proj, "quantos") == DEFAULT_API_URL.rstrip("/")
+    assert "railway" not in proj.remotes["quantos"]
 
     proj.remotes["quantos"] = "https://qosai.app"
     proj.save_config()

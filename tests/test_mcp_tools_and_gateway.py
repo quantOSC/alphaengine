@@ -50,7 +50,7 @@ def test_mcp_tool_snapshot_count_is_exact_25() -> None:
         assert tool["storage"]
         assert tool["description"]
         assert tool["engine_version"] == __version__
-        assert tool["engine_version"] == "2.0.2"
+        assert tool["engine_version"] == "2.0.3"
 
 
 def test_deterministic_tools_parity_with_alphaengine_core() -> None:
@@ -131,17 +131,17 @@ def test_deterministic_tools_parity_with_alphaengine_core() -> None:
 def test_account_tools_reporting_and_version_stamp() -> None:
     """Account tools stamp engine_version and document persistence destination."""
     univ = call_mcp_tool("my_universe", tickers=["AAPL", "MSFT"])
-    assert univ["engine_version"] == "2.0.2"
+    assert univ["engine_version"] == "2.0.3"
     assert univ["tickers"] == ["AAPL", "MSFT"]
     assert "workspace" in univ["stored"]
 
     deliv = call_mcp_tool("deliver_run", run_id="run_123", summary={"manifest_sha256": "abc"})
-    assert deliv["engine_version"] == "2.0.2"
+    assert deliv["engine_version"] == "2.0.3"
     assert deliv["run_id"] == "run_123"
     assert "ledger" in deliv["stored"]
 
     wf = call_mcp_tool("run_workflow", workflow="momentum_sweep")
-    assert wf["engine_version"] == "2.0.2"
+    assert wf["engine_version"] == "2.0.3"
     assert wf["workflow"] == "momentum_sweep"
     assert "queue" in wf["stored"]
 
