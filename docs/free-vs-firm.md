@@ -62,7 +62,7 @@ ae verify .alphaengine/studies/HEAD.json
 
 Firm keys issued through **Connect** in your firm's [quantOS portal](https://qosai.app) connect your local research to team infrastructure. Per AlphaEngine 2.0 policy, **all local operations are free** and firm authentication is strictly enforced **server-side on network requests**:
 
-- **Workspace Sync (`ae push`, `ae pull`):** Sync research summaries, trial event lineage (`attempt_id`), and sealed studies to your firm's cloud ledger.
+- **Workspace Sync (`ae push`, `ae pull`):** `push` sends this project's summaries up. `pull` copies team runs, ideas, and sealed studies down, marked read-only. Code and price files never move. The portal at `https://qosai.app` is not the sync API; `ae remote add quantos` with no URL stores the firm API.
 - **Hosted Portal Workflows (`ae run --url <url>`, `ae workflows`, `ae runs`, `ae gaps`, `ae tonight`):** Query remote workflow catalogues, trigger remote execution runs on cloud runners, or inspect portal execution gaps.
 - **Report Ingestion (`ae report <study.json>`):** Ingest sealed studies into the quantOS web portal for firm-wide committee review and institutional story pages.
 
@@ -77,7 +77,9 @@ ae login
 # Or pass via environment variable:
 export QUANTOS_API_KEY="ae_live_..."
 
-# Push research summaries to your firm portal
+# Push research summaries to the firm API. Leave the URL off:
+# `qosai.app` is the portal, not the sync API.
+ae remote add quantos
 ae push --yes
 ae pull
 ```

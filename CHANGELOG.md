@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [Unreleased]
+
+### Changed
+- **Sync dialogue:** `ae pull` states that it copies team summaries in (read-only) before it calls the API. `ae push` preview leads with what leaves the machine. A host that does not resolve is reported as a bad remote, not as a sync-contract upgrade. `qosai.app` / `api.qosai.app` are called out as the portal, not the sync API. Session `push`, `pull`, `workflows`, `runs`, `gaps`, and `tonight` require a firm key before opening a socket; `push --dry-run` stays local.
+- **Command directory:** `commands` prints one verb per line with a `free` / `firm` / `both` mark. In the session, `/` opens a picker above the prompt: type to filter, up and down to move, tab to complete, enter to run.
+
 ## [2.0.1] - 2026-11-08
 
 ### Fixed

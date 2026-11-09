@@ -10,7 +10,7 @@ from .._version import __version__
 
 _TAG = "the research loop, on your machine"
 _NOTICE = "Research tool, not investment advice."
-_HINT = "use /details for a look at important commands"
+_HINT = "type / for the command list"
 _WORD = " ".join("ALPHAENGINE")
 
 # Housekeeping only. The tools stay off this card.

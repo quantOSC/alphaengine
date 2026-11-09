@@ -28,6 +28,7 @@ from ..cli import (
     _split_run,
     activity,
     dim,
+    firm_session_allowed,
     load_project,
     match_thesis,
     pop_flag,
@@ -254,11 +255,15 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "workflows":
         from ..cli import cmd_workflows
 
+        if not firm_session_allowed(getattr(desk.args, "key", None)):
+            return False
         cmd_workflows(_ns(desk))
         return False
     if verb == "runs":
         from ..cli import cmd_runs
 
+        if not firm_session_allowed(getattr(desk.args, "key", None)):
+            return False
         cmd_runs(_ns(desk, limit=25))
         return False
     if verb == "log":
@@ -325,11 +330,15 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "gaps":
         from ..cli import cmd_gaps
 
+        if not firm_session_allowed(getattr(desk.args, "key", None)):
+            return False
         cmd_gaps(_ns(desk))
         return False
     if verb == "tonight":
         from ..cli import cmd_tonight
 
+        if not firm_session_allowed(getattr(desk.args, "key", None)):
+            return False
         cmd_tonight(_ns(desk, budget=0))
         return False
     if verb == "logout":
@@ -353,6 +362,8 @@ def submit(desk: Desk, line: str) -> bool:
         show_p = "--show-payload" in toks
         yes_p = "--yes" in toks or True
         rem = [t for t in toks if not t.startswith("--")]
+        if not dry and not firm_session_allowed(getattr(desk.args, "key", None)):
+            return False
         cmd_push(
             _ns(
                 desk,
@@ -368,6 +379,8 @@ def submit(desk: Desk, line: str) -> bool:
         from ..cli import cmd_pull
 
         toks = [t for t in rest.split() if not t.startswith("--")]
+        if not firm_session_allowed(getattr(desk.args, "key", None)):
+            return False
         cmd_pull(_ns(desk, remote_name=toks[0] if toks else "quantos"))
         return False
     if verb == "plugin":

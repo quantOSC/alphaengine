@@ -3624,7 +3624,7 @@ def _help_text() -> str:
         lines.append(f"    {bold(cmd.ljust(width))}  {dim(why)}")
     lines += [
         "",
-        "  " + dim("Slash works too: /demo /login /load /help. `commands` for everything."),
+        "  " + dim("Type / to open the command list. `commands` prints it in full."),
     ]
     return "\n".join(lines)
 
@@ -3711,39 +3711,37 @@ def cmd_commands(args: argparse.Namespace) -> int:
     I start, how do I do the work, how do I get my data in, how do I manage the
     session.
     """
-    from .commands import DATA_DOORS, GROUPS, by_verb, in_group
+    from .commands import DATA_DOORS, GROUPS, access_word, by_verb, in_group
 
     wanted = (getattr(args, "verb", None) or "").strip()
     if wanted:
         return _one_command(by_verb(wanted), wanted)
 
     say("")
+    say("  " + bold("commands"))
+    say("  " + dim("free stays here.  firm needs a signed-in key.  both is free until it calls the portal."))
+    say("")
     for group, title in GROUPS:
         rows = in_group(group)
         if not rows:
             continue
-        say("  " + dim(title))
-        width = max(len(_signature(c)) for c in rows)
+        verb_w = max(len(c.verb) for c in rows)
+        say("  " + bold(title))
         for c in rows:
-            where = "" if c.scope == "both" else dim(f"  ({c.scope})")
-            loc_tag = {
-                "local": "[local]",
-                "remote": "[remote]",
-                "hybrid": "[local/remote]",
-            }.get(getattr(c, "locality", "local"), "[local]")
-            say(f"    {_signature(c).ljust(width)}   {dim(loc_tag.ljust(15))} {dim(c.purpose)}{where}")
+            badge = access_word(getattr(c, "locality", "local"))
+            say(f"    {bold(c.verb.ljust(verb_w))}  {dim(badge.ljust(4))}  {c.purpose}")
         say("")
 
     # THE DOORS GET THEIR OWN BLOCK. They are flags rather than verbs, and they
     # are the single thing people are most often hunting for when they open a
     # directory at all — "how do I give it my data" is not answerable from a
     # list of verbs.
-    say("  " + dim("Getting your data in"))
+    say("  " + bold("Getting your data in"))
     width = max(len(d) for d, _ in DATA_DOORS)
     for door, what in DATA_DOORS:
-        say(f"    {door.ljust(width)}   {dim(what)}")
+        say(f"    {bold(door.ljust(width))}  {dim(what)}")
     say("")
-    say("  " + dim("`commands <verb>` for one in full."))
+    say("  " + dim("`commands <verb>` for one in full.  In the session, type / to pick one."))
     return 0
 
 
@@ -4103,6 +4101,23 @@ def boot(url: str, *, project: str | None, data: Any, keyed: bool, session: Any 
                     say(line)
 
     say("")
+
+
+def firm_session_allowed(explicit_key: str | None = None) -> bool:
+    """True when a firm ``ae_live_`` key is present.
+
+    Network commands (``push``, ``pull``, ``workflows``, ``runs``, ``gaps``,
+    ``tonight``) call this before opening a socket. Local research does not.
+    """
+    from .auth import FirmKeyError, require_firm_key
+
+    try:
+        require_firm_key(explicit_key)
+    except FirmKeyError as exc:
+        say(red(str(exc)))
+        say(dim("  Sign in with `login`. Local research does not need a key."))
+        return False
+    return True
 
 
 def refused(exc: Any) -> None:
@@ -5945,7 +5960,7 @@ def cmd_idea(args: argparse.Namespace) -> int:
 def cmd_remote(args: argparse.Namespace) -> int:
     """Configure or list remotes in `.alphaengine/project.toml` (`QOS-155`)."""
     from .project import find_project
-    from .sync import remote_add
+    from .sync import portal_host_note, remote_add
 
     proj = find_project()
     if proj is None:
@@ -5961,6 +5976,9 @@ def cmd_remote(args: argparse.Namespace) -> int:
             say(red(str(exc)))
             return 2
         say(green("Remote configured.") + f"  {bold(r_name)} {ARROW} {resolved}")
+        note = portal_host_note(resolved)
+        if note:
+            say(yellow(f"  {note}"))
         return 0
     if action == "list":
         if not proj.remotes:
@@ -6027,7 +6045,7 @@ def cmd_push(args: argparse.Namespace) -> int:
 
     if sys.stdin.isatty() and sys.stdout.isatty() and not yes and not json_out:
         try:
-            ans = input("  Proceed with push? [y/N]: ").strip().lower()
+            ans = input("  Send these summaries? [y/N]: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             say("")
             return 2
@@ -6091,7 +6109,7 @@ def cmd_pull(args: argparse.Namespace) -> int:
     from .envelope import emit_json
     from .project import find_project
     from .study.report import ReportError
-    from .sync import SyncError, pull_workspace
+    from .sync import SyncError, pull_workspace, resolve_remote_url
 
     proj = find_project()
     if proj is None:
@@ -6099,6 +6117,16 @@ def cmd_pull(args: argparse.Namespace) -> int:
         return 2
     r_name = str(getattr(args, "remote_name", None) or "quantos")
     json_out = bool(getattr(args, "json_out", False))
+    if not json_out and not getattr(args, "quiet", False):
+        try:
+            root = resolve_remote_url(proj, remote_name=r_name, explicit_url=getattr(args, "url", None))
+        except ValueError as exc:
+            say(red(str(exc)))
+            return 2
+        say("  pull")
+        say("    Copies team runs, ideas, and sealed studies into this project.")
+        say("    They are marked read-only. Code and price files are not downloaded.")
+        say(f"    remote           {r_name}  {root}/api/workspace/pull")
     try:
         res = pull_workspace(
             proj,
@@ -6129,18 +6157,19 @@ def cmd_pull(args: argparse.Namespace) -> int:
     r_c = counts.get("runs") or {}
     i_c = counts.get("ideas") or {}
     s_c = counts.get("studies") or {}
-    say(
-        green("Pulled.")
-        + f"  {res.get('path_used')}  {dim(DOT)}  "
-        + f"runs (new={r_c.get('new', 0)}, updated={r_c.get('updated', 0)}, "
-        + f"skipped={r_c.get('skipped', 0)}, failed={r_c.get('failed', 0)}), "
-        + f"ideas (new={i_c.get('new', 0)}, updated={i_c.get('updated', 0)}, "
-        + f"skipped={i_c.get('skipped', 0)}, failed={i_c.get('failed', 0)}), "
-        + f"studies (new={s_c.get('new', 0)}, updated={s_c.get('updated', 0)}, "
-        + f"skipped={s_c.get('skipped', 0)}, failed={s_c.get('failed', 0)})"
-    )
-    say(f"  {dim('cursor')}  {res.get('cursor') or '(none)'}")
-    say(f"  {dim('note')}    {res.get('read_only_notice')}")
+
+    def _quad(bucket: dict[str, Any]) -> str:
+        return (
+            f"new {bucket.get('new', 0)}, updated {bucket.get('updated', 0)}, "
+            f"skipped {bucket.get('skipped', 0)}, failed {bucket.get('failed', 0)}"
+        )
+
+    say(green("  Pulled."))
+    say(f"    runs             {_quad(r_c)}")
+    say(f"    ideas            {_quad(i_c)}")
+    say(f"    studies          {_quad(s_c)}")
+    say(f"    cursor           {res.get('cursor') or '(none)'}")
+    say(f"    {dim(str(res.get('read_only_notice') or ''))}")
     return int(res.get("exit_code", 0))
 
 

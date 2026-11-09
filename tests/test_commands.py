@@ -127,6 +127,7 @@ def test_the_directory_prints_every_group_and_every_verb(capsys):
     # actually hunting for when they open a directory at all.
     for door, _ in DATA_DOORS:
         assert door.split()[0] in out
+    assert "free" in out and "firm" in out and "both" in out
 
 
 def test_expanding_one_command_shows_its_flags_and_examples(capsys):
@@ -147,6 +148,16 @@ def test_an_unknown_verb_suggests_rather_than_shrugs(capsys):
     out = capsys.readouterr().out
     assert code == 2
     assert "commands" in out
+
+
+def test_slash_picker_leads_with_the_everyday_verbs():
+    from alphaengine.commands import slash_entries
+
+    rows = slash_entries()
+    verbs = [verb for verb, _, _ in rows]
+    assert verbs[:4] == ["demo", "login", "load", "screen"]
+    assert "pull" in verbs and "details" in verbs
+    assert "view" in verbs
 
 
 def test_the_short_help_names_the_path_not_every_verb():

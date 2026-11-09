@@ -136,9 +136,32 @@ def test_boot_is_a_blank_column_with_the_account_on_the_status_line() -> None:
             assert not app.query("#stage")
             assert "ALPHAENGINE" in app.empty_text.replace(" ", "")
             assert "2." in app.empty_text
-            assert "use /details for a look at important commands" in app.empty_text
+            assert "type / for the command list" in app.empty_text
             prompt = app.query_one(Input)
             assert str(prompt.placeholder).startswith("Ask")
+
+    asyncio.run(body())
+
+
+@_pilot_guard
+def test_slash_opens_a_command_picker() -> None:
+    async def body() -> None:
+        app = QuantOSApp(session=_DeskSession(), url="fake://", data=_returns(), keyed=True, think=_think)
+        async with app.run_test(size=(140, 42)) as pilot:
+            await _ready(pilot, app)
+            await pilot.press("/")
+            await pilot.pause()
+            assert app.palette_open
+            assert app._palette_rows[0][0] == "demo"
+            await pilot.press("p", "u", "l")
+            await pilot.pause()
+            assert app._palette_rows
+            assert app._palette_rows[0][0] == "pull"
+            assert app._palette_rows[0][1] == "firm"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert not app.palette_open
+            assert app.query_one(Input).value == ""
 
     asyncio.run(body())
 
@@ -150,7 +173,7 @@ def test_the_seal_turns_and_keeps_the_wordmark() -> None:
     turned = seal(2.0).plain
     assert still != turned
     assert "2." in still
-    assert "use /details for a look at important commands" in still
+    assert "type / for the command list" in still
     assert "the research loop, on your machine" in still
     card = details_text().plain
     assert "login" in card and "view" in card

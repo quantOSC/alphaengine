@@ -86,6 +86,8 @@ __all__ = [
     "export_json_schemas",
     "remote_add",
     "resolve_remote_url",
+    "describe_unreachable",
+    "portal_host_note",
     "build_sync_payload",
     "format_push_preview",
     "push_workspace",
@@ -125,6 +127,58 @@ def resolve_remote_url(
     if env_url and env_url.strip():
         return validate_clean_url(env_url.strip()).rstrip("/")
     return validate_clean_url(DEFAULT_API_URL).rstrip("/")
+
+
+_PORTAL_HOSTS = frozenset({"qosai.app", "www.qosai.app", "api.qosai.app"})
+
+
+def describe_unreachable(root: str, reason: object) -> str:
+    """Turn a socket failure into a sentence a researcher can act on.
+
+    A missing DNS name is not a sync-contract mismatch. The preview that prints
+    ``sync_contract`` is a label, not an instruction to upgrade the backend.
+    """
+    text = str(reason or "").strip()
+    low = text.lower()
+    host = urllib.parse.urlparse(root).hostname or root
+    dns = any(
+        token in low
+        for token in (
+            "getaddrinfo",
+            "11001",
+            "name or service not known",
+            "nodename nor servname",
+            "temporary failure in name resolution",
+            "no address associated",
+        )
+    )
+    if dns:
+        why = (
+            f"{host} does not resolve. This is not a sync-contract mismatch, "
+            "and the package does not need an upgrade."
+        )
+    elif text:
+        why = f"The connection failed ({text})."
+    else:
+        why = "The connection failed."
+    return (
+        f"Could not reach {root}. {why}\n"
+        "  pull copies team summaries into this project. push sends yours the other way.\n"
+        "  The portal (https://qosai.app) is not the sync API.\n"
+        "  Reset the remote to the firm API with `ae remote add quantos` and no URL."
+    )
+
+
+def portal_host_note(url: str) -> str | None:
+    """Warn when a remote was pointed at the portal site instead of the sync API."""
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    if host not in _PORTAL_HOSTS:
+        return None
+    return (
+        f"{host} is the portal, not the sync API. "
+        "push and pull will not find a contract-2 server there. "
+        "Run `ae remote add quantos` with no URL to use the firm API."
+    )
 
 
 def remote_add(proj: Project, name: str = "quantos", url: str | None = None) -> str:
@@ -376,16 +430,18 @@ def format_push_preview(
     ideas = payload.get("ideas") or []
     trial_events = payload.get("trial_events") or []
     any_series = any(bool(isinstance(r, Mapping) and r.get("share_series")) for r in runs)
+    contract = payload.get("sync_contract", SYNC_CONTRACT_VERSION)
+    engine = payload.get("engine_version", current_engine_version())
+    series = "return series included" if any_series else "return series stay here"
     lines = [
-        f"  push preview  ->  {remote_name} ({endpoint})",
+        "  push preview",
+        f"    Sends summaries to {remote_name}. Code and raw datasets stay local.",
+        f"    remote           {endpoint}",
         f"    project          {proj.name}",
-        f"    sync_contract    {payload.get('sync_contract', SYNC_CONTRACT_VERSION)}  "
-        f"(engine {payload.get('engine_version', current_engine_version())})",
-        f"    items            {len(studies)} studies, {len(runs)} runs, "
-        f"{len(ideas)} ideas, {len(trial_events)} trial_events",
-        "    leaving machine  summary figures & metrics, dataset SHA-256 digests, "
-        f"hypothesis text & kill rules, trial attempt IDs, share_series={'yes' if any_series else 'no'}",
-        "    staying local    Code and raw datasets stay local.",
+        f"    sending          {len(studies)} studies, {len(runs)} runs, "
+        f"{len(ideas)} ideas, {len(trial_events)} trial events",
+        f"    leaving          figures, dataset hashes, hypothesis text, kill rules, trial ids; {series}",
+        f"    wire             sync_contract {contract}, engine {engine}",
     ]
     if show_payload:
         redacted_json = redact_secrets(json.dumps(dict(payload), indent=2, sort_keys=True, default=str))
@@ -500,7 +556,7 @@ def push_workspace(
         ) from err
     except (urllib.error.URLError, TimeoutError, OSError) as err:
         reason = getattr(err, "reason", err)
-        raise SyncNetworkError(f"Could not reach {root}: {redact_secrets(str(reason))}.") from err
+        raise SyncNetworkError(describe_unreachable(root, redact_secrets(str(reason)))) from err
 
     if not isinstance(raw_resp, Mapping):
         raise SyncServerError("Invalid non-object JSON response from /api/workspace/sync.")
@@ -600,7 +656,7 @@ def pull_workspace(
             ) from err
         except (urllib.error.URLError, TimeoutError, OSError) as err:
             reason = getattr(err, "reason", err)
-            raise SyncNetworkError(f"Could not reach {root}: {redact_secrets(str(reason))}.") from err
+            raise SyncNetworkError(describe_unreachable(root, redact_secrets(str(reason)))) from err
 
         if not isinstance(raw_page, Mapping):
             raise SyncServerError("Invalid non-object JSON response from /api/workspace/pull.")
