@@ -227,12 +227,10 @@ def portal_host_note(url: str) -> str | None:
 
 def _open_sync(req: urllib.request.Request, timeout: int) -> Any:
     """Open a sync request, retrying once when the firm API is slow to answer."""
-    last: Exception | None = None
     for attempt in range(2):
         try:
             return urllib.request.urlopen(req, timeout=timeout)
         except (urllib.error.URLError, TimeoutError, OSError) as err:
-            last = err
             reason = str(getattr(err, "reason", err)).lower()
             transient = "timed out" in reason or "timeout" in reason
             if not transient or attempt == 1:
