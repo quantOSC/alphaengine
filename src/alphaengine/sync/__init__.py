@@ -116,17 +116,31 @@ def resolve_remote_url(
     remote_name: str = "quantos",
     explicit_url: str | None = None,
 ) -> str:
-    """Resolve and validate the remote URL from explicit flag, `project.toml`, env, or default."""
+    """Resolve and validate the remote URL from explicit flag, `project.toml`, env, or default.
+
+    A stored portal host (``qosai.app`` / ``api.qosai.app``) is not the sync API.
+    It is replaced with the firm API so `remote add` without a URL, and the next
+    `pull` / `push`, do not keep dialing a name that does not resolve.
+    """
     from ..auth import validate_clean_url
 
+    def _clean(raw: str) -> str:
+        return validate_clean_url(raw.strip()).rstrip("/")
+
     if explicit_url and explicit_url.strip():
-        return validate_clean_url(explicit_url.strip()).rstrip("/")
-    if proj is not None and remote_name in proj.remotes and proj.remotes[remote_name]:
-        return validate_clean_url(proj.remotes[remote_name]).rstrip("/")
-    env_url = os.environ.get(API_URL_ENV) or os.environ.get(LEGACY_API_URL_ENV)
-    if env_url and env_url.strip():
-        return validate_clean_url(env_url.strip()).rstrip("/")
-    return validate_clean_url(DEFAULT_API_URL).rstrip("/")
+        cleaned = _clean(explicit_url)
+        if portal_host_note(cleaned) is None:
+            return cleaned
+    elif proj is not None and proj.remotes.get(remote_name):
+        cleaned = _clean(str(proj.remotes[remote_name]))
+        if portal_host_note(cleaned) is None:
+            return cleaned
+
+    firm = firm_api_url()
+    if proj is not None and portal_host_note(str(proj.remotes.get(remote_name) or "")):
+        proj.remotes[remote_name] = firm
+        proj.save_config()
+    return firm
 
 
 _PORTAL_HOSTS = frozenset({"qosai.app", "www.qosai.app", "api.qosai.app"})
@@ -174,17 +188,37 @@ def portal_host_note(url: str) -> str | None:
     host = (urllib.parse.urlparse(url).hostname or "").lower()
     if host not in _PORTAL_HOSTS:
         return None
-    return (
-        f"{host} is the portal, not the sync API. "
-        "push and pull will not find a contract-2 server there. "
-        "Run `ae remote add quantos` with no URL to use the firm API."
-    )
+    return f"{host} is the portal, not the sync API. push and pull use the firm API instead of that host."
+
+
+def firm_api_url() -> str:
+    """The sync API: an env override when it is not the portal site, otherwise the default."""
+    from ..auth import validate_clean_url
+
+    for raw in (os.environ.get(API_URL_ENV), os.environ.get(LEGACY_API_URL_ENV)):
+        if not raw or not raw.strip():
+            continue
+        cleaned = validate_clean_url(raw.strip()).rstrip("/")
+        if portal_host_note(cleaned) is None:
+            return cleaned
+    return validate_clean_url(DEFAULT_API_URL).rstrip("/")
 
 
 def remote_add(proj: Project, name: str = "quantos", url: str | None = None) -> str:
-    """Register or update a clean named remote in `.alphaengine/project.toml` (`QOS-155`)."""
+    """Register or update a clean named remote in `.alphaengine/project.toml` (`QOS-155`).
+
+    Omitting ``url`` stores the firm API. It does not keep a previously saved
+    portal host. Passing the portal site stores the firm API as well.
+    """
+    from ..auth import validate_clean_url
+
     clean_name = (name or "quantos").strip()
-    resolved = resolve_remote_url(proj, remote_name=clean_name, explicit_url=url)
+    requested = (url or "").strip()
+    if requested:
+        cleaned = validate_clean_url(requested).rstrip("/")
+        resolved = firm_api_url() if portal_host_note(cleaned) else cleaned
+    else:
+        resolved = firm_api_url()
     proj.remotes[clean_name] = resolved
     proj.save_config()
     return resolved

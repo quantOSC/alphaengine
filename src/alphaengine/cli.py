@@ -5970,15 +5970,15 @@ def cmd_remote(args: argparse.Namespace) -> int:
     if action == "add":
         r_name = str(getattr(args, "remote_name", None) or "quantos")
         r_url = getattr(args, "remote_url", None) or getattr(args, "url", None)
+        previous = str(proj.remotes.get(r_name) or "")
         try:
             resolved = remote_add(proj, name=r_name, url=r_url)
         except ValueError as exc:
             say(red(str(exc)))
             return 2
         say(green("Remote configured.") + f"  {bold(r_name)} {ARROW} {resolved}")
-        note = portal_host_note(resolved)
-        if note:
-            say(yellow(f"  {note}"))
+        if portal_host_note(previous) or portal_host_note(str(r_url or "")):
+            say(yellow(f"  That host is the portal, not the sync API. {r_name} now points at the firm API."))
         return 0
     if action == "list":
         if not proj.remotes:

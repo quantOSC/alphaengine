@@ -112,7 +112,7 @@ def test_sync_v2_payload_schema_share_series_and_json_schema_export(
     # Default `share_series=False`: series (>512) stripped, forbidden v1 keys absent!
     payload_no_series = build_sync_payload(proj, share_series=False)
     assert payload_no_series["sync_contract"] == SYNC_CONTRACT_VERSION == 2
-    assert payload_no_series["engine_version"] == "2.0.1"
+    assert payload_no_series["engine_version"] == "2.0.2"
     assert len(payload_no_series["studies"]) == 1
     assert len(payload_no_series["runs"]) == 1
     assert len(payload_no_series["ideas"]) == 1
@@ -352,6 +352,31 @@ def test_unreachable_host_is_not_a_contract_upgrade() -> None:
     assert "ae remote add quantos" in msg
     assert portal_host_note("https://api.qosai.app")
     assert portal_host_note("https://api.quantos.example") is None
-
     with pytest.raises(SyncContractMismatchError, match="not the quantOS sync API"):
         PullResponse.from_dict({"runs": [], "ideas": [], "studies": []})
+
+
+def test_remote_add_without_url_replaces_a_portal_host(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alphaengine._version import DEFAULT_API_URL
+    from alphaengine.sync import resolve_remote_url
+
+    monkeypatch.delenv("ALPHAENGINE_API_URL", raising=False)
+    monkeypatch.delenv("QUANTOS_API_URL", raising=False)
+    proj = init_project(tmp_path, name="remote-reset")
+    proj.remotes["quantos"] = "https://api.qosai.app"
+    proj.save_config()
+
+    resolved = remote_add(proj, "quantos")
+    assert resolved == DEFAULT_API_URL.rstrip("/")
+    assert proj.remotes["quantos"] == resolved
+
+    proj.remotes["quantos"] = "https://qosai.app"
+    proj.save_config()
+    assert resolve_remote_url(proj, "quantos") == DEFAULT_API_URL.rstrip("/")
+    assert proj.remotes["quantos"] == DEFAULT_API_URL.rstrip("/")
+
+    custom = remote_add(proj, "quantos", "https://api.quantos.example")
+    assert custom == "https://api.quantos.example"
+    assert resolve_remote_url(proj, "quantos") == custom

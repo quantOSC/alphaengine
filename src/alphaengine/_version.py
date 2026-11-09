@@ -174,7 +174,7 @@ from importlib.metadata import PackageNotFoundError
 from importlib.metadata import distribution as _pkg_distribution
 from typing import Any
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 
 #: Wire contract version for `ae push` / `ae pull` (`alphaengine.sync.schema`).
 SYNC_CONTRACT_VERSION = 2

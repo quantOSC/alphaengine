@@ -1044,7 +1044,7 @@ def test_require_firm_key_choke_point_keyring_and_no_key_leak(
     assert cli.main(["init", "--name", "free-project"]) == 0
     capsys.readouterr()
     assert cli.main(["version"]) == 0
-    assert "2.0.1" in capsys.readouterr().out
+    assert "2.0.2" in capsys.readouterr().out
     assert cli.main(["whoami"]) == 0
     capsys.readouterr()
     assert cli.main(["doctor"]) == 0
