@@ -66,7 +66,7 @@ def test_version_single_source_and_offline_import() -> None:
     assert proc.returncode == 0, proc.stderr
 
     repo_root = pathlib.Path(__file__).resolve().parents[1]
-    assert (repo_root / "ARCHITECTURE.md").is_file()
+    assert (repo_root / "docs" / "ARCHITECTURE.md").is_file()
 
 
 def test_verdict_vocabulary_and_deprecated_aliases() -> None:

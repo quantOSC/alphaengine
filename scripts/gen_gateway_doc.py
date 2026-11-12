@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-GATEWAY_DOC = ROOT / "ALPHAENGINE_GATEWAY.md"
+GATEWAY_DOC = ROOT / "docs" / "ALPHAENGINE_GATEWAY.md"
 
 # Add src to sys.path so we can import alphaengine.mcp
 sys.path.insert(0, str(ROOT / "src"))

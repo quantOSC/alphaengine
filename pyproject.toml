@@ -131,7 +131,7 @@ dev-mode-dirs = ["src"]
 [tool.hatch.build.targets.sdist]
 exclude = [
     "/constraints",
-    "/RELEASING.md",
+    "/docs/RELEASING.md",
 ]
 
 [tool.pytest.ini_options]

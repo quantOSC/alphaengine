@@ -201,8 +201,8 @@ def test_gateway_doc_matches_registry_without_drift() -> None:
 
 def test_gateway_doc_integrity_links_and_zero_secrets() -> None:
     """Verify ALPHAENGINE_GATEWAY.md and mcp-server/README.md resolve links and leak no secrets."""
-    gw_path = REPO_ROOT / "ALPHAENGINE_GATEWAY.md"
-    assert gw_path.exists(), "ALPHAENGINE_GATEWAY.md does not exist"
+    gw_path = REPO_ROOT / "docs" / "ALPHAENGINE_GATEWAY.md"
+    assert gw_path.exists(), "docs/ALPHAENGINE_GATEWAY.md does not exist"
     content = gw_path.read_text(encoding="utf-8")
 
     # All 25 tool names must appear in markdown

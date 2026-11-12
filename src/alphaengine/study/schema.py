@@ -186,11 +186,14 @@ def canonical_json(study: Study | dict[str, Any] | Any) -> str:
     return json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def canonical_sha256(payload: Study | dict[str, Any] | Any) -> str:
+def canonical_sha256(study_or_object: Study | dict[str, Any] | Any) -> str:
     """Single canonical 64-hex SHA-256 hash function used for content_sha256, seals, and CAS objects."""
-    if isinstance(payload, (bytes, bytearray)):
-        return hashlib.sha256(payload).hexdigest()
-    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+    # codeql[py/weak-sensitive-data-hashing] Content integrity digest for non-password CAS objects/studies
+    if isinstance(study_or_object, (bytes, bytearray)):
+        # codeql[py/weak-sensitive-data-hashing]
+        return hashlib.sha256(study_or_object).hexdigest()
+    # codeql[py/weak-sensitive-data-hashing]
+    return hashlib.sha256(canonical_json(study_or_object).encode("utf-8")).hexdigest()
 
 
 def compute_content_sha256(study: Study | Mapping[str, Any]) -> str:
@@ -217,6 +220,7 @@ def _legacy_v1_dict(study: Study | Mapping[str, Any]) -> dict[str, Any]:
 def _legacy_hashes(study: Study | Mapping[str, Any]) -> tuple[str, set[str]]:
     """Compute legacy v1 canonical hash and pre-1.1.1 round10/plain hashes."""
     raw = _legacy_v1_dict(study)
+    # codeql[py/weak-sensitive-data-hashing] Legacy non-password study verification hash
     v1_canonical = hashlib.sha256(
         json.dumps(
             _normalize_canonical(raw),
@@ -230,9 +234,11 @@ def _legacy_hashes(study: Study | Mapping[str, Any]) -> tuple[str, set[str]]:
     leg10 = json.dumps(
         _normalize_legacy_round10(raw), sort_keys=True, separators=(",", ":"), ensure_ascii=False
     )
+    # codeql[py/weak-sensitive-data-hashing] Legacy non-password study verification hash
     older.add(hashlib.sha256(leg10.encode("utf-8")).hexdigest())
     for sep in ((",", ":"), (", ", ": ")):
         plain = json.dumps(raw, sort_keys=True, separators=sep, default=str, ensure_ascii=False)
+        # codeql[py/weak-sensitive-data-hashing] Legacy non-password study verification hash
         older.add(hashlib.sha256(plain.encode("utf-8")).hexdigest())
     return v1_canonical, older
 

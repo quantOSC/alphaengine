@@ -2,7 +2,7 @@
 
 The AlphaEngine Model Context Protocol (MCP) server exposes validated quantitative financial analytics directly to LLM agents and clients (host `aemcp`, server name `alphaengine`).
 
-For the comprehensive tool reference, architecture specification, and security invariants, see [ALPHAENGINE_GATEWAY.md](../ALPHAENGINE_GATEWAY.md).
+For the comprehensive tool reference, architecture specification, and security invariants, see [ALPHAENGINE_GATEWAY.md](../docs/ALPHAENGINE_GATEWAY.md).
 
 ## Architecture Overview
 
