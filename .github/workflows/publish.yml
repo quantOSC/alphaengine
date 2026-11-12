@@ -59,9 +59,43 @@ jobs:
     environment: pypi
     permissions:
       id-token: write        # the OIDC token. the only credential involved.
+    # The repository allows GitHub-owned actions only, so the third-party
+    # pypa/gh-action-pypi-publish action cannot run here (startup_failure).
+    # This is PyPI's documented manual Trusted Publishing flow: exchange the
+    # job's OIDC token for a short-lived upload token, then upload with twine.
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade twine
+      - run: python -m twine check dist/*
+      - name: Mint a short-lived PyPI token via OIDC
+        shell: python
+        run: |
+          import json, os, urllib.request
+
+          req = urllib.request.Request(
+              os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"] + "&audience=pypi",
+              headers={"Authorization": "bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+          )
+          with urllib.request.urlopen(req, timeout=30) as resp:
+              oidc = json.load(resp)["value"]
+
+          mint = urllib.request.Request(
+              "https://pypi.org/_/oidc/mint-token",
+              data=json.dumps({"token": oidc}).encode(),
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(mint, timeout=30) as resp:
+              token = json.load(resp)["token"]
+
+          print(f"::add-mask::{token}")
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
+              fh.write("TWINE_USERNAME=__token__\n")
+              fh.write(f"TWINE_PASSWORD={token}\n")
+      - run: python -m twine upload --non-interactive dist/*
