@@ -11,6 +11,7 @@ Canonical 2.0 wire/schema field names (`QOS-163`): `idea_id` and `kill_rule`
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -67,7 +68,9 @@ _METRIC_ALIASES: dict[str, tuple[str, ...]] = {
     "ic_t_stat": ("ic_t_stat",),
 }
 
-_CLAUSE_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|==|!=|<|>)\s*(-?\d+(?:\.\d+)?)\s*$")
+_CLAUSE_RE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|==|!=|<|>)\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*$"
+)
 
 
 def _slug_family(thesis: str) -> str:
@@ -102,7 +105,12 @@ def create_idea(
     if not clean_thesis:
         raise ValueError("Hypothesis thesis cannot be empty.")
     now = datetime.now(timezone.utc).isoformat()
-    iid = idea_id or f"idea_{uuid.uuid4().hex[:8]}"
+    if idea_id:
+        from .project import validate_safe_id
+
+        iid = validate_safe_id(str(idea_id), "idea_id")
+    else:
+        iid = f"idea_{uuid.uuid4().hex[:8]}"
     fam = (family or "").strip() or _slug_family(clean_thesis)
     effective_rule = (kill_rule or kill_if or "").strip()
     record: dict[str, Any] = {
@@ -244,7 +252,7 @@ def evaluate_kill_rule(kill_rule: str, figures: dict[str, Any]) -> dict[str, Any
     if not rule:
         return {"rule": "", "triggered": None, "status": "no_rule", "detail": "no kill rule specified"}
 
-    clauses = [c.strip() for c in re.split(r"\b(?:or|OR)\b|;", rule) if c.strip()]
+    clauses = [c.strip() for c in re.split(r"\bor\b|;", rule, flags=re.IGNORECASE) if c.strip()]
     details: list[str] = []
     any_triggered = False
     any_evaluated = False
@@ -259,6 +267,10 @@ def evaluate_kill_rule(kill_rule: str, figures: dict[str, Any]) -> dict[str, Any
         resolved_key, observed = _lookup_metric(raw_metric, figures)
         if observed is None:
             details.append(f"{raw_metric} not yet measured")
+            continue
+        if not math.isfinite(float(observed)):
+            # NaN compares False to everything, so it used to read as "passing".
+            details.append(f"{resolved_key} is {observed} (undetermined, not a pass)")
             continue
         any_evaluated = True
         hit = (

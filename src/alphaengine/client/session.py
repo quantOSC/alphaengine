@@ -252,9 +252,15 @@ class Run:
         mine = [f for f in (filed.get("signals") or []) if f.get("source_run_id") == self.run_id]
         if not mine:
             return None
+        sig_id = mine[0].get("id")
+        if not sig_id:
+            return None
         try:
-            return self.session._get(f"/api/me/signals/{mine[0].get('id')}/diff")
-        except (Offline, ServerError):
+            from ..project import validate_safe_id
+
+            safe_sig_id = validate_safe_id(str(sig_id), "signal_id")
+            return self.session._get(f"/api/me/signals/{safe_sig_id}/diff")
+        except (Offline, ServerError, ValueError):
             return None
 
     def step(self, step: Figures) -> Figures:
@@ -279,13 +285,16 @@ class Run:
             # designed refusal; anything else is the caller's own code failing
             # (their backtest_fn, their data's shape) and gets the same honest
             # treatment: named, recorded in the trace, and re-offered once.
+            from ..auth import redact_secrets
+
+            err_text = redact_secrets(str(exc))[:500]
             body = {
                 "step_id": step["step_id"],
                 "attempt_id": attempt_id,
                 "ok": False,
-                "error": str(exc),
+                "error": err_text,
             }
-            self.last_error = str(exc)
+            self.last_error = err_text
         directive = self.session._post(f"/api/harness/runs/{self.run_id}/steps", body)
         # After the figures, never inside them. A rejected trace must not turn
         # a finished step into a failed one, and it must not ride in the body
@@ -426,6 +435,23 @@ class Session:
     api_key: str | None = None
     share_series: bool = False
 
+    def __post_init__(self) -> None:
+        raw = (self.base_url or "").strip()
+        if raw.startswith("fake://"):
+            self.base_url = raw
+            return
+        import urllib.parse
+
+        from .._version import DEFAULT_API_URL
+        from ..auth import validate_clean_url
+        from ..sync import _LEGACY_SYNC_HOSTS
+
+        cleaned = validate_clean_url(raw, require_https_remote=True).rstrip("/")
+        host = (urllib.parse.urlsplit(cleaned).hostname or "").lower()
+        if host in _LEGACY_SYNC_HOSTS:
+            cleaned = DEFAULT_API_URL.rstrip("/")
+        self.base_url = cleaned
+
     def _share_series(self) -> bool:
         return share_series_enabled(self.share_series)
 
@@ -453,15 +479,18 @@ class Session:
         `thesis_id` names a thesis the portal already holds. The statement
         stays on this machine; the id is how the run is attached to it.
         """
+        from ..project import validate_safe_id
+
         body: Figures = {"workflow": workflow, "version": version, "inputs": inputs}
         if workspace_id:
             body["workspace_id"] = workspace_id
         if thesis_id:
             body["thesis_id"] = thesis_id
         directive = self._post("/api/harness/runs", body)
+        safe_run_id = validate_safe_id(str(directive["run_id"]), "run_id")
         run = Run(
             session=self,
-            run_id=directive["run_id"],
+            run_id=safe_run_id,
             executor=StepExecutor(data=data, backtest_fn=backtest_fn, handlers=handlers),
         )
         run._absorb(directive)
@@ -517,7 +546,10 @@ class Session:
         browser-only — symbols and no stored series, which is a real and common
         choice rather than a fault.
         """
-        path = f"/api/me/universes/{universe_id}/series"
+        from ..project import validate_safe_id
+
+        safe_uid = validate_safe_id(str(universe_id), "universe_id")
+        path = f"/api/me/universes/{safe_uid}/series"
         if window:
             path += f"?window={int(window)}"
         return self._get(path)
@@ -653,14 +685,20 @@ class Session:
         The producer (`events.EventSink`) swallows a missing route so a research
         run never fails because the portal is an older build.
         """
-        return self._post(f"/api/harness/runs/{run_id}/events", event)
+        from ..project import validate_safe_id
+
+        safe_rid = validate_safe_id(str(run_id), "run_id")
+        return self._post(f"/api/harness/runs/{safe_rid}/events", event)
 
     # ── transport ──────────────────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Figures | None = None) -> Figures:
+        from ..auth import read_bounded_bytes, redact_secrets, safe_urlopen
+        from ..sync import scrub_sync_host
+
         if body is not None and not self._share_series():
             _guard(body)
         url = f"{self.base_url.rstrip('/')}{path}"
-        payload = json.dumps(body).encode() if body is not None else None
+        payload = json.dumps(body, allow_nan=False).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=payload, method=method)
         req.add_header("Content-Type", "application/json")
         if self.api_key:
@@ -671,17 +709,26 @@ class Session:
             timeout = float(_TIMEOUT)
             if isinstance(override, (int, float)) and not isinstance(override, bool):
                 timeout = float(override)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                out: Figures = json.loads(resp.read().decode() or "{}")
+            with safe_urlopen(req, timeout=timeout) as resp:
+                raw_bytes = read_bounded_bytes(resp)
+                out: Figures = json.loads(raw_bytes.decode("utf-8") or "{}")
                 return out
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")
+            try:
+                raw_err = read_bounded_bytes(exc).decode("utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                raw_err = str(exc)
+            detail: Any = raw_err
             with contextlib.suppress(ValueError, AttributeError):
-                detail = json.loads(detail).get("detail", detail)
-            raise ServerError(exc.code, str(detail)) from exc
+                parsed = json.loads(raw_err)
+                if isinstance(parsed, dict):
+                    detail = parsed.get("detail", raw_err)
+            clean_detail = scrub_sync_host(redact_secrets(str(detail))).strip()[:300]
+            raise ServerError(exc.code, clean_detail) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            shown_target = scrub_sync_host(self.base_url)
             raise Offline(
-                f"no workflow server at {self.base_url}. The maths in this package "
+                f"no workflow server at {shown_target}. The maths in this package "
                 "still runs offline; workflows need a connection."
             ) from exc
 

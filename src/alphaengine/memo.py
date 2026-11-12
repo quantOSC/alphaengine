@@ -21,7 +21,7 @@ from typing import Any
 
 from ._version import current_engine_version
 from .manifest import check_manifest_provenance
-from .project import Project
+from .project import Project, validate_safe_id
 from .study import Study, compute_content_sha256, load, save, verify_study_mode
 
 __all__ = [
@@ -29,6 +29,20 @@ __all__ = [
     "verify_study_file",
     "generate_memo",
 ]
+
+
+def _md_escape(value: Any) -> str:
+    """Escape HTML/table metacharacters and inline backticks for safe Markdown rendering."""
+    text = str(value if value is not None else "")
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("|", "\\|")
+        .replace("`", "'")
+        .replace("\r", " ")
+        .replace("\n", " ")
+    )
 
 
 def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
@@ -188,7 +202,11 @@ def seal_from_project(proj: Project, target_ref: str) -> tuple[Study, Path]:
         thesis_id=iid or None,
     )
     study.seal()
-    out_path = proj.studies_dir / f"{file_stem}.json"
+    safe_stem = validate_safe_id(file_stem, "study_id")
+    studies_root = proj.studies_dir.resolve()
+    out_path = (studies_root / f"{safe_stem}.json").resolve()
+    if not out_path.is_relative_to(studies_root):
+        raise ValueError(f"Refusing study path outside project studies directory: {file_stem!r}")
     save(study, out_path)
     return study, out_path
 
@@ -199,6 +217,7 @@ def verify_study_file(
     data_path: str | Path | None = None,
     proj: Project | None = None,
     tolerance: float = 1e-4,
+    allow_external_code: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     """Verify a `study.json` across all 3 `QOS-158` statuses:
 
@@ -261,11 +280,24 @@ def verify_study_file(
             and study.data_hash not in valid_hashes
             and not any(h.startswith(study.data_hash) for h in valid_hashes)
         ):
-            mismatches["data_hash"] = {"recorded": study.data_hash, "reproduced": panel_hashes[0]}
+            mismatches["data_hash"] = {
+                "recorded": study.data_hash,
+                "reproduced": panel_hashes[0] if panel_hashes else file_sha,
+            }
+
+        ann_spec = raw.get("annualization") or (
+            study.manifest.get("annualization") if isinstance(study.manifest, Mapping) else None
+        )
+        rf_spec = raw.get("risk_free") or (
+            study.manifest.get("risk_free") if isinstance(study.manifest, Mapping) else None
+        )
+        ppy = int((ann_spec.get("periods_per_year") if isinstance(ann_spec, Mapping) else None) or 252)
+        rf_raw = rf_spec.get("annual_rate") if isinstance(rf_spec, Mapping) else None
+        rf_rate = float(rf_raw) if isinstance(rf_raw, (int, float)) and not isinstance(rf_raw, bool) else None
 
         rets, _ = returns_from_panel_or_series(loaded)
         if rets and len(rets) >= 8:
-            repro_perf = performance_report(rets)
+            repro_perf = performance_report(rets, risk_free_rate=rf_rate, periods_per_year=ppy)
             for k, rec_val in (study.performance or {}).items():
                 if k not in repro_perf:
                     mismatches[f"performance.{k}"] = {
@@ -284,7 +316,12 @@ def verify_study_file(
                         "reproduced": repro_perf[k],
                     }
             if study.n_trials and study.n_trials >= 1 and study.psr_vs_zero is not None:
-                repro_dsr = deflated_sharpe(rets, n_trials=study.n_trials)
+                repro_dsr = deflated_sharpe(
+                    rets,
+                    n_trials=study.n_trials,
+                    risk_free_rate=rf_rate,
+                    periods_per_year=ppy,
+                )
                 if (
                     "psr_vs_zero" in repro_dsr
                     and abs(float(study.psr_vs_zero) - float(repro_dsr["psr_vs_zero"])) > tolerance
@@ -293,6 +330,11 @@ def verify_study_file(
                         "recorded": study.psr_vs_zero,
                         "reproduced": repro_dsr["psr_vs_zero"],
                     }
+        elif study.performance:
+            mismatches["returns_length"] = {
+                "recorded": ">=8",
+                "reproduced": len(rets) if rets else 0,
+            }
 
         figs_ok = len(mismatches) == 0
         prov_ok_d, prov_diag_d = check_manifest_provenance(
@@ -318,18 +360,27 @@ def verify_study_file(
             except KeyError:
                 run_rec = None
             if run_rec is not None:
-                rerun_rep = rerun_record_report(proj, run_rec)
-                figs_ok = bool(rerun_rep["hash_verified"] and rerun_rep["figures_reproduced"])
-                prov_rep = rerun_rep.get("provenance") or {}
-                has_drift_r = bool(prov_diag.get("drift") or prov_rep.get("drift"))
-                report_info["figures_reproduced"] = figs_ok
-                report_info["data_verified"] = figs_ok
-                prov_verified = bool(rerun_rep["provenance_verified"])
-                report_info["provenance_verified"] = not has_drift_r and prov_verified
-                report_info["provenance"] = prov_diag if prov_diag.get("drift") else prov_rep
-                report_info["mismatches"] = rerun_rep["mismatches"]
-                ok = bool(hash_ok and figs_ok and not has_drift_r)
-                return ok, report_info
+                repro_spec = run_rec.get("repro_spec")
+                ext_mod = repro_spec.get("project_module") if isinstance(repro_spec, Mapping) else None
+                ext_sig = repro_spec.get("signal_target") if isinstance(repro_spec, Mapping) else None
+                requires_ext_code = (
+                    isinstance(ext_mod, str) and bool(ext_mod) and not ext_mod.startswith("alphaengine.")
+                ) or (isinstance(ext_sig, str) and bool(ext_sig) and not ext_sig.startswith("alphaengine."))
+                if requires_ext_code and not allow_external_code:
+                    report_info["external_code_skipped"] = str(ext_mod or ext_sig)
+                else:
+                    rerun_rep = rerun_record_report(proj, run_rec)
+                    figs_ok = bool(rerun_rep["hash_verified"] and rerun_rep["figures_reproduced"])
+                    prov_rep = rerun_rep.get("provenance") or {}
+                    has_drift_r = bool(prov_diag.get("drift") or prov_rep.get("drift"))
+                    report_info["figures_reproduced"] = figs_ok
+                    report_info["data_verified"] = figs_ok
+                    prov_verified = bool(rerun_rep["provenance_verified"])
+                    report_info["provenance_verified"] = not has_drift_r and prov_verified
+                    report_info["provenance"] = prov_diag if prov_diag.get("drift") else prov_rep
+                    report_info["mismatches"] = rerun_rep["mismatches"]
+                    ok = bool(hash_ok and figs_ok and not has_drift_r)
+                    return ok, report_info
 
     has_drift_end = bool(prov_diag.get("drift"))
     return bool(hash_ok and not has_drift_end), report_info
@@ -384,18 +435,21 @@ def generate_memo(
         stem = f"memo_{run_one['run_id']}"
 
     lines = [
-        f"# {title}",
+        f"# {_md_escape(title)}",
         "",
         "*Research tool, not investment advice.*",
         "",
-        f"- **Project:** `{proj.name}`",
-        f"- **Family:** `{family}`",
-        f"- **Status:** `{status}`",
-        f"- **Thesis:** {thesis}",
-        f"- **Kill Rule:** `{kill_rule}`",
+        f"- **Project:** `{_md_escape(proj.name)}`",
+        f"- **Family:** `{_md_escape(family)}`",
+        f"- **Status:** `{_md_escape(status)}`",
+        f"- **Thesis:** {_md_escape(thesis)}",
+        f"- **Kill Rule:** `{_md_escape(kill_rule)}`",
     ]
     if kill_eval.get("detail"):
-        lines.append(f"- **Kill Evaluation:** `{kill_eval.get('status')}` — {kill_eval.get('detail')}")
+        lines.append(
+            f"- **Kill Evaluation:** `{_md_escape(kill_eval.get('status'))}` - "
+            f"{_md_escape(kill_eval.get('detail'))}"
+        )
     lines.append(f"- **Engine Version:** `alphaengine {eng_ver}`")
     lines.append("")
     lines.append("## Recorded Runs & Cited Figures")
@@ -405,11 +459,11 @@ def generate_memo(
         lines.append("No runs linked yet.")
     else:
         for r in runs:
-            rid = str(r.get("run_id") or "")
-            cmd = str(r.get("command") or "")
-            ts = str(r.get("timestamp") or "")[:19].replace("T", " ")
+            rid = _md_escape(r.get("run_id") or "")
+            cmd = _md_escape(r.get("command") or "")
+            ts = _md_escape(str(r.get("timestamp") or "")[:19].replace("T", " "))
             figs = r.get("figures") or {}
-            verd = str(r.get("verdict") or "unscored")
+            verd = _md_escape(r.get("verdict") or "unscored")
             reason = (figs.get("verdict_reason") if isinstance(figs, dict) else None) or r.get(
                 "verdict_reason"
             )
@@ -422,12 +476,12 @@ def generate_memo(
                 reason = reason or "borrow not supplied for short positions"
             nt = r.get("n_trials")
             ct = r.get("cumulative_trials")
-            src = str(r.get("n_trials_source") or "")
-            run_eng = str(r.get("engine_version") or eng_ver)
-            ds_hashes = ", ".join(str(h)[:16] for h in (r.get("dataset_hashes") or [])) or "none"
+            src = _md_escape(r.get("n_trials_source") or "")
+            run_eng = _md_escape(r.get("engine_version") or eng_ver)
+            ds_hashes = ", ".join(_md_escape(str(h)[:16]) for h in (r.get("dataset_hashes") or [])) or "none"
             lines.append(f"### Run `{rid}` — `{cmd}` ({ts})")
             if reason:
-                lines.append(f"- **Verdict:** `{verd}` ({reason}) `[{rid}]`")
+                lines.append(f"- **Verdict:** `{verd}` ({_md_escape(reason)}) `[{rid}]`")
             else:
                 lines.append(f"- **Verdict:** `{verd}` `[{rid}]`")
             lines.append(f"- **Engine Version:** `{run_eng}` `[{rid}]`")
@@ -437,22 +491,30 @@ def generate_memo(
             if isinstance(figs, dict):
                 for fk, fv in sorted(figs.items()):
                     if isinstance(fv, (int, float, str)) and not isinstance(fv, bool):
-                        lines.append(f"- **{fk}:** `{fv}` `[{rid}]`")
+                        lines.append(f"- **{_md_escape(fk)}:** `{_md_escape(fv)}` `[{rid}]`")
                     elif isinstance(fv, dict):
                         for sk, sv in sorted(fv.items()):
                             if isinstance(sv, (int, float, str)) and not isinstance(sv, bool):
-                                lines.append(f"- **{fk}.{sk}:** `{sv}` `[{rid}]`")
+                                lines.append(
+                                    f"- **{_md_escape(fk)}.{_md_escape(sk)}:** `{_md_escape(sv)}` `[{rid}]`"
+                                )
             lines.append("")
 
     md_text = "\n".join(lines).rstrip() + "\n"
-    proj.studies_dir.mkdir(parents=True, exist_ok=True)
+    studies_root = proj.studies_dir.resolve()
+    studies_root.mkdir(parents=True, exist_ok=True)
+    safe_stem = validate_safe_id(stem, "memo_stem")
     clean_fmt = (fmt or "md").strip().lower()
     if clean_fmt == "pdf":
-        out = Path(output_path) if output_path else (proj.studies_dir / f"{stem}.pdf")
+        out = Path(output_path) if output_path else (studies_root / f"{safe_stem}.pdf").resolve()
+        if output_path is None and not out.is_relative_to(studies_root):
+            raise ValueError(f"Refusing memo path outside studies directory: {stem!r}")
         _write_memo_pdf(md_text, out, title=title)
         return md_text, out
 
-    out = Path(output_path) if output_path else (proj.studies_dir / f"{stem}.md")
+    out = Path(output_path) if output_path else (studies_root / f"{safe_stem}.md").resolve()
+    if output_path is None and not out.is_relative_to(studies_root):
+        raise ValueError(f"Refusing memo path outside studies directory: {stem!r}")
     out.write_text(md_text, encoding="utf-8")
     return md_text, out
 

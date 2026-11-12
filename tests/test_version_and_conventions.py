@@ -37,13 +37,13 @@ from alphaengine.core.walkforward import walk_forward
 
 
 def test_version_single_source_and_offline_import() -> None:
-    assert alphaengine.__version__ == "2.0.3"
-    assert current_engine_version() == "2.0.3"
+    assert alphaengine.__version__ == "2.0.4"
+    assert current_engine_version() == "2.0.4"
     assert SYNC_CONTRACT_VERSION == 2
     assert MANIFEST_VERSION == 1
 
     info = engine_info()
-    assert info["engine_version"] == "2.0.3"
+    assert info["engine_version"] == "2.0.4"
     assert info["sync_contract"] == 2
     assert info["manifest_version"] == 1
     assert isinstance(info["python_version"], str)
@@ -297,4 +297,4 @@ def test_methods_registry_catalogue() -> None:
     }.issubset(ids)
     assert set(METHODS_CATALOGUE) == ids
     dsr_spec = get_method("deflated_sharpe")
-    assert dsr_spec["engine_version"] == "2.0.3"
+    assert dsr_spec["engine_version"] == "2.0.4"

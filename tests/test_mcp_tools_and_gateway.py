@@ -50,7 +50,7 @@ def test_mcp_tool_snapshot_count_is_exact_25() -> None:
         assert tool["storage"]
         assert tool["description"]
         assert tool["engine_version"] == __version__
-        assert tool["engine_version"] == "2.0.3"
+        assert tool["engine_version"] == "2.0.4"
 
 
 def test_deterministic_tools_parity_with_alphaengine_core() -> None:
@@ -131,17 +131,17 @@ def test_deterministic_tools_parity_with_alphaengine_core() -> None:
 def test_account_tools_reporting_and_version_stamp() -> None:
     """Account tools stamp engine_version and document persistence destination."""
     univ = call_mcp_tool("my_universe", tickers=["AAPL", "MSFT"])
-    assert univ["engine_version"] == "2.0.3"
+    assert univ["engine_version"] == "2.0.4"
     assert univ["tickers"] == ["AAPL", "MSFT"]
     assert "workspace" in univ["stored"]
 
     deliv = call_mcp_tool("deliver_run", run_id="run_123", summary={"manifest_sha256": "abc"})
-    assert deliv["engine_version"] == "2.0.3"
+    assert deliv["engine_version"] == "2.0.4"
     assert deliv["run_id"] == "run_123"
     assert "ledger" in deliv["stored"]
 
     wf = call_mcp_tool("run_workflow", workflow="momentum_sweep")
-    assert wf["engine_version"] == "2.0.3"
+    assert wf["engine_version"] == "2.0.4"
     assert wf["workflow"] == "momentum_sweep"
     assert "queue" in wf["stored"]
 
@@ -225,3 +225,73 @@ def test_gateway_doc_integrity_links_and_zero_secrets() -> None:
     mcp_content = mcp_readme.read_text(encoding="utf-8")
     assert "ALPHAENGINE_GATEWAY.md" in mcp_content
     assert "25 Tools" in mcp_content or "25 tools" in mcp_content
+
+
+def test_mcp_tool_dispatch_aliases_and_account_path_traversal_guards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    # Path traversal IDs in account tools must be refused
+    for tool_name, bad_kwargs in (
+        ("my_universe", {"name": "../escape"}),
+        ("deliver_run", {"run_id": "../escape", "summary": {"verdict": "robust"}}),
+        ("run_workflow", {"workflow": "../escape"}),
+    ):
+        with pytest.raises(ValueError):
+            call_mcp_tool(tool_name, **bad_kwargs)
+
+    # Raw series (>512 list) or forbidden keys in deliver_run must be refused
+    with pytest.raises(ValueError, match="at most 512"):
+        call_mcp_tool(
+            "deliver_run",
+            run_id="run_ok_1",
+            summary={"verdict": "robust", "curve": list(range(600))},
+        )
+    with pytest.raises(ValueError, match="not deliverable"):
+        call_mcp_tool(
+            "deliver_run",
+            run_id="run_ok_1",
+            summary={"verdict": "robust", "returns": [0.01, 0.02]},
+        )
+
+    # Documented parameter aliases across core MCP tools execute cleanly and serialize as JSON
+    rng = np.random.default_rng(7)
+    rets_a = rng.normal(0.0005, 0.01, size=60).tolist()
+    rets_b = rng.normal(0.0003, 0.012, size=60).tolist()
+    prices_a = (100.0 * np.cumprod(1.0 + np.array(rets_a))).tolist()
+    prices_b = (100.0 * np.cumprod(1.0 + np.array(rets_b))).tolist()
+    cov = [[0.04, 0.01], [0.01, 0.09]]
+
+    vc = call_mcp_tool("var_cvar", returns=rets_a, alpha=0.05)
+    assert "parametric" in vc and "cvar" in vc
+
+    sc = call_mcp_tool("screen_universe", panel={"A": prices_a, "B": prices_b})
+    assert "rows" in sc
+
+    fm = call_mcp_tool(
+        "fama_macbeth",
+        returns={"A": prices_a, "B": prices_b},
+        exposures={"mom": {"A": rets_a, "B": rets_b}},
+    )
+    assert "t_stat" in fm
+
+    qb = call_mcp_tool(
+        "quantile_book",
+        signals={"A": rets_a, "B": rets_b},
+        returns={"A": prices_a, "B": prices_b},
+        n_quantiles=2,
+    )
+    assert "spread_pct" in qb
+
+    hrp_out = call_mcp_tool("hrp", cov_matrix=cov, names=["A", "B"])
+    assert len(hrp_out["weights"]) == 2
+
+    vt_out = call_mcp_tool("vol_target", returns=rets_a, target_vol=0.10)
+    assert "realized_vol" in vt_out
+
+    dn_out = call_mcp_tool("denoise_cov", cov_matrix=cov, T=60)
+    assert len(dn_out["cov"]) == 2
+
+    dgp_out = call_mcp_tool("dgp_stress", returns=rets_a, n_paths=16, seed=1)
+    assert "sharpe_q50" in dgp_out

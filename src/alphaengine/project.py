@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import json
 import math
+import numbers
+import os
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +35,9 @@ SUBDIRS: tuple[str, ...] = (
     "objects",
 )
 
+_SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-]{0,127}$")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+
 __all__ = [
     "PROJECT_FORMAT_VERSION",
     "PROJECT_DIR_NAME",
@@ -40,6 +47,7 @@ __all__ = [
     "canonical_bytes",
     "canonical_sha256",
     "sha256_hex",
+    "validate_safe_id",
     "init_project",
     "find_project",
 ]
@@ -49,14 +57,32 @@ class ProjectNotFoundError(RuntimeError):
     """Raised when a project-only operation is invoked outside `.alphaengine/`."""
 
 
+def validate_safe_id(value: str, kind: str = "identifier") -> str:
+    """Validate an identifier used in file stems, URLs, or ledger references (`[A-Za-z0-9._-]`, no `..`)."""
+    clean = str(value or "").strip()
+    if not clean or ".." in clean or not _SAFE_ID_RE.fullmatch(clean):
+        raise ValueError(
+            f"Invalid {kind} {value!r}: expected 1..128 alphanumeric, '.', '_', or '-' characters "
+            "without path separators or '..'."
+        )
+    return clean
+
+
 def _sanitize_json_numbers(node: Any) -> Any:
-    """Replace non-finite floats with None while keeping finite numbers numeric for JSON storage."""
-    if isinstance(node, dict):
+    """Replace non-finite floats with None and unwrap NumPy scalars/arrays for RFC 8259 JSON storage."""
+    if hasattr(node, "dtype") and hasattr(node, "tolist") and callable(node.tolist):
+        node = node.tolist()
+    if isinstance(node, Mapping):
         return {str(k): _sanitize_json_numbers(node[k]) for k in sorted(node.keys(), key=str)}
     if isinstance(node, (list, tuple)):
         return [_sanitize_json_numbers(v) for v in node]
-    if isinstance(node, float) and not math.isfinite(node):
-        return None
+    if isinstance(node, bool) or node is None or isinstance(node, (int, str)):
+        return node
+    if isinstance(node, numbers.Integral):
+        return int(node)
+    if isinstance(node, (float, numbers.Real)):
+        fval = float(node)
+        return fval if math.isfinite(fval) else None
     return node
 
 
@@ -200,6 +226,13 @@ class Project:
             self.sync_cursors.pop(key, None)
         self.save_config()
 
+    def _resolve_dot_child(self, rel_path: str) -> Path:
+        base = self.dot_dir.resolve()
+        target = (self.dot_dir / rel_path).resolve()
+        if target == base or not target.is_relative_to(base):
+            raise ValueError(f"Refusing path outside project workspace: {rel_path!r}")
+        return target
+
     def put_object(self, payload: Any) -> str:
         """Write a content-addressed JSON object under `.alphaengine/objects/<sha256>.json`."""
         digest = canonical_sha256(payload)
@@ -211,6 +244,7 @@ class Project:
                 sort_keys=True,
                 separators=(",", ":"),
                 ensure_ascii=False,
+                allow_nan=False,
             ).encode("utf-8")
             obj_path.write_bytes(stored_bytes)
         return digest
@@ -218,6 +252,8 @@ class Project:
     def get_object(self, digest: str) -> Any:
         """Read and verify a content-addressed object by its 64-hex SHA-256."""
         clean = str(digest).strip().lower()
+        if not _HEX64_RE.fullmatch(clean):
+            raise ValueError(f"Invalid CAS object digest {digest!r}: expected 64 lowercase hex chars.")
         obj_path = self.objects_dir / f"{clean}.json"
         if not obj_path.is_file():
             raise FileNotFoundError(f"No object {clean} in {self.objects_dir}")
@@ -230,19 +266,20 @@ class Project:
 
     def append_jsonl(self, rel_path: str, record: dict[str, Any]) -> str:
         """Store `record` as a content-addressed object and append a line to `.alphaengine/<rel_path>`."""
+        target = self._resolve_dot_child(rel_path)
         entry = dict(record)
+        entry.pop("object_sha256", None)
         digest = self.put_object(entry)
-        entry.setdefault("object_sha256", digest)
-        target = self.dot_dir / rel_path
+        entry["object_sha256"] = digest
         target.parent.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(_sanitize_json_numbers(entry), sort_keys=True, ensure_ascii=False)
+        line = json.dumps(_sanitize_json_numbers(entry), sort_keys=True, ensure_ascii=False, allow_nan=False)
         with target.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
         return digest
 
     def write_jsonl(self, rel_path: str, records: list[dict[str, Any]]) -> None:
         """Atomically write `records` to `.alphaengine/<rel_path>`, storing each record in CAS."""
-        target = self.dot_dir / rel_path
+        target = self._resolve_dot_child(rel_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = []
         for rec in records:
@@ -250,14 +287,16 @@ class Project:
             entry.pop("object_sha256", None)
             digest = self.put_object(entry)
             entry["object_sha256"] = digest
-            lines.append(json.dumps(_sanitize_json_numbers(entry), sort_keys=True, ensure_ascii=False))
+            lines.append(
+                json.dumps(_sanitize_json_numbers(entry), sort_keys=True, ensure_ascii=False, allow_nan=False)
+            )
         tmp = target.with_suffix(target.suffix + ".tmp")
         tmp.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
         tmp.replace(target)
 
     def read_jsonl(self, rel_path: str, *, strict: bool = False) -> list[dict[str, Any]]:
         """Read all records from an append-only JSON Lines file under `.alphaengine/`."""
-        target = self.dot_dir / rel_path
+        target = self._resolve_dot_child(rel_path)
         if not target.exists():
             return []
         if not target.is_file():
@@ -337,11 +376,25 @@ def _load_from_root(root: Path) -> Project:
 
 
 def find_project(start: str | Path | None = None) -> Project | None:
-    """Walk up from `start` (default `Path.cwd()`) to find the enclosing `.alphaengine/` project."""
+    """Walk up from `start` (default `Path.cwd()`) to find the enclosing `.alphaengine/` project.
+
+    Honours `ALPHAENGINE_CEILING_DIRS` (`os.pathsep`-separated directory paths):
+    when walking upward reaches any ceiling directory, discovery stops without
+    reading `.alphaengine/` at or above that ceiling.
+    """
     cur = Path(start or Path.cwd()).expanduser().resolve()
     if cur.is_file():
         cur = cur.parent
+    raw_ceilings = os.environ.get("ALPHAENGINE_CEILING_DIRS", "")
+    ceilings: set[Path] = set()
+    if raw_ceilings:
+        for entry in raw_ceilings.split(os.pathsep):
+            clean = entry.strip()
+            if clean:
+                ceilings.add(Path(clean).expanduser().resolve())
     for candidate in (cur, *cur.parents):
+        if candidate in ceilings:
+            return None
         cfg = candidate / PROJECT_DIR_NAME / "project.toml"
         if cfg.is_file():
             try:

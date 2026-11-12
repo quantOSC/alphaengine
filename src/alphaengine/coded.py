@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import copy
 import importlib.util
 import math
+import re
 import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -51,6 +53,7 @@ from .manifest import build_run_manifest, hash_callable_or_module, hash_source_t
 from .sweep.runner import Trial, _expand, _hash_data, _hash_params, _sharpe
 
 MAX_CODED_GRID = 400
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 DEFAULT_CODED_SLIPPAGE_BPS = 5.0
 DEFAULT_CODED_COMMISSION_BPS = 1.0
 DEFAULT_CODED_BORROW_BPS = 50.0
@@ -69,10 +72,8 @@ ALLOWED_SIGNAL_IMPORTS: frozenset[str] = frozenset(
         "itertools",
         "math",
         "numbers",
-        "operator",
         "re",
         "statistics",
-        "types",
         "typing",
         "numpy",
         "scipy",
@@ -94,14 +95,69 @@ FORBIDDEN_BUILTINS: frozenset[str] = frozenset(
         "__import__",
         "breakpoint",
         "compile",
+        "delattr",
         "eval",
         "exec",
+        "getattr",
         "globals",
         "input",
         "locals",
         "open",
+        "setattr",
+        "vars",
     }
 )
+
+#: Attribute calls that read or write files, unpickle, or open sockets. A signal is a
+#: pure function of `data_asof` and `params`; any of these is I/O the ledger cannot see.
+_FORBIDDEN_IO_ATTRS: frozenset[str] = frozenset(
+    {
+        "read_csv",
+        "read_table",
+        "read_parquet",
+        "read_json",
+        "read_excel",
+        "read_sql",
+        "read_sql_query",
+        "read_sql_table",
+        "read_pickle",
+        "read_hdf",
+        "read_feather",
+        "read_fwf",
+        "read_html",
+        "read_xml",
+        "read_clipboard",
+        "read_orc",
+        "read_sas",
+        "read_spss",
+        "read_stata",
+        "fromfile",
+        "memmap",
+        "loadtxt",
+        "genfromtxt",
+        "load",
+        "loads",
+        "tofile",
+        "save",
+        "savez",
+        "savez_compressed",
+        "savetxt",
+        "to_csv",
+        "to_pickle",
+        "to_parquet",
+        "to_json",
+        "to_excel",
+        "to_sql",
+        "to_hdf",
+        "to_feather",
+        "urlopen",
+        "system",
+        "popen",
+    }
+)
+
+#: Names that reach the interpreter's internals without an import.
+_FORBIDDEN_NAMES: frozenset[str] = frozenset({"__builtins__", "__loader__", "__spec__"})
 
 __all__ = [
     "ALLOWED_SIGNAL_IMPORTS",
@@ -229,6 +285,78 @@ def check_signal_source(
             )
         )
         return StaticCheckResult(ok=False, fn_name=fn_name, code_sha256=code_sha, diagnostics=diags)
+    except (RecursionError, MemoryError, ValueError) as exc:
+        diags.append(
+            StaticCheckDiagnostic(
+                code="unparseable_source",
+                what=f"The signal source could not be parsed safely ({type(exc).__name__}).",
+                line=None,
+                col=None,
+                remediation="Simplify deeply nested expressions and remove NUL bytes from the file.",
+            )
+        )
+        return StaticCheckResult(ok=False, fn_name=fn_name, code_sha256=code_sha, diagnostics=diags)
+
+    try:
+        return _check_tree(tree, fn_name=fn_name, code_sha=code_sha, diags=diags)
+    except RecursionError:
+        diags.append(
+            StaticCheckDiagnostic(
+                code="unparseable_source",
+                what="The signal source is nested too deeply to validate.",
+                line=None,
+                col=None,
+                remediation="Simplify deeply nested expressions.",
+            )
+        )
+        return StaticCheckResult(ok=False, fn_name=fn_name, code_sha256=code_sha, diagnostics=diags)
+
+
+def _check_tree(
+    tree: ast.Module,
+    *,
+    fn_name: str,
+    code_sha: str | None,
+    diags: list[StaticCheckDiagnostic],
+) -> StaticCheckResult:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr.startswith("__") and node.attr.endswith("__"):
+            diags.append(
+                StaticCheckDiagnostic(
+                    code="forbidden_dunder",
+                    what=f"Dunder attribute access `.{node.attr}` is blocked in coded signals.",
+                    line=getattr(node, "lineno", None),
+                    col=getattr(node, "col_offset", None),
+                    remediation="Signals must not reach interpreter internals; use plain data operations.",
+                )
+            )
+        elif isinstance(node, ast.Name) and node.id in _FORBIDDEN_NAMES:
+            diags.append(
+                StaticCheckDiagnostic(
+                    code="forbidden_dunder",
+                    what=f"Reference to `{node.id}` is blocked in coded signals.",
+                    line=getattr(node, "lineno", None),
+                    col=getattr(node, "col_offset", None),
+                    remediation="Signals must not reach interpreter internals.",
+                )
+            )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in _FORBIDDEN_IO_ATTRS
+        ):
+            diags.append(
+                StaticCheckDiagnostic(
+                    code="forbidden_io",
+                    what=f"Call to `.{node.func.attr}()` performs file, pickle, or network I/O.",
+                    line=getattr(node, "lineno", None),
+                    col=getattr(node, "col_offset", None),
+                    remediation=(
+                        "Signals must be pure offline functions of `data_asof` and `params`; "
+                        "load data with `--data` and register it with `alphaengine data add`."
+                    ),
+                )
+            )
 
     fn_node: ast.FunctionDef | None = None
     for top_node in tree.body:
@@ -586,7 +714,7 @@ def _slice_value_asof(val: Any, end_inclusive: int, allowed_dates: set[str] | No
     """Slice a single series/panel strictly up to index `end_inclusive` (`0 .. end_inclusive`)."""
     cut = end_inclusive + 1
     if isinstance(val, Mapping):
-        # Could be `{date: scalar}` or nested `{ticker: series}`
+        # Could be `{date: scalar}`, `{date: {open, high, low, close}}`, or nested `{ticker: series}`
         sample_val = next(iter(val.values()), None)
         if isinstance(sample_val, (int, float)) or sample_val is None:
             sorted_keys = sorted(str(k) for k in val)
@@ -595,6 +723,21 @@ def _slice_value_asof(val: Any, end_inclusive: int, allowed_dates: set[str] | No
             else:
                 kept = sorted_keys[:cut]
             return {k: val[k] for k in kept if k in val}
+        # DATE-KEYED RECORDS (OHLC bars). Recursing into each bar treated
+        # `open/high/low/close` as dates: every bar came back empty and, worse,
+        # every FUTURE date key survived. Slice on the outer date keys instead
+        # and keep each bar whole.
+        keyed = {str(k): v for k, v in val.items()}
+        date_keyed = (allowed_dates is not None and any(k in allowed_dates for k in keyed)) or (
+            bool(keyed) and all(_ISO_DATE_RE.match(k) for k in keyed)
+        )
+        if date_keyed:
+            ordered = sorted(keyed)
+            if allowed_dates is not None:
+                kept_dates = [k for k in ordered if k in allowed_dates][:cut]
+            else:
+                kept_dates = ordered[:cut]
+            return {k: copy.deepcopy(keyed[k]) for k in kept_dates}
         return {str(k): _slice_value_asof(v, end_inclusive, allowed_dates) for k, v in val.items()}
     if isinstance(val, np.ndarray):
         return val[:cut].copy()
@@ -1142,6 +1285,19 @@ def run_signal(
                     "slippage_bps": float(slippage_bps),
                     "commission_bps": float(commission_bps),
                     "borrow_bps": float(borrow_bps),
+                    "rebalance_every": int(rebalance_every),
+                    "initial_capital": float(initial_capital),
+                    "adv": (
+                        float(adv) if isinstance(adv, (int, float)) and not isinstance(adv, bool) else None
+                    ),
+                    "impact_coef": float(impact_coef),
+                    "max_participation": float(max_participation),
+                    "max_abs_weight": float(max_abs_weight),
+                    "max_gross_leverage": float(max_gross_leverage),
+                    "max_net_leverage": float(max_net_leverage),
+                    "risk_free_rate": None if risk_free_rate is None else float(risk_free_rate),
+                    "periods_per_year": int(periods_per_year),
+                    "allow_zero_costs_unverified": bool(allow_zero_costs_unverified),
                 }
                 if repro_target
                 else None

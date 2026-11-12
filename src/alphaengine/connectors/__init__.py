@@ -59,6 +59,10 @@ def load_parquet(path: str | Path) -> Any:
     return load_delimited(buf.getvalue())
 
 
+#: Upper bound on one in-memory HTTP fetch. A larger file belongs on disk.
+MAX_FETCH_BYTES = 256 * 1024 * 1024
+
+
 def fetch_url(url: str, *, headers: dict[str, str] | None = None, timeout: float = 30.0) -> bytes:
     """GET a URL the caller named. Requires httpx. No ticker-list helper.
 
@@ -70,6 +74,21 @@ def fetch_url(url: str, *, headers: dict[str, str] | None = None, timeout: float
         raise ModuleNotFoundError(
             "HTTP fetch needs httpx. Install it with:  pip install 'alphaengine[connectors]'"
         ) from exc
-    response = httpx.get(url, headers=headers or {}, timeout=timeout)
-    response.raise_for_status()
-    return bytes(response.content)
+    from urllib.parse import urlsplit
+
+    scheme = urlsplit(str(url)).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"fetch_url only fetches http(s) URLs, not {scheme or 'a bare path'!r}.")
+    chunks: list[bytes] = []
+    total = 0
+    with httpx.stream("GET", url, headers=headers or {}, timeout=timeout) as response:
+        response.raise_for_status()
+        for chunk in response.iter_bytes():
+            total += len(chunk)
+            if total > MAX_FETCH_BYTES:
+                raise ValueError(
+                    f"{url!r} returned more than {MAX_FETCH_BYTES // (1024 * 1024)} MiB; "
+                    "download it to a file and load it with --data instead."
+                )
+            chunks.append(chunk)
+    return b"".join(chunks)

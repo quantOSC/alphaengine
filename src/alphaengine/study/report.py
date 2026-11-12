@@ -23,7 +23,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 from .._version import API_URL_ENV, DEFAULT_API_URL, LEGACY_API_URL_ENV
-from .schema import compute_content_sha256, sealed_study_projection
+from .schema import SEAL_VERSION, _sanitize_study_json, compute_content_sha256, sealed_study_projection
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .schema import Study
@@ -86,8 +86,14 @@ def _payload(
     if thesis_id is not None and thesis_id != proj.get("thesis_id"):
         proj["thesis_id"] = thesis_id
         overridden = True
-    sha = compute_content_sha256(proj) if (overridden or not study.content_sha256) else study.content_sha256
-    return {**proj, "content_sha256": sha}
+    needs_rehash = (
+        overridden
+        or not study.content_sha256
+        or int(getattr(study, "seal_version", SEAL_VERSION) or 1) < SEAL_VERSION
+    )
+    sha = compute_content_sha256(proj) if needs_rehash else study.content_sha256
+    out: dict[str, Any] = _sanitize_study_json({**proj, "content_sha256": sha})
+    return out
 
 
 def report(
@@ -104,7 +110,15 @@ def report(
     import urllib.parse
     import urllib.request
 
-    from ..auth import FirmKeyError, redact_secrets, require_firm_key, validate_clean_url
+    from ..auth import (
+        FirmKeyError,
+        read_bounded_bytes,
+        redact_secrets,
+        require_firm_key,
+        safe_urlopen,
+        validate_clean_url,
+    )
+    from ..sync import scrub_sync_host
 
     try:
         key = require_firm_key(api_key)
@@ -115,7 +129,7 @@ def report(
         "/"
     )
     try:
-        root = validate_clean_url(root).rstrip("/")
+        root = validate_clean_url(root, require_https_remote=True).rstrip("/")
     except ValueError as exc:
         raise ReportError(str(exc)) from exc
     host = urllib.parse.urlparse(root).hostname or ""
@@ -126,7 +140,7 @@ def report(
 
     req = urllib.request.Request(
         root + _PATH,
-        data=json.dumps(body).encode("utf-8"),
+        data=json.dumps(body, allow_nan=False).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {key.strip()}",
@@ -136,13 +150,17 @@ def report(
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            recorded: dict[str, Any] = json.loads(resp.read().decode("utf-8"))
+        with safe_urlopen(req, timeout=timeout) as resp:
+            raw_bytes = read_bounded_bytes(resp)
+            recorded: dict[str, Any] = json.loads(raw_bytes.decode("utf-8"))
             return recorded
     except urllib.error.HTTPError as e:
         detail = ""
         with contextlib.suppress(Exception):
-            detail = redact_secrets(str(json.loads(e.read().decode("utf-8")).get("detail", "")))
+            err_bytes = read_bounded_bytes(e, max_bytes=65536)
+            detail = scrub_sync_host(
+                redact_secrets(str(json.loads(err_bytes.decode("utf-8")).get("detail", "")))[:300]
+            )
         if e.code in (401, 403):
             raise ReportError(
                 f"The key was rejected ({e.code}). It may be revoked, or from a different "
@@ -150,11 +168,5 @@ def report(
             ) from e
         raise ReportError(f"The server refused the study ({e.code}). {detail}".strip()) from e
     except urllib.error.URLError as e:
-        reason = redact_secrets(str(e.reason))
-        for hidden in (
-            DEFAULT_BASE_URL,
-            "alpha-backend-production-51df.up.railway.app",
-            "api.qosai.app",
-        ):
-            reason = reason.replace(hidden, "the firm API")
+        reason = scrub_sync_host(redact_secrets(str(e.reason)))
         raise ReportError(f"Could not reach the firm API: {reason}. Your study is still on your disk.") from e

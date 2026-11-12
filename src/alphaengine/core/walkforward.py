@@ -164,14 +164,20 @@ def walk_forward(
         try:
             is_data = _slice_data(data, 0, is_end)
             oos_data = _slice_data(data, oos_start, cut)
-            result = sweep(
-                backtest_fn,
-                grid,
-                data=is_data,
-                on_error=on_error,
-                risk_free_rate=risk_free_rate,
-                periods_per_year=ppy,
-            )
+            # The enclosing walk-forward reports n_windows * n_grid trials once.
+            # Letting each window's sweep auto-record into a project ledger would
+            # count the same attempts twice (once per window run, once here).
+            from ..ledger import suppress_auto_sweep_record
+
+            with suppress_auto_sweep_record():
+                result = sweep(
+                    backtest_fn,
+                    grid,
+                    data=is_data,
+                    on_error=on_error,
+                    risk_free_rate=risk_free_rate,
+                    periods_per_year=ppy,
+                )
             best = result.best.params
             raw = backtest_fn(data=oos_data, **best) if oos_data is not None else backtest_fn(**best)
             oos = np.asarray(list(raw), dtype=float)

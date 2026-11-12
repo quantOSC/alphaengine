@@ -273,3 +273,37 @@ def test_short_with_zero_borrow_withholds_verdict_and_refuses_seal(
 
     with pytest.raises(ValueError, match="cannot be sealed"):
         seal_from_project(find_project(tmp_path), "HEAD")
+
+
+def test_coded_signal_ast_dunder_io_guards_and_ohlc_bars_slicing() -> None:
+    from alphaengine.coded import _slice_value_asof, check_signal_source
+
+    # 1. Dunder attribute traversal and numpy file I/O attributes must be refused
+    for bad_src in (
+        "def signal(*, data_asof, params):\n    return (1).__class__.__base__\n",
+        (
+            "import numpy as np\n"
+            "def signal(*, data_asof, params):\n"
+            "    np.loadtxt('secret.csv')\n"
+            "    return {}\n"
+        ),
+        "def signal(*, data_asof, params):\n    return getattr(data_asof, '__class__')\n",
+    ):
+        res = check_signal_source(bad_src)
+        assert not res.ok and res.diagnostics, f"Expected AST guard to flag: {bad_src}"
+
+    # 2. OHLC `bars` nested date dicts must be causally sliced up to index t
+    panel = {
+        "dates": ["2025-01-01", "2025-01-02", "2025-01-03"],
+        "prices": {"AAPL": [100.0, 101.0, 102.0]},
+        "bars": {
+            "AAPL": {
+                "2025-01-01": {"close": 100.0},
+                "2025-01-02": {"close": 101.0},
+                "2025-01-03": {"close": 102.0},
+            }
+        },
+    }
+    sliced = _slice_value_asof(panel, 1, {"2025-01-01", "2025-01-02"})
+    assert sliced["dates"] == ["2025-01-01", "2025-01-02"]
+    assert list(sliced["bars"]["AAPL"].keys()) == ["2025-01-01", "2025-01-02"]

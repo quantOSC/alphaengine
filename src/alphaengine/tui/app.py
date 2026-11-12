@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import time
@@ -275,6 +276,7 @@ class QuantOSApp(App[None]):
             loaded=loaded,
             think=think,
             keyed=keyed,
+            in_tui=True,
         )
         self._books: list[dict[str, Any]] = []
         self._lines: list[dict[str, Any]] = []
@@ -646,6 +648,8 @@ class QuantOSApp(App[None]):
             self._refresh_rail()
 
     def _accept_url(self, value: str) -> None:
+        from ..auth import save_credential, validate_clean_url
+
         env = self.desk.pending_url
         self.desk.pending_url = None
         prompt = self.query_one(Input)
@@ -655,13 +659,14 @@ class QuantOSApp(App[None]):
         if env is None or not value:
             log.write("nothing entered.")
             return
-        os.environ[env] = value
         try:
-            from ..auth import save_key
-
-            save_key(env, value)
-        except (OSError, ValueError):
-            pass
+            cleaned = validate_clean_url(value, require_https_remote=False)
+        except ValueError as exc:
+            log.write(str(exc))
+            return
+        os.environ[env] = cleaned
+        with contextlib.suppress(OSError, ValueError):
+            save_credential(env, cleaned)
         log.write(f"{env} set.")
         self._say_model_ready(log)
         self._refresh_rail()

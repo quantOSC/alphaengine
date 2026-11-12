@@ -66,6 +66,13 @@ Check the built artifacts:
 python -m twine check dist/*
 ```
 
+### Canonical 2.0.4 Built Artifact Digests (`QOS-173`, `QOS-175`)
+
+- **Wheel (`dist/alphaengine-2.0.4-py3-none-any.whl`):**
+  `sha256:3a0ac8e5cd4af2b8652d2c3e9b79483d294d4fe989647e6f7dc566a5ef2ca8dd`
+- **Source Distribution (`dist/alphaengine-2.0.4.tar.gz`):**
+  `sha256:0853b39416a6e5141680a3bd37d2726ffb61aec64f4a4fb33faa444240f11176`
+
 ### Canonical 2.0.3 Built Artifact Digests (`QOS-173`, `QOS-175`)
 
 - **Wheel (`dist/alphaengine-2.0.3-py3-none-any.whl`):**

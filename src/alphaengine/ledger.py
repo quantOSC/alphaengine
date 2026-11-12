@@ -137,6 +137,20 @@ def _run_config_signature(
     )
 
 
+def _positive_int(value: Any) -> int:
+    """A trial count as a positive int. NumPy integers count; bools and floats do not.
+
+    `isinstance(np.int64(30), int)` is False, so a grid size computed with NumPy
+    used to record as 0 trials, the one direction a trial count must never err.
+    """
+    import numbers
+
+    if isinstance(value, bool) or not isinstance(value, numbers.Integral):
+        return 0
+    n = int(value)
+    return n if n > 0 else 0
+
+
 def cumulative_trials_for(
     proj: Project,
     *,
@@ -176,7 +190,7 @@ def cumulative_trials_for(
         if src == "monte_carlo":
             continue
         n = row.get("run_n_trials") if row.get("run_n_trials") is not None else row.get("n_trials")
-        count = int(n) if isinstance(n, int) and not isinstance(n, bool) and n > 0 else 0
+        count = _positive_int(n)
         if src != "derived_from_universe":
             project_total += count
         if (
@@ -339,9 +353,7 @@ def record_run(
         idea_id=idea_id,
         family=resolved_family,
     )
-    this_trials = (
-        int(n_trials) if isinstance(n_trials, int) and not isinstance(n_trials, bool) and n_trials > 0 else 0
-    )
+    this_trials = _positive_int(n_trials)
     if already_counted_in_ledger or n_trials_source == "monte_carlo":
         added_fam = 0
         added_proj = 0
@@ -946,6 +958,22 @@ def rerun_record_report(proj: Project, run_rec: dict[str, Any]) -> dict[str, Any
         code_target = sig_target
         with suppress_auto_sweep_record():
             coded_prices = data.get("prices") if isinstance(data, dict) and "prices" in data else data
+            optional: dict[str, Any] = {}
+            for key, cast in (
+                ("rebalance_every", int),
+                ("initial_capital", float),
+                ("adv", float),
+                ("impact_coef", float),
+                ("max_participation", float),
+                ("max_abs_weight", float),
+                ("max_gross_leverage", float),
+                ("max_net_leverage", float),
+                ("risk_free_rate", float),
+                ("periods_per_year", int),
+                ("allow_zero_costs_unverified", bool),
+            ):
+                if spec.get(key) is not None:
+                    optional[key] = cast(spec[key])
             coded_res = run_signal(
                 sig_target,
                 prices=coded_prices,
@@ -954,8 +982,9 @@ def rerun_record_report(proj: Project, run_rec: dict[str, Any]) -> dict[str, Any
                 grid=spec.get("grid"),
                 slippage_bps=float(spec.get("slippage_bps", 5.0)),
                 commission_bps=float(spec.get("commission_bps", 1.0)),
-                borrow_bps=float(spec.get("borrow_bps", 0.0)),
+                borrow_bps=float(spec.get("borrow_bps", 50.0)),
                 record_in_project=False,
+                **optional,
             )
             repro_figs = dict(coded_res.get("figures") or {})
             ds_hashes = list(coded_res.get("dataset_hashes") or [])

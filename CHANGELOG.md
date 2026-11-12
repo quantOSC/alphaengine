@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [2.0.4] - 2026-11-11
+
+### Fixed
+- **Sync push chunking (`sync/__init__.py`):** `ae push` splits outbound sync payloads into ordered batches (`ideas -> runs -> studies -> trial_events`) capped at weight 60 (max 30 items) to eliminate the 30-second rewrite proxy timeout (`HTTP 500`). Aggregates per-batch item acknowledgments, retries transient 502/503/504 errors once, and scrubs internal hosts and HTML error bodies.
+- **Security hardening & path containment:** Added `_SafeRedirectHandler` and `safe_urlopen` to strip credentials on cross-origin redirects and block HTTPS-to-HTTP downgrades. Hardened `check_signal_source` to block AST dunder chains, `getattr`/`setattr`, and file/network I/O attributes. Added `validate_safe_id` and relative path checks across CAS objects, pulled runs, `cmd_trace`, and MCP account tools. Guarded `verify_study_file` against unprompted external module imports without `--allow-code`.
+- **CLI & MCP registry alignment:** Unified parameter aliases and NaN-safe JSON serialization across all 25 MCP tools. Fixed duplicate sweeps in `demo`, added `--json` support across `demo`, `log`, `show`, `diff`, `data`, and `seal`, and added offline local execution fallback in interactive TUI.
+
 ## [2.0.3] - 2026-11-09
 
 ### Fixed

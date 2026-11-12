@@ -69,18 +69,91 @@ class MCPToolSpec:
         }
 
 
-def _stamp_engine(result: dict[str, Any]) -> dict[str, Any]:
-    if isinstance(result, dict) and "engine_version" not in result:
-        result["engine_version"] = current_engine_version()
-    return result
+def _jsonable(value: Any) -> Any:
+    """NumPy arrays and scalars become plain lists and numbers; NaN/Inf become None."""
+    import math
+
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return _jsonable(value.tolist())
+    if isinstance(value, np.bool_):
+        return bool(value)
+    if isinstance(value, np.integer):
+        return int(value)
+    if isinstance(value, (float, np.floating)):
+        f = float(value)
+        return f if math.isfinite(f) else None
+    return value
+
+
+def _stamp_engine(result: Any) -> dict[str, Any]:
+    out = _jsonable(result)
+    if not isinstance(out, dict):
+        out = {"result": out}
+    if "engine_version" not in out:
+        out["engine_version"] = current_engine_version()
+    return out
+
+
+def _call_core(
+    fn: Callable[..., Any],
+    tool: str,
+    kwargs: dict[str, Any],
+    *,
+    aliases: dict[str, str] | None = None,
+    ignored: tuple[str, ...] = (),
+) -> Any:
+    """Map documented/legacy aliases onto the core signature and refuse unknown inputs plainly.
+
+    A tool called with its documented inputs must never die on a `TypeError` from
+    a renamed keyword. Aliases are applied only when the canonical name is absent.
+    Inputs that are documented but have no effect in the core function are dropped.
+    """
+    import inspect
+
+    params = dict(kwargs)
+    for alias, canonical in (aliases or {}).items():
+        if alias in params:
+            value = params.pop(alias)
+            if canonical not in params and value is not None:
+                params[canonical] = value
+    for name in ignored:
+        params.pop(name, None)
+    sig = inspect.signature(fn)
+    accepts_var_kw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if not accepts_var_kw:
+        unknown = sorted(k for k in params if k not in sig.parameters)
+        if unknown:
+            allowed = sorted(k for k in sig.parameters if k not in ("self",))
+            raise ValueError(
+                f"{tool} does not take {', '.join(unknown)}. Accepted inputs: {', '.join(allowed)}."
+            )
+    missing = [
+        p.name
+        for p in sig.parameters.values()
+        if p.default is inspect.Parameter.empty
+        and p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        and p.name not in params
+    ]
+    if missing:
+        raise ValueError(f"{tool} needs {', '.join(missing)}.")
+    return fn(**params)
 
 
 def _handle_backtest(signals: dict[str, Any], prices: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     return _stamp_engine(run_backtest(signals, prices, **kwargs))
 
 
-def _handle_score_backtest(bt: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(score_backtest(bt, **kwargs))
+def _handle_score_backtest(bt: dict[str, Any] | None = None, **kwargs: Any) -> dict[str, Any]:
+    if bt is None:
+        bt = kwargs.pop("backtest", None)
+    if not isinstance(bt, dict):
+        raise ValueError("score_backtest needs bt, the dict returned by the backtest tool.")
+    kwargs.pop("engine_version", None)
+    return _stamp_engine(_call_core(score_backtest, "score_backtest", {"bt": bt, **kwargs}))
 
 
 def _handle_deflated_sharpe(returns: list[float], n_trials: int | float, **kwargs: Any) -> dict[str, Any]:
@@ -109,117 +182,307 @@ def _handle_performance(returns: list[float], **kwargs: Any) -> dict[str, Any]:
     return _stamp_engine(performance_report(returns, **kwargs))
 
 
-def _handle_var_cvar(returns: list[float], **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(compute_var_cvar(returns, **kwargs))
+def _handle_var_cvar(**kwargs: Any) -> dict[str, Any]:
+    alpha = kwargs.pop("alpha", None)
+    if alpha is not None and "confidence" not in kwargs:
+        a = float(alpha)
+        if not 0.0 < a < 1.0:
+            raise ValueError("var_cvar alpha must be strictly between 0 and 1 (e.g. 0.05).")
+        kwargs["confidence"] = a if a >= 0.5 else 1.0 - a
+    return _stamp_engine(
+        _call_core(
+            compute_var_cvar,
+            "var_cvar",
+            kwargs,
+            aliases={"returns": "portfolio_returns"},
+            ignored=("method",),
+        )
+    )
+
+
+_SCREEN_RULES = {
+    "momentum": "return_pct",
+    "return": "return_pct",
+    "returns": "return_pct",
+    "volatility": "volatility_pct",
+    "vol": "volatility_pct",
+    "trend": "distance_from_sma_pct",
+    "sma": "distance_from_sma_pct",
+}
 
 
 def _handle_screen_universe(
-    prices: dict[str, Any],
+    prices: dict[str, Any] | None = None,
     universe: list[str] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
+    if prices is None:
+        prices = kwargs.pop("panel", None)
+    if not isinstance(prices, dict):
+        raise ValueError("screen_universe needs prices as {ticker: closes}.")
     if universe is not None:
-        prices = {k: v for k, v in prices.items() if k in universe}
-    return _stamp_engine(screen_universe(prices, **kwargs))
+        wanted = {str(t).upper() for t in universe}
+        prices = {k: v for k, v in prices.items() if str(k).upper() in wanted}
+    rule = kwargs.pop("rule", None)
+    if rule is not None and "rank_by" not in kwargs:
+        kwargs["rank_by"] = _SCREEN_RULES.get(str(rule).lower(), str(rule))
+    return _stamp_engine(_call_core(screen_universe, "screen_universe", {"prices": prices, **kwargs}))
 
 
-def _handle_fama_macbeth(panel: Any, factors: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(fama_macbeth(panel, factors, **kwargs))
+def _handle_fama_macbeth(**kwargs: Any) -> dict[str, Any]:
+    exp = kwargs.get("exposures")
+    if isinstance(exp, dict) and len(exp) == 1:
+        sole = next(iter(exp.values()))
+        if isinstance(sole, dict):
+            kwargs = dict(kwargs)
+            kwargs["exposures"] = sole
+    return _stamp_engine(
+        _call_core(
+            fama_macbeth,
+            "fama_macbeth",
+            kwargs,
+            aliases={
+                "signals": "signal",
+                "panel": "signal",
+                "exposures": "signal",
+                "factors": "prices",
+                "returns": "prices",
+            },
+        )
+    )
 
 
-def _handle_quantile_book(signals: Any, returns: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(quantile_book(signals, returns, **kwargs))
+def _handle_quantile_book(**kwargs: Any) -> dict[str, Any]:
+    return _stamp_engine(
+        _call_core(
+            quantile_book,
+            "quantile_book",
+            kwargs,
+            aliases={"signals": "signal", "returns": "prices", "n_quantiles": "quantiles"},
+        )
+    )
 
 
-def _handle_hrp(cov_matrix: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(hrp_weights(cov_matrix, **kwargs))
+def _cov_input(kwargs: dict[str, Any], tool: str) -> np.ndarray[Any, Any]:
+    raw = kwargs.pop("cov", None)
+    alias = kwargs.pop("cov_matrix", None)
+    if raw is None:
+        raw = alias
+    if raw is None:
+        raise ValueError(f"{tool} needs cov_matrix (an N x N covariance).")
+    arr = np.asarray(raw, dtype=float)
+    if arr.ndim != 2 or arr.shape[0] != arr.shape[1] or arr.shape[0] < 1:
+        raise ValueError(f"{tool} needs a square N x N covariance matrix.")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{tool} covariance contains NaN or Inf.")
+    return arr
 
 
-def _handle_risk_parity(cov_matrix: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(risk_parity_weights(cov_matrix, **kwargs))
+def _handle_hrp(**kwargs: Any) -> dict[str, Any]:
+    cov = _cov_input(kwargs, "hrp")
+    return _stamp_engine(_call_core(hrp_weights, "hrp", {"cov": cov, **kwargs}, ignored=("method",)))
 
 
-def _handle_vol_target(returns: Any, target_vol: float = 0.15, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(vol_target(returns, target=target_vol, **kwargs))
+def _handle_risk_parity(**kwargs: Any) -> dict[str, Any]:
+    cov = _cov_input(kwargs, "risk_parity")
+    if kwargs.pop("target_risk_contributions", None) is not None:
+        raise ValueError("risk_parity solves for equal risk contributions; custom targets are not supported.")
+    return _stamp_engine(_call_core(risk_parity_weights, "risk_parity", {"cov": cov, **kwargs}))
 
 
-def _handle_denoise_cov(cov_matrix: Any, n_obs: int = 252, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(denoise_cov(cov_matrix, n_obs=n_obs, **kwargs))
+def _handle_vol_target(**kwargs: Any) -> dict[str, Any]:
+    max_lev = kwargs.pop("max_leverage", None)
+    res = _call_core(vol_target, "vol_target", kwargs, aliases={"target_vol": "target"})
+    out = _stamp_engine(res)
+    if max_lev is not None:
+        cap = float(max_lev)
+        if not np.isfinite(cap) or cap <= 0:
+            raise ValueError("vol_target max_leverage must be a positive number.")
+        out["max_leverage"] = cap
+        for key in ("leverages", "leverage", "scale", "scalar", "leverage_scalar", "mean_leverage"):
+            val = out.get(key)
+            if isinstance(val, list):
+                out[key] = [min(cap, v) if isinstance(v, (int, float)) else v for v in val]
+            elif isinstance(val, (int, float)) and not isinstance(val, bool):
+                out[key] = min(cap, float(val))
+    return out
 
 
-def _handle_detone_cov(cov_matrix: Any, **kwargs: Any) -> dict[str, Any]:
-    cov_arr = np.asarray(cov_matrix, dtype=float)
-    res = detone_cov(cov_arr, **kwargs)
-    return {
-        "engine_version": current_engine_version(),
-        "detoned_cov": res.tolist() if hasattr(res, "tolist") else res,
+def _handle_denoise_cov(**kwargs: Any) -> dict[str, Any]:
+    cov = _cov_input(kwargs, "denoise_cov")
+    q = kwargs.pop("q", None)
+    kwargs.pop("method", None)
+    n_obs = kwargs.pop("n_obs", None)
+    if n_obs is None:
+        n_obs = kwargs.pop("T", None)
+    if n_obs is None:
+        n_obs = int(round(float(q) * cov.shape[0])) if q is not None else 252
+    n_obs = int(n_obs)
+    if n_obs < 2:
+        raise ValueError("denoise_cov needs n_obs >= 2 (or q = T/N with T >= 2).")
+    return _stamp_engine(_call_core(denoise_cov, "denoise_cov", {"cov": cov, "n_obs": n_obs, **kwargs}))
+
+
+def _handle_detone_cov(**kwargs: Any) -> dict[str, Any]:
+    cov = _cov_input(kwargs, "detone_cov")
+    modes = kwargs.pop("n_market_modes", 1)
+    if modes not in (None, 1):
+        raise ValueError("detone_cov removes exactly one market mode (n_market_modes=1).")
+    res = _call_core(detone_cov, "detone_cov", {"cov": cov, **kwargs})
+    return _stamp_engine({"detoned_cov": res})
+
+
+def _handle_ewma_cov(**kwargs: Any) -> dict[str, Any]:
+    raw = kwargs.pop("returns_matrix", None)
+    if raw is None:
+        raw = kwargs.pop("returns", None)
+    if raw is None:
+        raise ValueError("ewma_cov needs returns_matrix (T x N).")
+    arr = np.asarray(raw, dtype=float)
+    if arr.ndim != 2:
+        raise ValueError("ewma_cov needs a 2-D T x N returns matrix.")
+    res = _call_core(ewma_cov, "ewma_cov", {"returns": arr, **kwargs}, aliases={"lambda_param": "lam"})
+    return _stamp_engine({"ewma_cov_matrix": res})
+
+
+def _handle_dgp_stress(**kwargs: Any) -> dict[str, Any]:
+    return _stamp_engine(
+        _call_core(
+            dgp_stress,
+            "dgp_stress",
+            kwargs,
+            aliases={"returns": "values", "n_scenarios": "n_paths"},
+            ignored=("horizon_bars",),
+        )
+    )
+
+
+def _handle_ou_process(**kwargs: Any) -> dict[str, Any]:
+    return _stamp_engine(
+        _call_core(
+            ou_calibrate, "ou_process", kwargs, aliases={"prices_or_spread": "values", "spread": "values"}
+        )
+    )
+
+
+def _handle_gbm_process(**kwargs: Any) -> dict[str, Any]:
+    return _stamp_engine(
+        _call_core(gbm_calibrate, "gbm_process", kwargs, aliases={"prices": "values"}, ignored=("dt",))
+    )
+
+
+def _handle_jump_process(**kwargs: Any) -> dict[str, Any]:
+    return _stamp_engine(
+        _call_core(jump_calibrate, "jump_process", kwargs, aliases={"returns": "values"}, ignored=("dt",))
+    )
+
+
+# ── Account tool handlers (delegating to workspace/firm backend) ──────────────
+
+#: Keys that would carry raw series or code across the boundary in a delivered summary.
+_DELIVER_FORBIDDEN_KEYS = frozenset(
+    {
+        "prices",
+        "returns",
+        "closes",
+        "raw_rows",
+        "dataset_rows",
+        "matrix",
+        "equity_curve",
+        "weights_path",
+        "api_key",
+        "apikey",
+        "secret",
+        "token",
+        "password",
+        "authorization",
+        "source_code",
+        "code",
     }
+)
+_DELIVER_MAX_LIST = 512
+_DELIVER_MAX_DEPTH = 12
 
 
-def _handle_ewma_cov(returns_matrix: Any, **kwargs: Any) -> dict[str, Any]:
-    ret_arr = np.asarray(returns_matrix, dtype=float)
-    res = ewma_cov(ret_arr, **kwargs)
-    return {
-        "engine_version": current_engine_version(),
-        "ewma_cov_matrix": res.tolist() if hasattr(res, "tolist") else res,
-    }
+def _check_summary(value: Any, path: str = "summary", depth: int = 0) -> None:
+    if depth > _DELIVER_MAX_DEPTH:
+        raise ValueError(f"{path} is nested too deeply to deliver.")
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            if str(key).lower() in _DELIVER_FORBIDDEN_KEYS:
+                raise ValueError(
+                    f"{path}.{key} is not deliverable: raw series, code, and secrets stay local."
+                )
+            _check_summary(inner, f"{path}.{key}", depth + 1)
+    elif isinstance(value, (list, tuple)):
+        if len(value) > _DELIVER_MAX_LIST:
+            raise ValueError(
+                f"{path} has {len(value)} entries; summaries carry at most {_DELIVER_MAX_LIST} per list."
+            )
+        for idx, inner in enumerate(value):
+            _check_summary(inner, f"{path}[{idx}]", depth + 1)
 
 
-def _handle_dgp_stress(returns: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(dgp_stress(returns, **kwargs))
-
-
-def _handle_ou_process(prices_or_spread: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(ou_calibrate(prices_or_spread, **kwargs))
-
-
-def _handle_gbm_process(prices: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(gbm_calibrate(prices, **kwargs))
-
-
-def _handle_jump_process(returns: Any, **kwargs: Any) -> dict[str, Any]:
-    return _stamp_engine(jump_calibrate(returns, **kwargs))
-
-
-# Account tool handlers (delegating to workspace/firm backend)
-def _handle_my_universe(
-    tickers: list[str] | None = None, name: str = "default", **kwargs: Any
-) -> dict[str, Any]:
-    import json
+def _workspace_dir(*parts: str) -> Any:
     from pathlib import Path
 
     from ..project import find_project
 
     proj = find_project()
-    root = proj.root if proj is not None else Path.cwd()
-    uni_dir = root / ".alphaengine" / "universes"
-    uni_dir.mkdir(parents=True, exist_ok=True)
-    uni_file = uni_dir / f"{name}.json"
+    root = (proj.root if proj is not None else Path.cwd()).resolve()
+    target = root.joinpath(".alphaengine", *parts).resolve()
+    if not target.is_relative_to(root):
+        raise ValueError("refusing to write outside the workspace")
+    target.mkdir(parents=True, exist_ok=True)
+    return proj, root, target
 
+
+def _child(directory: Any, filename: str) -> Any:
+    path = (directory / filename).resolve()
+    if not path.is_relative_to(directory.resolve()):
+        raise ValueError(f"refusing path outside {directory}")
+    return path
+
+
+def _handle_my_universe(
+    tickers: list[str] | None = None, name: str = "default", **kwargs: Any
+) -> dict[str, Any]:
+    import json
+
+    from ..project import validate_safe_id
+
+    safe_name = validate_safe_id(str(name), "universe name")
+    if tickers is not None and not isinstance(tickers, (list, tuple)):
+        raise ValueError("my_universe tickers must be a list of ticker strings.")
+    _proj, _root, uni_dir = _workspace_dir("universes")
+    uni_file = _child(uni_dir, f"{safe_name}.json")
+
+    updated_at: str | None = None
     if tickers is not None:
         clean_tickers = sorted({str(t).upper().strip() for t in tickers if str(t).strip()})
-        data = {
-            "name": name,
-            "tickers": clean_tickers,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
+        if len(clean_tickers) > 10_000:
+            raise ValueError("my_universe holds at most 10,000 tickers.")
+        updated_at = datetime.now(timezone.utc).isoformat()
+        data = {"name": safe_name, "tickers": clean_tickers, "updated_at": updated_at}
         uni_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
         out_tickers = clean_tickers
     else:
+        out_tickers = []
         if uni_file.is_file():
             try:
                 loaded = json.loads(uni_file.read_text(encoding="utf-8"))
-                out_tickers = list(loaded.get("tickers") or [])
-            except Exception:
+                out_tickers = [str(t) for t in (loaded.get("tickers") or [])]
+                updated_at = loaded.get("updated_at")
+            except (OSError, ValueError, AttributeError):
                 out_tickers = []
-        else:
-            out_tickers = []
 
     return {
         "engine_version": current_engine_version(),
         "status": "ok",
-        "universe": name,
+        "universe": safe_name,
         "tickers": out_tickers,
+        "count": len(out_tickers),
+        "updated_at": updated_at,
         "stored": f"persisted in researcher's workspace ({uni_file})",
     }
 
@@ -227,76 +490,84 @@ def _handle_my_universe(
 def _handle_deliver_run(run_id: str, summary: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
     import hashlib
     import json
-    from pathlib import Path
 
-    from ..project import find_project
+    from ..project import validate_safe_id
 
-    proj = find_project()
-    root = proj.root if proj is not None else Path.cwd()
-    runs_dir = root / ".alphaengine" / "ledger" / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
-    run_file = runs_dir / f"{run_id}.json"
+    safe_id = validate_safe_id(str(run_id), "run_id")
+    if not isinstance(summary, dict):
+        raise ValueError("deliver_run summary must be a dict (a RunManifest-style summary).")
+    _check_summary(summary)
+    clean_summary = _jsonable(summary)
+    proj, _root, runs_dir = _workspace_dir("ledger", "runs")
+    run_file = _child(runs_dir, f"{safe_id}.json")
 
+    delivered_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "engine_version": current_engine_version(),
-        "run_id": run_id,
-        "summary": summary,
-        "delivered_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": safe_id,
+        "summary": clean_summary,
+        "delivered_at": delivered_at,
     }
-    content_bytes = json.dumps(payload, sort_keys=True).encode("utf-8")
+    content_bytes = json.dumps(payload, sort_keys=True, allow_nan=False).encode("utf-8")
     run_sha = hashlib.sha256(content_bytes).hexdigest()
     payload["content_sha256"] = run_sha
-    run_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    run_file.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
 
-    cas_sha = summary.get("manifest_sha256") or summary.get("object_sha256")
+    cas_sha = clean_summary.get("manifest_sha256") or clean_summary.get("object_sha256")
     if cas_sha and proj is not None:
         with contextlib.suppress(Exception):
-            proj.put_object({"run_id": run_id, "summary": summary})
+            proj.put_object({"run_id": safe_id, "summary": clean_summary})
 
     return {
         "engine_version": current_engine_version(),
         "status": "delivered",
-        "run_id": run_id,
+        "run_id": safe_id,
         "content_sha256": run_sha,
+        "delivered_at": delivered_at,
         "stored": f"persisted in firm research ledger and audit trail ({run_file})",
     }
 
 
 def _handle_run_workflow(
-    workflow: str, params: dict[str, Any] | None = None, **kwargs: Any
+    workflow: str | None = None, params: dict[str, Any] | None = None, **kwargs: Any
 ) -> dict[str, Any]:
     import json
     import uuid
-    from pathlib import Path
 
-    from ..project import find_project
+    from ..project import validate_safe_id
 
-    proj = find_project()
-    root = proj.root if proj is not None else Path.cwd()
-    queue_dir = root / ".alphaengine" / "queue"
-    queue_dir.mkdir(parents=True, exist_ok=True)
-    job_id = f"job_{workflow}_{uuid.uuid4().hex[:12]}"
-    job_file = queue_dir / f"{job_id}.json"
+    if workflow is None:
+        workflow = kwargs.pop("workflow_name", None)
+    if not workflow:
+        raise ValueError("run_workflow needs workflow (or workflow_name).")
+    safe_wf = validate_safe_id(str(workflow), "workflow")
+    if params is not None and not isinstance(params, dict):
+        raise ValueError("run_workflow params must be a dict.")
+    clean_params = _jsonable(dict(params or {}))
+    _check_summary(clean_params, "params")
+    _proj, root, queue_dir = _workspace_dir("queue")
+    job_id = f"job_{safe_wf}_{uuid.uuid4().hex[:12]}"
+    job_file = _child(queue_dir, f"{job_id}.json")
 
     submitted_at = datetime.now(timezone.utc).isoformat()
     job_record = {
         "engine_version": current_engine_version(),
         "job_id": job_id,
-        "workflow": workflow,
-        "params": dict(params or {}),
+        "workflow": safe_wf,
+        "params": clean_params,
         "status": "submitted",
         "submitted_at": submitted_at,
     }
-    job_file.write_text(json.dumps(job_record, indent=2), encoding="utf-8")
+    job_file.write_text(json.dumps(job_record, indent=2, allow_nan=False), encoding="utf-8")
 
     hist_file = root / ".alphaengine" / "run_history.jsonl"
     with open(hist_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(job_record) + "\n")
+        f.write(json.dumps(job_record, allow_nan=False) + "\n")
 
     return {
         "engine_version": current_engine_version(),
         "status": "submitted",
-        "workflow": workflow,
+        "workflow": safe_wf,
         "job_id": job_id,
         "submitted_at": submitted_at,
         "stored": f"persisted in firm execution queue and run history ({job_file})",
@@ -380,8 +651,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="var_cvar",
         kind="deterministic",
-        inputs_summary="returns, alpha=0.05, method='historical'",
-        outputs_summary="var, cvar, confidence, n_obs",
+        inputs_summary="returns, confidence=0.95 (or alpha=0.05), horizon_days=1, portfolio_value=100000",
+        outputs_summary="historical, parametric, cornish_fisher, cvar (all as loss pct), confidence, horizon_days",
         storage="stateless (in-memory compute)",
         description="Computes Value at Risk and Conditional Value at Risk (Expected Shortfall) as positive loss fractions.",
         handler=_handle_var_cvar,
@@ -389,8 +660,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="screen_universe",
         kind="deterministic",
-        inputs_summary="universe, prices, rule='momentum', top_n=20",
-        outputs_summary="selected, scores, rank_table, n_screened, engine_version",
+        inputs_summary="prices, universe=None, rank_by='return_pct' (or rule='momentum'), top_n=20, filters=None",
+        outputs_summary="rows (ranked shortlist), n_evaluated, n_passing, n_returned, n_insufficient",
         storage="stateless (in-memory compute)",
         description="Screens a universe of assets cross-sectionally without touching external networks.",
         handler=_handle_screen_universe,
@@ -398,8 +669,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="fama_macbeth",
         kind="deterministic",
-        inputs_summary="panel_returns, factor_loadings",
-        outputs_summary="risk_premia, t_stats, p_values, r_squared_mean",
+        inputs_summary="signal ({ticker: scores}), prices ({ticker: closes}), horizon=21",
+        outputs_summary="lambda_mean, lambda_by_date, t_stat, n_dates, n_names",
         storage="stateless (in-memory compute)",
         description="Two-pass Fama-MacBeth cross-sectional regression estimating factor risk premia and HAC t-statistics.",
         handler=_handle_fama_macbeth,
@@ -407,8 +678,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="quantile_book",
         kind="deterministic",
-        inputs_summary="signals, returns, n_quantiles=5",
-        outputs_summary="quantile_returns, spread_top_bottom, monotonicity_score",
+        inputs_summary="signal ({ticker: scores}), prices ({ticker: closes}), horizon=21, quantiles=5",
+        outputs_summary="spread_pct, quantile returns, n_periods, n_names, turnover",
         storage="stateless (in-memory compute)",
         description="Sorts assets into quantile portfolios and evaluates bucket return spread and rank monotonicity.",
         handler=_handle_quantile_book,
@@ -416,8 +687,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="hrp",
         kind="deterministic",
-        inputs_summary="cov_matrix, method='single'",
-        outputs_summary="weights, weight_sum=1.0, dendrogram_order",
+        inputs_summary="cov_matrix, names=None",
+        outputs_summary="weights, n_assets, max_weight, min_weight, condition_number",
         storage="stateless (in-memory compute)",
         description="Hierarchical Risk Parity portfolio allocation (Lopez de Prado 2016) via quasi-diagonalization.",
         handler=_handle_hrp,
@@ -425,8 +696,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="risk_parity",
         kind="deterministic",
-        inputs_summary="cov_matrix, target_risk_contributions=None",
-        outputs_summary="weights, risk_contributions, weight_sum=1.0",
+        inputs_summary="cov_matrix, names=None",
+        outputs_summary="weights, converged, n_assets, max_weight, min_weight, condition_number",
         storage="stateless (in-memory compute)",
         description="Equal risk contribution portfolio allocation balancing marginal volatility risk.",
         handler=_handle_risk_parity,
@@ -434,8 +705,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="vol_target",
         kind="deterministic",
-        inputs_summary="returns, target_vol=0.15, max_leverage=2.0",
-        outputs_summary="leverage_scalar, realized_vol, cash_weight",
+        inputs_summary="returns, target_vol=0.10, method='ewma', ewma_lambda=0.94, max_leverage=None",
+        outputs_summary="leverages, mean_leverage, n_obs, n_warmup, method",
         storage="stateless (in-memory compute)",
         description="Computes volatility-targeted dynamic leverage allocation scalar.",
         handler=_handle_vol_target,
@@ -443,8 +714,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="denoise_cov",
         kind="deterministic",
-        inputs_summary="cov_matrix, q=T/N, method='constant_residual'",
-        outputs_summary="denoised_cov, lambda_plus, n_filtered_factors",
+        inputs_summary="cov_matrix, n_obs=252 (or q=T/N)",
+        outputs_summary="cov (denoised), lambda_plus, n_signal_eigenvalues, n_noise_eigenvalues, q",
         storage="stateless (in-memory compute)",
         description="Marcenko-Pastur spectral truncation denoising of empirical sample covariance matrices.",
         handler=_handle_denoise_cov,
@@ -452,8 +723,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="detone_cov",
         kind="deterministic",
-        inputs_summary="cov_matrix, n_market_modes=1",
-        outputs_summary="detoned_cov, variance_removed_pct",
+        inputs_summary="cov_matrix",
+        outputs_summary="detoned_cov",
         storage="stateless (in-memory compute)",
         description="Removes dominant market eigenvector mode from correlation matrix to isolate idiosyncratic risk.",
         handler=_handle_detone_cov,
@@ -461,8 +732,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="ewma_cov",
         kind="deterministic",
-        inputs_summary="returns_matrix, lambda_param=0.94",
-        outputs_summary="ewma_cov_matrix, half_life_bars",
+        inputs_summary="returns_matrix (T x N), lambda_param=0.94",
+        outputs_summary="ewma_cov_matrix",
         storage="stateless (in-memory compute)",
         description="Exponentially weighted moving average covariance matrix estimation (RiskMetrics convention).",
         handler=_handle_ewma_cov,
@@ -470,8 +741,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="dgp_stress",
         kind="deterministic",
-        inputs_summary="returns, n_scenarios=1000, horizon_bars=60",
-        outputs_summary="fan_trajectories, worst_case_drawdown, var_horizon",
+        inputs_summary="returns, dgp='gbm', n_paths=200 (or n_scenarios), seed=7",
+        outputs_summary="dgp, n_paths, sharpe_q10, sharpe_q50, sharpe_q90, frac_positive, sharpe_hist",
         storage="stateless (in-memory compute)",
         description="Data Generating Process parametric bootstrap and extreme scenario stress testing.",
         handler=_handle_dgp_stress,
@@ -480,7 +751,7 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
         name="ou_process",
         kind="deterministic",
         inputs_summary="prices_or_spread, dt=1.0",
-        outputs_summary="theta (mean_reversion_rate), mu (long_run_mean), sigma, half_life",
+        outputs_summary="kappa, theta, sigma, half_life, phi, mean_reverting",
         storage="stateless (in-memory compute)",
         description="Calibrates Ornstein-Uhlenbeck continuous-time mean-reverting process parameters via exact MLE.",
         handler=_handle_ou_process,
@@ -488,8 +759,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="gbm_process",
         kind="deterministic",
-        inputs_summary="prices, dt=1.0",
-        outputs_summary="mu (drift), sigma (diffusion_vol), annualized_drift, annualized_vol",
+        inputs_summary="prices, kind=None",
+        outputs_summary="mu (drift), sigma (diffusion vol), n_obs",
         storage="stateless (in-memory compute)",
         description="Geometric Brownian Motion parameter calibration via log-return normal maximum likelihood.",
         handler=_handle_gbm_process,
@@ -497,8 +768,8 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="jump_process",
         kind="deterministic",
-        inputs_summary="returns, dt=1.0",
-        outputs_summary="mu, sigma, lambda_jump (jump_intensity), mu_jump, sigma_jump",
+        inputs_summary="returns, z=3.0, kind=None",
+        outputs_summary="mu, sigma, jump_lambda, jump_mu, jump_sigma, n_jumps_named",
         storage="stateless (in-memory compute)",
         description="Merton jump-diffusion process calibration identifying discontinuous market shock parameters.",
         handler=_handle_jump_process,
@@ -507,7 +778,7 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="my_universe",
         kind="account",
-        inputs_summary="tickers=None (omitted to read, list of tickers to update)",
+        inputs_summary="tickers=None (omitted to read, list of tickers to update), name='default'",
         outputs_summary="tickers, count, updated_at",
         storage="persisted in researcher's workspace (.alphaengine/universes/)",
         description="Retrieves or updates the researcher's active asset universe.",
@@ -525,7 +796,7 @@ _MCP_TOOLS: tuple[MCPToolSpec, ...] = (
     MCPToolSpec(
         name="run_workflow",
         kind="account",
-        inputs_summary="workflow_name, params=None",
+        inputs_summary="workflow (or workflow_name), params=None",
         outputs_summary="job_id, status, submitted_at",
         storage="persisted in firm execution queue and run history",
         description="Submits a validated quantOS research workflow to the hosted execution cluster.",
@@ -554,12 +825,7 @@ def call_mcp_tool(name: str, /, **kwargs: Any) -> dict[str, Any]:
     tool = get_mcp_tool(name)
     if tool.handler is None:
         raise NotImplementedError(f"Tool {name!r} handler is not defined.")
-    res = tool.handler(**kwargs)
-    if isinstance(res, dict):
-        if "engine_version" not in res:
-            res["engine_version"] = current_engine_version()
-        return dict(res)
-    return {"engine_version": current_engine_version(), "result": res}
+    return _stamp_engine(tool.handler(**kwargs))
 
 
 __all__ = [

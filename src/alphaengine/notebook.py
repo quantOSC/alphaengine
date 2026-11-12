@@ -78,11 +78,20 @@ class NotebookHook:
         return proj
 
     def get_ledger_floor(self) -> int:
-        """Return cumulative attempts for this session and the project ledger (`QOS-181`)."""
+        """Return cumulative attempts for this session and the project ledger (`QOS-181`).
+
+        A ledger that exists and cannot be read FAILS CLOSED. Falling back to this
+        session's attempt count would deflate against fewer trials than were run,
+        which is the one error a trial counter exists to prevent.
+        """
+        from .ledger import LedgerError
+
         try:
             proj = self.get_project()
-            _fam_trials, proj_trials = cumulative_trials_for(proj, family=self.family)
-            return max(self.attempt_count, proj_trials)
+            fam_trials, proj_trials = cumulative_trials_for(proj, family=self.family)
+            return max(self.attempt_count, proj_trials, fam_trials)
+        except LedgerError:
+            raise
         except Exception:  # noqa: BLE001
             return max(self.attempt_count, 1)
 

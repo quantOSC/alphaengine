@@ -36,6 +36,16 @@ jobs:
       - name: Verify git tag matches __version__
         run: |
           python scripts/check_version_sync.py
+      # A TAG IS NOT A TEST RUN. Without this gate a tag on a commit CI never
+      # saw (or saw fail) ships straight to PyPI. Same checks as ci.yml's lint
+      # and goldens jobs, on the exact tree being built.
+      - run: python -m pip install --upgrade pip
+      - run: pip install -e ".[dev]"
+      - run: python scripts/check_engine_version.py
+      - run: python scripts/check_public_boundary.py
+      - run: python scripts/check_no_engine_copies.py
+      - run: pytest -q
+      - run: pytest tests -m golden -q
       - run: python -m pip install --upgrade build
       - run: python -m build
       - uses: actions/upload-artifact@v4

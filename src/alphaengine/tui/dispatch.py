@@ -7,6 +7,7 @@ the workflow tool does the same thing from inside a sentence.
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -83,10 +84,160 @@ class Desk:
     bakeoff_done: bool = False
     # True when `think` was built from the keys on this process, so a new paste replaces it.
     think_from_key: bool = False
+    in_tui: bool = False
+    quiet: bool = False
+
+
+_URL_AFTER_SECRET: dict[str, str] = {
+    "AZURE_OPENAI_API_KEY": "AZURE_OPENAI_ENDPOINT",
+    "ALPHAENGINE_API_KEY": "ALPHAENGINE_BASE_URL",
+}
+
+
+def _store_shell_credential(desk: Desk, env: str, raw_value: str) -> None:
+    import os
+
+    from ..auth import PLAINTEXT_FILE_DISCLOSURE, save_credential
+    from ..cli import _session, green
+    from ..model import _SDK, _clean_key, available_models, keys_without_sdk, provider_for_env
+
+    value = _clean_key(raw_value)
+    if not value:
+        say(dim("  nothing entered."))
+        return
+    os.environ[env] = value
+    prov = provider_for_env(env)
+    if prov:
+        os.environ["ALPHAENGINE_PROVIDER"] = prov
+        os.environ.pop("ALPHAENGINE_MODEL", None)
+    if desk.think_from_key:
+        desk.think = None
+        desk.think_from_key = False
+    if env == "QUANTOS_API_KEY":
+        desk.session, desk.url = _session(getattr(desk.args, "url", None), getattr(desk.args, "key", None))
+        desk.keyed = True
+    try:
+        stored = save_credential(env, value)
+        if prov:
+            save_credential("ALPHAENGINE_PROVIDER", prov, prefer_file=(stored["storage"] == "file"))
+        if stored["storage"] == "keyring":
+            say(green(f"  {env} accepted.") + dim("  stored in OS keychain."))
+        else:
+            say(
+                green(f"  {env} accepted.")
+                + dim(f"  stored at {stored['path']}. {PLAINTEXT_FILE_DISCLOSURE}")
+            )
+    except (OSError, ValueError) as exc:
+        say(green(f"  {env} accepted for this session.") + dim(f"  ({exc})"))
+    follow = _URL_AFTER_SECRET.get(env)
+    if follow and not os.environ.get(follow):
+        desk.pending_url = follow
+        say(dim(f"  Now paste {follow}."))
+        return
+    if env != "QUANTOS_API_KEY":
+        stranded = keys_without_sdk()
+        ready = available_models()
+        if stranded:
+            installs = " or ".join(f"pip install {_SDK[label]}" for label in stranded)
+            say(yellow(f"  Key stored. The SDK is not installed yet: {installs}"))
+        elif ready:
+            label, model = ready[0]
+            say(dim(f"  Model ready: {label}/{model}."))
+
+
+def _handle_pending_input(desk: Desk, raw_line: str) -> bool:
+    """Consume pending secret/provider/URL prompts inside line-oriented `ae shell`."""
+    import os
+
+    from ..cli import _KEY_PROMPTS
+
+    value = raw_line.strip()
+    lower = value.lower()
+
+    if desk.pending_secret:
+        env = desk.pending_secret
+        if not value:
+            desk.pending_secret = None
+            say(dim("  nothing entered."))
+            return True
+        # If the user typed a slash command, a multi-word command, or a short session verb
+        # (like `key`, `help`, `quit`) instead of pasting an API key, cancel the prompt
+        # and let `submit()` dispatch the command normally.
+        if value.startswith("/") or " " in value or len(value) < 8:
+            desk.pending_secret = None
+            return False
+        desk.pending_secret = None
+        if env == "MODEL_KEY":
+            found = env_for_model_key(value)
+            if found is None:
+                desk.held_key = value
+                desk.pending_provider = True
+                say(
+                    dim(
+                        "  Which provider is this key for? "
+                        "(anthropic, openai, gemini, groq, openrouter, azure, gateway)"
+                    )
+                )
+                return True
+            _store_shell_credential(desk, found, value)
+            return True
+        _store_shell_credential(desk, env, value)
+        return True
+
+    if desk.pending_provider:
+        if not value:
+            desk.pending_provider = False
+            desk.held_key = None
+            say(dim("  nothing entered."))
+            return True
+        if lower not in _KEY_PROMPTS or lower == "quantos":
+            if value.startswith("/") or " " in value:
+                desk.pending_provider = False
+                desk.held_key = None
+                return False
+            say(dim("  Try anthropic, openai, gemini, groq, openrouter, azure, or gateway."))
+            return True
+        held = desk.held_key or ""
+        desk.held_key = None
+        desk.pending_provider = False
+        if not held:
+            say(dim("  nothing entered."))
+            return True
+        _store_shell_credential(desk, _KEY_PROMPTS[lower][0], held)
+        return True
+
+    if desk.pending_url:
+        from ..auth import save_credential, validate_clean_url
+
+        env = desk.pending_url
+        if not value:
+            desk.pending_url = None
+            say(dim("  nothing entered."))
+            return True
+        if value.startswith("/") or " " in value:
+            desk.pending_url = None
+            return False
+        desk.pending_url = None
+        try:
+            cleaned = validate_clean_url(value, require_https_remote=False)
+        except ValueError as exc:
+            say(red(str(exc)))
+            return True
+        os.environ[env] = cleaned
+        with contextlib.suppress(OSError, ValueError):
+            save_credential(env, cleaned)
+        say(dim(f"  {env} set."))
+        return True
+
+    return False
 
 
 def submit(desk: Desk, line: str) -> bool:
     """Handle one line. True means the session should close."""
+    if (desk.pending_secret or desk.pending_provider or desk.pending_url) and _handle_pending_input(
+        desk, line
+    ):
+        return False
     line = line.strip()
     if not line:
         return False
@@ -157,9 +308,10 @@ def submit(desk: Desk, line: str) -> bool:
         return False
 
     verb, _, rest = line.partition(" ")
-    if verb in QUESTION_VERBS and not rest:
-        verb, rest = "run", QUESTION_VERBS[verb]
     rest = rest.strip()
+    live_monitor = verb == "monitor" and "--live" in rest.split()
+    if verb in QUESTION_VERBS and not live_monitor and (not rest or rest.startswith("--")):
+        verb, rest = "run", f"{QUESTION_VERBS[verb]} {rest}".strip()
 
     if verb in ("quit", "exit"):
         return True
@@ -176,28 +328,38 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "version":
         from ..cli import cmd_version
 
-        cmd_version(_ns(desk))
+        cmd_version(_ns(desk, json_out="--json" in rest.split()))
         return False
     if verb == "whoami":
         from ..cli import cmd_whoami
 
-        cmd_whoami(_ns(desk))
+        cmd_whoami(_ns(desk, json_out="--json" in rest.split()))
         return False
     if verb == "doctor":
         from ..cli import cmd_doctor
 
-        cmd_doctor(_ns(desk))
+        cmd_doctor(_ns(desk, json_out="--json" in rest.split()))
         return False
     if verb == "demo":
         from ..cli import cmd_demo
 
-        cmd_demo(desk.args if desk.args is not None else _ns(desk))
+        cmd_demo(_ns(desk, json_out="--json" in rest.split(), idea=None, family=None))
         return False
     if verb == "process":
         from ..cli import cmd_process
 
+        toks = rest.split()
+        json_p = "--json" in toks
+        pos = [t for t in toks if not t.startswith("--")]
         cmd_process(
-            _ns(desk, dgp=rest or "gbm", data=None, project=None, universe=None),
+            _ns(
+                desk,
+                dgp=(pos[0] if pos else "gbm"),
+                data=None,
+                project=None,
+                universe=None,
+                json_out=json_p,
+            ),
             data=desk.data,
         )
         return False
@@ -229,6 +391,8 @@ def submit(desk: Desk, line: str) -> bool:
         kill_rule_arg, toks = pop_flag(toks, "--kill-rule")
         kill_if_arg, toks = pop_flag(toks, "--kill-if")
         fam_arg, toks = pop_flag(toks, "--family")
+        json_p = "--json" in toks
+        toks = [t for t in toks if t != "--json"]
         act = toks[0] if toks else "list"
         tgt = toks[1] if len(toks) > 1 else None
         st = toks[2] if len(toks) > 2 else None
@@ -241,6 +405,7 @@ def submit(desk: Desk, line: str) -> bool:
                 kill_rule=kill_rule_arg or "",
                 kill_if=kill_if_arg or "",
                 family=fam_arg,
+                json_out=json_p,
             )
         )
         return False
@@ -264,7 +429,8 @@ def submit(desk: Desk, line: str) -> bool:
 
         if not firm_session_allowed(getattr(desk.args, "key", None)):
             return False
-        cmd_runs(_ns(desk, limit=25))
+        lim_arg, _ = pop_flag(rest.split(), "--limit")
+        cmd_runs(_ns(desk, limit=int(lim_arg) if lim_arg and lim_arg.isdigit() else 25))
         return False
     if verb == "log":
         from ..cli import cmd_log
@@ -273,7 +439,8 @@ def submit(desk: Desk, line: str) -> bool:
         fam_arg, toks = pop_flag(toks, "--family")
         since_arg, toks = pop_flag(toks, "--since")
         verd_arg, toks = pop_flag(toks, "--verdict")
-        lim_arg, _ = pop_flag(toks, "--limit")
+        lim_arg, toks = pop_flag(toks, "--limit")
+        json_p = "--json" in toks
         cmd_log(
             _ns(
                 desk,
@@ -282,27 +449,36 @@ def submit(desk: Desk, line: str) -> bool:
                 since=since_arg,
                 verdict=verd_arg,
                 limit=int(lim_arg) if lim_arg and lim_arg.isdigit() else 25,
+                json_out=json_p,
             )
         )
         return False
     if verb == "show":
         from ..cli import cmd_show
 
-        cmd_show(_ns(desk, run_ref=rest or "HEAD"))
+        toks = rest.split()
+        json_p = "--json" in toks
+        pos = [t for t in toks if not t.startswith("--")]
+        cmd_show(_ns(desk, run_ref=(pos[0] if pos else "HEAD"), json_out=json_p))
         return False
     if verb == "diff":
         from ..cli import cmd_diff
 
-        parts = rest.split()
+        toks = rest.split()
+        json_p = "--json" in toks
+        parts = [t for t in toks if not t.startswith("--")]
         if len(parts) < 2:
             say(red("diff needs two run ids: diff <run-a> <run-b>"))
             return False
-        cmd_diff(_ns(desk, run_a=parts[0], run_b=parts[1]))
+        cmd_diff(_ns(desk, run_a=parts[0], run_b=parts[1], json_out=json_p))
         return False
     if verb == "rerun":
         from ..cli import cmd_rerun
 
-        cmd_rerun(_ns(desk, run_ref=rest or "HEAD"))
+        toks = rest.split()
+        json_p = "--json" in toks
+        pos = [t for t in toks if not t.startswith("--")]
+        cmd_rerun(_ns(desk, run_ref=(pos[0] if pos else "HEAD"), json_out=json_p))
         return False
     if verb == "watch":
         from ..cli import cmd_watch
@@ -339,7 +515,21 @@ def submit(desk: Desk, line: str) -> bool:
 
         if not firm_session_allowed(getattr(desk.args, "key", None)):
             return False
-        cmd_tonight(_ns(desk, budget=0))
+        bud_arg, _ = pop_flag(rest.split(), "--budget")
+        cmd_tonight(_ns(desk, budget=int(bud_arg) if bud_arg and bud_arg.isdigit() else 0))
+        return False
+    if verb == "quiet":
+        desk.quiet = True
+        say(dim("quiet on"))
+        return False
+    if verb == "verbose":
+        desk.quiet = False
+        say(dim("verbose on"))
+        return False
+    if verb == "details":
+        from .mark import details_text
+
+        say(details_text().plain)
         return False
     if verb == "logout":
         _logout(desk, rest)
@@ -360,7 +550,8 @@ def submit(desk: Desk, line: str) -> bool:
         dry = "--dry-run" in toks
         share = "--share-series" in toks
         show_p = "--show-payload" in toks
-        yes_p = "--yes" in toks or True
+        json_p = "--json" in toks
+        yes_p = "--yes" in toks or bool(desk.in_tui)
         rem = [t for t in toks if not t.startswith("--")]
         if not dry and not firm_session_allowed(getattr(desk.args, "key", None)):
             return False
@@ -372,21 +563,39 @@ def submit(desk: Desk, line: str) -> bool:
                 share_series=share,
                 show_payload=show_p,
                 yes=yes_p,
+                json_out=json_p,
+                quiet=desk.quiet,
             )
         )
         return False
     if verb == "pull":
         from ..cli import cmd_pull
 
-        toks = [t for t in rest.split() if not t.startswith("--")]
+        raw_toks = rest.split()
+        since_arg, rem_toks = pop_flag(raw_toks, "--since")
+        lim_arg, rem_toks = pop_flag(rem_toks, "--limit")
+        json_p = "--json" in rem_toks
+        toks = [t for t in rem_toks if not t.startswith("--")]
         if not firm_session_allowed(getattr(desk.args, "key", None)):
             return False
-        cmd_pull(_ns(desk, remote_name=toks[0] if toks else "quantos"))
+        cmd_pull(
+            _ns(
+                desk,
+                remote_name=toks[0] if toks else "quantos",
+                since=since_arg,
+                limit=int(lim_arg) if lim_arg and lim_arg.isdigit() else 100,
+                json_out=json_p,
+                quiet=desk.quiet,
+            )
+        )
         return False
     if verb == "plugin":
         from ..cli import cmd_plugin
 
-        cmd_plugin(_ns(desk, action=rest.strip() or "list"))
+        toks = rest.split()
+        json_p = "--json" in toks
+        act_toks = [t for t in toks if not t.startswith("--")]
+        cmd_plugin(_ns(desk, action=(act_toks[0] if act_toks else "list"), json_out=json_p))
         return False
     if verb in ("key", "keys", "login"):
         _key(desk, rest, verb=verb)
@@ -397,14 +606,20 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "seal":
         from ..cli import cmd_seal
 
-        cmd_seal(_ns(desk, study_path=rest or "HEAD"))
+        toks = rest.split()
+        json_p = "--json" in toks
+        pos = [t for t in toks if not t.startswith("--")]
+        cmd_seal(_ns(desk, study_path=pos[0] if pos else "HEAD", json_out=json_p))
         return False
     if verb == "verify":
         from ..cli import cmd_verify
 
         data_arg, toks = pop_flag(rest.split(), "--data")
-        target_arg = toks[0] if toks else "HEAD"
-        cmd_verify(_ns(desk, study_path=target_arg, data=data_arg))
+        allow_code = "--allow-code" in toks
+        json_p = "--json" in toks
+        pos = [t for t in toks if not t.startswith("--")]
+        target_arg = pos[0] if pos else "HEAD"
+        cmd_verify(_ns(desk, study_path=target_arg, data=data_arg, allow_code=allow_code, json_out=json_p))
         return False
     if verb == "view":
         _view(desk)
@@ -428,8 +643,19 @@ def submit(desk: Desk, line: str) -> bool:
 
             name_arg, toks = pop_flag(parts[1:], "--name")
             asof_arg, toks = pop_flag(toks, "--asof-col")
+            json_p = "--json" in toks
+            toks = [t for t in toks if not t.startswith("--")]
             ds_target = toks[0] if toks else None
-            cmd_data(_ns(desk, action=parts[0].lower(), target=ds_target, name=name_arg, asof_col=asof_arg))
+            cmd_data(
+                _ns(
+                    desk,
+                    action=parts[0].lower(),
+                    target=ds_target,
+                    name=name_arg,
+                    asof_col=asof_arg,
+                    json_out=json_p,
+                )
+            )
             return False
         _load_named(desk, verb, rest)
         return False
@@ -449,7 +675,10 @@ def submit(desk: Desk, line: str) -> bool:
 
     if verb in _CROSS or verb in _OVERLAP:
         if verb in _OVERLAP:
-            _overlap(desk, "")
+            tail = rest
+            if peeled_symbol and "--symbol" not in rest.split():
+                tail = f"--symbol {peeled_symbol} {tail}".strip()
+            _overlap(desk, tail)
         else:
             _cross(desk, _CROSS[verb])
         return False
@@ -457,6 +686,12 @@ def submit(desk: Desk, line: str) -> bool:
     if verb == "run" and rest:
         name, flags = _split_run(rest)
         key = name.lower().replace("-", "_")
+        if name.lower().endswith((".yaml", ".yml")):
+            from ..cli import _cmd_run_pipeline
+            from ..project import find_project
+
+            _cmd_run_pipeline(_ns(desk, json_out="--json" in flags), name, find_project())
+            return False
         if key in _PORTFOLIO:
             _portfolio(desk, rest)
             return False
@@ -469,8 +704,14 @@ def submit(desk: Desk, line: str) -> bool:
                 tail = f"--symbol {peeled_symbol} {tail}".strip()
             _overlap(desk, tail)
             return False
+        if "--signal" in flags:
+            _run_local_workflow_on_desk(desk, key, flags)
+            return False
         if name and " " not in name and _is_workflow(desk.session, name):
             _scripted(desk, name, flags)
+            return False
+        if key in set(QUESTION_VERBS.values()):
+            _run_local_workflow_on_desk(desk, key, flags)
             return False
 
     if verb == "run" and not rest:
@@ -905,9 +1146,85 @@ def _overlap(desk: Desk, rest: str) -> None:
         "book_names": prepared["book_names"],
     }
     try:
-        _scripted(desk, "check_overlap", [])
+        if _is_workflow(desk.session, "check_overlap"):
+            _scripted(desk, "check_overlap", [])
+        else:
+            _run_local_workflow_on_desk(desk, "check_overlap", [])
     finally:
         desk.data = held
+
+
+def _run_local_workflow_on_desk(desk: Desk, wf: str, flags: list[str]) -> None:
+    import json
+
+    from ..cli import _cmd_run_coded_signal, _run_local_in_project
+    from ..project import find_project
+
+    activity(wf)
+    rem = list(flags)
+    sig_arg, rem = pop_flag(rem, "--signal")
+    idea_arg, rem = pop_flag(rem, "--idea")
+    fam_arg, rem = pop_flag(rem, "--family")
+    lbl_arg, rem = pop_flag(rem, "--label")
+    borrow_arg, rem = pop_flag(rem, "--borrow-bps")
+    json_p = "--json" in rem
+    quiet_p = "--quiet" in rem or desk.quiet
+    stdin_p = "--stdin" in rem
+
+    inputs: dict[str, Any] = {}
+    kept: list[str] = []
+    i = 0
+    while i < len(rem):
+        if rem[i] == "--input" and i + 1 < len(rem):
+            pair = rem[i + 1]
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                if v[:1] in "{[":
+                    try:
+                        inputs[k] = json.loads(v)
+                    except ValueError:
+                        inputs[k] = v
+                else:
+                    inputs[k] = v
+            i += 2
+            continue
+        if rem[i] in ("--json", "--quiet", "--stdin"):
+            i += 1
+            continue
+        kept.append(rem[i])
+        i += 1
+    if lbl_arg:
+        inputs["label"] = lbl_arg
+
+    if kept:
+        try:
+            desk.data, desk.backtest_fn = _apply_flags(kept, desk.session, desk.data, desk.backtest_fn)
+            desk.loaded = _describe_source(kept) or desk.loaded
+        except (ProjectError, ValueError) as exc:
+            say(red(str(exc)))
+            return
+
+    ns = _ns(
+        desk,
+        workflow=wf,
+        signal=sig_arg,
+        idea=idea_arg,
+        family=fam_arg,
+        label=lbl_arg,
+        borrow_bps=float(borrow_arg) if borrow_arg is not None else None,
+        json_out=json_p,
+        quiet=quiet_p,
+        stdin_in=stdin_p,
+        data=None,
+        project=None,
+        universe=None,
+        symbol=None,
+    )
+    proj = find_project()
+    if sig_arg:
+        _cmd_run_coded_signal(ns, proj, data=desk.data, inputs=inputs)
+        return
+    _run_local_in_project(ns, proj, data=desk.data, backtest_fn=desk.backtest_fn, inputs=inputs)
 
 
 def _scripted(desk: Desk, name: str, flags: list[str]) -> None:

@@ -143,7 +143,12 @@ def run_shell(
     say(status_line(url, data=desk.data, project=desk.loaded, keyed=desk.keyed))
     while True:
         try:
-            line = input_fn(f"{PROMPT} ")
+            if desk.pending_secret and input_fn is input:
+                import getpass
+
+                line = getpass.getpass(f"{PROMPT} ")
+            else:
+                line = input_fn(f"{PROMPT} ")
         except (EOFError, KeyboardInterrupt):
             say("")
             break

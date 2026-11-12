@@ -30,7 +30,7 @@ from .._version import API_URL_ENV, DEFAULT_API_URL, LEGACY_API_URL_ENV, current
 from ..client.session import share_series_enabled
 from ..core.conventions import normalize_verdict
 from ..ideas import list_ideas, upsert_idea_revision
-from ..project import Project
+from ..project import Project, validate_safe_id
 from ..study import Study, load, save
 from ..study.report import MAX_FIGURE_LIST
 from .schema import (
@@ -84,24 +84,42 @@ __all__ = [
     "PullResponse",
     "compute_push_exit_code",
     "export_json_schemas",
+    "firm_api_url",
     "remote_add",
+    "remote_remove",
+    "remote_public_name",
     "resolve_remote_url",
+    "scrub_sync_host",
     "describe_unreachable",
     "portal_host_note",
     "build_sync_payload",
     "format_push_preview",
     "push_workspace",
     "pull_workspace",
+    "_LEGACY_SYNC_HOSTS",
     "_guard_sync_payload",
+    "_split_push_batches",
 ]
 
 _SYNC_PUSH_PATH = "/api/workspace/sync"
 _SYNC_PULL_PATH = "/api/workspace/pull"
+_PUSH_ITEM_WEIGHTS: dict[str, int] = {
+    "ideas": 4,
+    "runs": 10,
+    "studies": 8,
+    "trial_events": 2,
+}
+_MAX_PUSH_BATCH_WEIGHT = 60
+_MAX_PUSH_BATCH_ITEMS = 30
 _FORBIDDEN_KEYS = frozenset(
     {
         "raw_rows",
         "dataset_rows",
         "prices",
+        "closes",
+        "equity_curve",
+        "weights_path",
+        "best_params",
         "matrix",
         "repro_spec",
         "cumulative_trials",
@@ -124,7 +142,7 @@ def resolve_remote_url(
     from ..auth import validate_clean_url
 
     def _clean(raw: str) -> str:
-        return validate_clean_url(raw.strip()).rstrip("/")
+        return validate_clean_url(raw.strip(), require_https_remote=True).rstrip("/")
 
     if explicit_url and explicit_url.strip():
         cleaned = _clean(explicit_url)
@@ -178,12 +196,13 @@ def remote_public_name(url: str, name: str = "quantos") -> str:
     return f"{name} ({url})"
 
 
-def describe_unreachable(root: str, reason: object) -> str:
+def describe_unreachable(root: str, reason: object, *, verb: str = "pull") -> str:
     """Turn a socket failure into a sentence a researcher can act on.
 
     The host is not included. A missing name is not a sync-contract mismatch.
     """
     _ = root
+    action = "push" if verb == "push" else "pull"
     text = scrub_sync_host(str(reason or "").strip())
     low = text.lower()
     dns = any(
@@ -202,73 +221,91 @@ def describe_unreachable(root: str, reason: object) -> str:
         return (
             "The firm API address does not resolve. "
             "This is not a sync-contract mismatch, and the package does not need an upgrade.\n"
-            "  Run `ae remote add quantos` with no URL, then `ae pull` again."
+            f"  Run `ae remote add quantos` with no URL, then `ae {action}` again."
         )
     if timed_out:
         return (
             "The firm API did not respond in time.\n"
-            "  pull copies team summaries into this project. The request was retried.\n"
-            "  Run `ae pull` again in a moment. Your key stays stored."
+            "  The request was retried automatically.\n"
+            f"  Run `ae {action}` again in a moment. Your key stays stored."
         )
     detail = f" ({text})" if text else ""
     return (
         f"The firm API could not be reached{detail}.\n"
         "  pull copies team summaries into this project. push sends yours the other way.\n"
-        "  Run `ae pull` again. Local research stays on this machine."
+        f"  Run `ae {action}` again. Local research stays on this machine."
     )
 
 
 def portal_host_note(url: str) -> str | None:
-    """Warn when a remote was pointed at a host that is not the sync API."""
+    """Warn when a remote was pointed at a retired host rather than the firm sync API."""
     if _hostname(url) not in _LEGACY_SYNC_HOSTS:
         return None
-    return "That address is not the sync API. push and pull use the firm API instead."
+    return "That address is a retired host, not the sync API. push and pull use the firm API instead."
 
 
 def _open_sync(req: urllib.request.Request, timeout: int) -> Any:
-    """Open a sync request, retrying once when the firm API is slow to answer."""
+    """Open an idempotent sync request, retrying once on transient timeouts or 502/503/504 gateways."""
+    from ..auth import safe_urlopen
+
     for attempt in range(2):
         try:
-            return urllib.request.urlopen(req, timeout=timeout)
+            return safe_urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as err:
+            if err.code not in (502, 503, 504) or attempt == 1:
+                raise
         except (urllib.error.URLError, TimeoutError, OSError) as err:
             reason = str(getattr(err, "reason", err)).lower()
-            transient = "timed out" in reason or "timeout" in reason
+            transient = any(
+                tok in reason
+                for tok in ("timed out", "timeout", "connection reset", "temporarily unavailable", "eof")
+            )
             if not transient or attempt == 1:
                 raise
     raise AssertionError("sync request ended without a response")
 
 
 def firm_api_url() -> str:
-    """The sync API: an env override when it is not the portal site, otherwise the default."""
+    """The sync API: an env override when it is not a retired host, otherwise the default."""
     from ..auth import validate_clean_url
 
     for raw in (os.environ.get(API_URL_ENV), os.environ.get(LEGACY_API_URL_ENV)):
         if not raw or not raw.strip():
             continue
-        cleaned = validate_clean_url(raw.strip()).rstrip("/")
+        cleaned = validate_clean_url(raw.strip(), require_https_remote=True).rstrip("/")
         if portal_host_note(cleaned) is None:
             return cleaned
-    return validate_clean_url(DEFAULT_API_URL).rstrip("/")
+    return validate_clean_url(DEFAULT_API_URL, require_https_remote=True).rstrip("/")
 
 
 def remote_add(proj: Project, name: str = "quantos", url: str | None = None) -> str:
     """Register or update a clean named remote in `.alphaengine/project.toml` (`QOS-155`).
 
     Omitting ``url`` stores the firm API. It does not keep a previously saved
-    portal host. Passing the portal site stores the firm API as well.
+    retired host. Passing a retired host stores the firm API as well.
     """
     from ..auth import validate_clean_url
 
-    clean_name = (name or "quantos").strip()
+    clean_name = validate_safe_id((name or "quantos").strip(), "remote name")
     requested = (url or "").strip()
     if requested:
-        cleaned = validate_clean_url(requested).rstrip("/")
+        cleaned = validate_clean_url(requested, require_https_remote=True).rstrip("/")
         resolved = firm_api_url() if portal_host_note(cleaned) else cleaned
     else:
         resolved = firm_api_url()
     proj.remotes[clean_name] = resolved
     proj.save_config()
     return resolved
+
+
+def remote_remove(proj: Project, name: str) -> bool:
+    """Remove a named remote (and its sync cursor) from `.alphaengine/project.toml`."""
+    clean_name = validate_safe_id((name or "").strip(), "remote name")
+    existed = clean_name in proj.remotes
+    proj.remotes.pop(clean_name, None)
+    proj.sync_cursors.pop(clean_name, None)
+    proj.save_config()
+    return existed
 
 
 def _sanitize_figures(node: Any, *, share_series: bool) -> tuple[Any, dict[str, list[float]]]:
@@ -280,7 +317,7 @@ def _sanitize_figures(node: Any, *, share_series: bool) -> tuple[Any, dict[str, 
             out: dict[str, Any] = {}
             for k, v in item.items():
                 ks = str(k)
-                if ks in _FORBIDDEN_KEYS:
+                if ks.lower() in _FORBIDDEN_KEYS:
                     continue
                 out[ks] = _walk(v, f"{key_hint}.{ks}" if key_hint else ks)
             return out
@@ -289,7 +326,8 @@ def _sanitize_figures(node: Any, *, share_series: bool) -> tuple[Any, dict[str, 
                 if share_series:
                     if all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in item):
                         extracted_series[key_hint or "series"] = [float(x) for x in item]
-                    return [_walk(v, key_hint) for v in item]
+                        return {"truncated": True, "length": len(item)}
+                    return [_walk(v, key_hint) for v in item[:MAX_FIGURE_LIST]]
                 return []
             return [_walk(v, key_hint) for v in item]
         return item
@@ -305,7 +343,7 @@ def _guard_sync_payload(payload: dict[str, Any], *, share_series: bool = False) 
         if isinstance(node, Mapping):
             for k, v in node.items():
                 ks = str(k)
-                if ks in _FORBIDDEN_KEYS:
+                if ks.lower() in _FORBIDDEN_KEYS:
                     raise ValueError(f"refusing to sync forbidden field {path}.{ks}")
                 walk(v, f"{path}.{ks}")
         elif isinstance(node, (list, tuple)):
@@ -532,19 +570,128 @@ def format_push_preview(
 
 
 def _extract_http_detail(err: urllib.error.HTTPError) -> tuple[str, dict[str, Any]]:
-    from ..auth import redact_secrets
+    from ..auth import read_bounded_bytes, redact_secrets
 
     raw_body = ""
     with contextlib.suppress(Exception):
-        raw_body = err.read().decode("utf-8", errors="replace")
+        raw_body = read_bounded_bytes(err, max_bytes=65536).decode("utf-8", errors="replace")
     parsed: dict[str, Any] = {}
     if raw_body:
         with contextlib.suppress(Exception):
             obj = json.loads(raw_body)
             if isinstance(obj, dict):
                 parsed = obj
-    detail = parsed.get("detail") or parsed.get("message") or parsed.get("error") or raw_body[:240]
-    return redact_secrets(str(detail or "").strip()), parsed
+    stripped = raw_body.lstrip()
+    if not parsed and stripped.startswith("<"):
+        detail: Any = "upstream gateway returned an HTML error response (request may have timed out)"
+    else:
+        detail = parsed.get("detail") or parsed.get("message") or parsed.get("error") or stripped[:240]
+    cleaned = scrub_sync_host(redact_secrets(str(detail or "").strip()))[:300]
+    return cleaned, parsed
+
+
+def _split_push_batches(
+    payload: Mapping[str, Any],
+    *,
+    max_weight: int = _MAX_PUSH_BATCH_WEIGHT,
+    max_items: int = _MAX_PUSH_BATCH_ITEMS,
+) -> list[dict[str, Any]]:
+    """Split a `PushRequest` into bounded, dependency-ordered batches.
+
+    Order is `ideas -> runs -> studies -> trial_events` so references resolve server-side.
+
+    Keeps every HTTP `POST /api/workspace/sync` well below reverse-proxy timeouts
+    (e.g. Next.js's 30s `proxyTimeout`) while preserving single-POST behavior on
+    small workspaces and unit tests.
+    """
+    base = {
+        "sync_contract": payload["sync_contract"],
+        "engine_version": payload["engine_version"],
+        "project": dict(payload["project"]),
+    }
+
+    def _empty_batch() -> dict[str, Any]:
+        return {
+            **base,
+            "studies": [],
+            "runs": [],
+            "ideas": [],
+            "trial_events": [],
+        }
+
+    ordered_buckets = ("ideas", "runs", "studies", "trial_events")
+    total_items = sum(len(payload.get(k) or []) for k in ordered_buckets)
+    if total_items == 0:
+        return [_empty_batch()]
+
+    batches: list[dict[str, Any]] = []
+    cur = _empty_batch()
+    cur_weight = 0
+    cur_count = 0
+
+    for bucket in ordered_buckets:
+        weight = _PUSH_ITEM_WEIGHTS[bucket]
+        for item in payload.get(bucket) or []:
+            if cur_count > 0 and (cur_weight + weight > max_weight or cur_count >= max_items):
+                batches.append(cur)
+                cur = _empty_batch()
+                cur_weight = 0
+                cur_count = 0
+            cur[bucket].append(item)
+            cur_weight += weight
+            cur_count += 1
+
+    if cur_count > 0:
+        batches.append(cur)
+    return batches
+
+
+def _post_push_batch(
+    batch_payload: Mapping[str, Any],
+    *,
+    endpoint: str,
+    headers: Mapping[str, str],
+    timeout: int,
+    root: str,
+) -> Any:
+    """POST one push batch and return the decoded JSON body, mapping failures to typed `SyncError`s."""
+    from ..auth import read_bounded_bytes, redact_secrets
+
+    req = urllib.request.Request(
+        endpoint,
+        data=json.dumps(batch_payload, allow_nan=False).encode("utf-8"),
+        headers=dict(headers),
+        method="POST",
+    )
+    try:
+        with _open_sync(req, timeout) as resp:
+            return json.loads(read_bounded_bytes(resp).decode("utf-8") or "{}")
+    except urllib.error.HTTPError as err:
+        detail, parsed_err = _extract_http_detail(err)
+        suffix = f" {detail}" if detail else ""
+        if err.code in (401, 403):
+            raise SyncAuthError(
+                f"Authentication/entitlement rejected ({err.code}).{suffix}",
+                status_code=err.code,
+            ) from err
+        if err.code in (409, 426) or (
+            isinstance(parsed_err.get("sync_contract"), int)
+            and parsed_err.get("sync_contract") != SYNC_CONTRACT_VERSION
+        ):
+            raise SyncContractMismatchError(
+                f"Sync contract mismatch ({err.code}): "
+                f"client uses sync_contract={SYNC_CONTRACT_VERSION}.{suffix}",
+                status_code=err.code,
+            ) from err
+        raise SyncServerError(
+            f"POST {_SYNC_PUSH_PATH} failed with HTTP {err.code}.{suffix}",
+            status_code=err.code,
+        ) from err
+    except (urllib.error.URLError, TimeoutError, OSError) as err:
+        reason = getattr(err, "reason", err)
+        raise SyncNetworkError(describe_unreachable(root, redact_secrets(str(reason)), verb="push")) from err
+    except ValueError as err:
+        raise SyncServerError(f"POST {_SYNC_PUSH_PATH} returned a body that is not JSON.") from err
 
 
 def push_workspace(
@@ -574,12 +721,22 @@ def push_workspace(
         remote_name=remote_name,
         show_payload=show_payload,
     )
+    n_studies = len(payload["studies"])
+    n_runs = len(payload["runs"])
+    n_ideas = len(payload["ideas"])
+    n_trial_events = len(payload["trial_events"])
+    batches = _split_push_batches(payload)
 
     if dry_run:
         return {
             "dry_run": True,
             "remote": remote_name,
-            "endpoint": endpoint,
+            "endpoint": scrub_sync_host(endpoint),
+            "n_studies": n_studies,
+            "n_runs": n_runs,
+            "n_ideas": n_ideas,
+            "n_trial_events": n_trial_events,
+            "batches": len(batches),
             "sync_contract": SYNC_CONTRACT_VERSION,
             "engine_version": payload["engine_version"],
             "preview": preview,
@@ -587,16 +744,14 @@ def push_workspace(
             "exit_code": EXIT_OK,
         }
 
-    from ..auth import FirmKeyError, redact_secrets, require_firm_key
+    from ..auth import FirmKeyError, require_firm_key
 
     try:
         key = require_firm_key(api_key)
     except FirmKeyError as exc:
         raise SyncAuthError(f"No API key. {exc}", exit_code=EXIT_AUTH_ERROR, status_code=401) from exc
 
-    submitted_total = (
-        len(payload["studies"]) + len(payload["runs"]) + len(payload["ideas"]) + len(payload["trial_events"])
-    )
+    submitted_total = n_studies + n_runs + n_ideas + n_trial_events
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -604,60 +759,68 @@ def push_workspace(
         "User-Agent": f"alphaengine/{current_engine_version()}",
         "X-AlphaEngine-Sync-Contract": str(SYNC_CONTRACT_VERSION),
     }
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(payload).encode("utf-8"),
-        headers=headers,
-        method="POST",
-    )
 
-    try:
-        with _open_sync(req, timeout) as resp:
-            raw_resp = json.loads(resp.read().decode("utf-8") or "{}")
-    except urllib.error.HTTPError as err:
-        detail, parsed_err = _extract_http_detail(err)
-        suffix = f" {detail}" if detail else ""
-        if err.code in (401, 403):
-            raise SyncAuthError(
-                f"Authentication/entitlement rejected ({err.code}).{suffix}",
-                status_code=err.code,
-            ) from err
-        if err.code in (409, 426) or (
-            isinstance(parsed_err.get("sync_contract"), int)
-            and parsed_err.get("sync_contract") != SYNC_CONTRACT_VERSION
-        ):
-            raise SyncContractMismatchError(
-                f"Sync contract mismatch ({err.code}): "
-                f"client uses sync_contract={SYNC_CONTRACT_VERSION}.{suffix}",
-                status_code=err.code,
-            ) from err
-        raise SyncServerError(
-            f"POST {_SYNC_PUSH_PATH} failed with HTTP {err.code}.{suffix}",
-            status_code=err.code,
-        ) from err
-    except (urllib.error.URLError, TimeoutError, OSError) as err:
-        reason = getattr(err, "reason", err)
-        raise SyncNetworkError(describe_unreachable(root, redact_secrets(str(reason)))) from err
+    all_acks: list[PushItemAck] = []
+    server_contract = SYNC_CONTRACT_VERSION
+    server_engine_version = "unknown"
 
-    if not isinstance(raw_resp, Mapping):
-        raise SyncServerError("Invalid non-object JSON response from /api/workspace/sync.")
+    for batch_index, batch_payload in enumerate(batches):
+        try:
+            raw_resp = _post_push_batch(
+                batch_payload, endpoint=endpoint, headers=headers, timeout=timeout, root=root
+            )
+        except SyncError as exc:
+            if batch_index > 0:
+                # Earlier batches already landed. The server is idempotent on
+                # run_id / attempt_id, so a rerun reports them as duplicate.
+                note = (
+                    f" ({batch_index} of {len(batches)} batches were sent before this failure; "
+                    "run push again to resume - already-sent items come back as duplicate.)"
+                )
+                raise type(exc)(
+                    str(exc) + note, exit_code=exc.exit_code, status_code=exc.status_code
+                ) from exc
+            raise
 
-    parsed = PushResponse.from_dict(raw_resp, submitted_count=submitted_total)
-    counts = parsed.counts
-    exit_code = parsed.exit_code
-    rejected_items = [it.to_dict() for it in parsed.items if it.status == "rejected"]
+        batch_submitted = (
+            len(batch_payload["studies"])
+            + len(batch_payload["runs"])
+            + len(batch_payload["ideas"])
+            + len(batch_payload["trial_events"])
+        )
+        if not isinstance(raw_resp, Mapping):
+            raise SyncServerError("Invalid non-object JSON response from /api/workspace/sync.")
+
+        parsed = PushResponse.from_dict(raw_resp, submitted_count=batch_submitted)
+        server_contract = parsed.sync_contract
+        server_engine_version = parsed.engine_version
+        all_acks.extend(parsed.items)
+
+    counts = {
+        "accepted": sum(1 for it in all_acks if it.status == "accepted"),
+        "duplicate": sum(1 for it in all_acks if it.status == "duplicate"),
+        "rejected": sum(1 for it in all_acks if it.status == "rejected"),
+    }
+    exit_code = compute_push_exit_code(all_acks, submitted_count=submitted_total)
+    rejected_items = [it.to_dict() for it in all_acks if it.status == "rejected"]
 
     return {
         "ok": exit_code == EXIT_OK,
         "remote": remote_name,
-        "endpoint": endpoint,
+        "endpoint": scrub_sync_host(endpoint),
         "path_used": _SYNC_PUSH_PATH,
-        "sync_contract": parsed.sync_contract,
-        "server_engine_version": parsed.engine_version,
+        "n_studies": n_studies,
+        "n_runs": n_runs,
+        "n_ideas": n_ideas,
+        "n_trial_events": n_trial_events,
+        "batches": len(batches),
+        "sync_contract": server_contract,
+        "server_engine_version": server_engine_version,
         "preview": preview,
-        "items": [it.to_dict() for it in parsed.items],
+        "items": [it.to_dict() for it in all_acks],
         "counts": counts,
         "rejected": rejected_items,
+        "rejected_items": rejected_items,
         "exit_code": exit_code,
     }
 
@@ -681,7 +844,7 @@ def pull_workspace(
     - Preserves `Optional[float] = None` metrics without inventing defaults (`QOS-165`).
     - Marks pulled items `read_only: True` (`QOS-168`).
     """
-    from ..auth import FirmKeyError, redact_secrets, require_firm_key
+    from ..auth import FirmKeyError, read_bounded_bytes, redact_secrets, require_firm_key
 
     try:
         key = require_firm_key(api_key)
@@ -713,7 +876,7 @@ def pull_workspace(
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:
             with _open_sync(req, timeout) as resp:
-                raw_page = json.loads(resp.read().decode("utf-8") or "{}")
+                raw_page = json.loads(read_bounded_bytes(resp).decode("utf-8") or "{}")
         except urllib.error.HTTPError as err:
             detail, parsed_err = _extract_http_detail(err)
             suffix = f" {detail}" if detail else ""
@@ -766,8 +929,15 @@ def pull_workspace(
     runs_mutated = False
 
     for r in fetched_runs:
-        rid = str(r.get("run_id") or "").strip()
-        if not rid:
+        raw_rid = str(r.get("run_id") or "").strip()
+        if not raw_rid:
+            run_counts["failed"] += 1
+            continue
+        try:
+            rid = validate_safe_id(raw_rid, "run_id")
+            raw_iid = str(r["idea_id"]).strip() if r.get("idea_id") else None
+            clean_iid = validate_safe_id(raw_iid, "idea_id") if raw_iid else None
+        except ValueError:
             run_counts["failed"] += 1
             continue
         raw_figs = dict(r.get("figures") or {}) if isinstance(r.get("figures"), Mapping) else {}
@@ -794,7 +964,7 @@ def pull_workspace(
             "run_id": rid,
             "timestamp": str(r.get("timestamp") or ""),
             "command": str(r.get("command") or "remote_run"),
-            "idea_id": str(r["idea_id"]) if r.get("idea_id") else None,
+            "idea_id": clean_iid,
             "family": str(r.get("family") or "remote"),
             "params": {},
             "params_hash": str(r.get("params_hash") or ""),

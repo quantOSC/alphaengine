@@ -383,12 +383,12 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | Command | Does | Boundary | Where |
 |---|---|---|---|
 | `init [--name NAME]` | initialize a local .alphaengine/ research project in this directory | `local` | shell + session |
-| `demo` | run the built-in example offline, with no account and no data | `local` | shell + session |
+| `demo [--json]` | run the built-in example offline, with no account and no data | `local` | shell + session |
 | `process [ou \| gbm \| jump \| garch]` | fit a named process to a series and stress it, offline | `local` | shell + session |
 | `runs [--limit N]` | your own week: what ran, what it decided, what it filed | `remote` | shell + session |
 | `log [--idea ID] [--family FAMILY] [--since DATE] [--verdict VERDICT]` | list local project ledger runs, trial counts, and verdicts | `local` | shell + session |
-| `show <run>` | inspect one recorded project run, its hashes, trials, and figures | `local` | shell + session |
-| `diff <run-a> <run-b>` | compare data, parameter, trial, and figure changes between two runs | `local` | shell + session |
+| `show <run> [--json]` | inspect one recorded project run, its hashes, trials, and figures | `local` | shell + session |
+| `diff <run-a> <run-b> [--json]` | compare data, parameter, trial, and figure changes between two runs | `local` | shell + session |
 | `gaps` | what your record says is UNANSWERED, and what closes each one | `remote` | shell + session |
 | `tonight [--budget N]` | what would run unattended tonight, without running any of it | `remote` | shell + session |
 | `workflows` | what the server offers, what each needs, and which reproduce | `remote` | shell + session |
@@ -415,7 +415,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `rerun <run> [--json]` | re-execute a local run and check hash, figure, and provenance parity | `local` | shell + session |
 | `watch <pipeline.yaml> [--interval SECONDS]` | re-run a declarative pipeline whenever a registered dataset file changes | `local` | shell + session |
 | `seal <study.json \| run \| idea>` | write canonical seal_version=2 content_sha256 into a study or run | `local` | shell + session |
-| `verify <study.json> [--data FILE] [--json]` | verify a study.json seal, figure reproduction, and manifest provenance | `local` | shell + session |
+| `verify <study.json> [--data FILE] [--allow-code] [--json]` | verify a study.json seal, figure reproduction, and manifest provenance | `local` | shell + session |
 | `report <study.json> \| memo <idea \| run> [--format md \| pdf]` | send a study to quantOS (/api/me/runs/ingest), or export a cited memo | `local/remote` | shell + session |
 | `<anything else>` | ask in plain English; your model picks a workflow and drives it | `local/remote` | session |
 | `status` | the current run, and what is loaded | `local` | session |
@@ -440,7 +440,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 
 | Command | Does | Boundary | Where |
 |---|---|---|---|
-| `remote add <name> [url] \| list` | configure or list remote sync endpoints in .alphaengine/project.toml | `local` | shell + session |
+| `remote add <name> [url] \| remove <name> \| list` | configure, remove, or list remote sync endpoints in .alphaengine/project.toml | `local` | shell + session |
 | `push [remote] [--dry-run] [--show-payload] [--yes] [--share-series]` | send this project's summaries to the firm workspace | `remote` | shell + session |
 | `pull [remote] [--since CURSOR] [--limit N]` | copy team run, idea, and study summaries into this project | `remote` | shell + session |
 | `whoami [--json]` | show credential source, masked prefix, keyring status, and remote URL | `local` | shell + session |
@@ -499,6 +499,7 @@ w = hrp_weights(cov, names=names)    # no matrix inverse; weights sum to one
 | `--interval SECONDS` | polling interval in seconds for watch (default 1.0) |
 | `--cycles N` | number of polling cycles for watch before exiting (0 means continuous) |
 | `--version` | print engine_version, sync_contract, and wheel_sha256 |
+| `--allow-code` | permit importing external user project modules during verify |
 
 ### Examples
 
@@ -553,6 +554,7 @@ alphaengine data list
 alphaengine data show equities
 alphaengine data lineage HEAD
 alphaengine remote add quantos
+alphaengine remote remove quantos
 alphaengine remote list
 alphaengine push --dry-run
 alphaengine push --dry-run --show-payload

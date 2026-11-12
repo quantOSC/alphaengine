@@ -208,6 +208,11 @@ FLAGS: dict[str, Flag] = {
         "",
         "print engine_version, sync_contract, and wheel_sha256",
     ),
+    "allow_code": Flag(
+        "--allow-code",
+        "",
+        "permit importing external user project modules during verify",
+    ),
 }
 
 
@@ -329,9 +334,10 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="demo",
         group="start",
-        args="",
+        args="[--json]",
         scope="both",
         locality="local",
+        supports_json=True,
         purpose="run the built-in example offline, with no account and no data",
         body=(
             "The fastest way to see the whole offline half work. A fixed seed, so it "
@@ -343,6 +349,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "failing, a tool that only ever agrees with you is not a referee."
         ),
         examples=("alphaengine demo",),
+        flags=("json", "idea", "family"),
     ),
     Command(
         verb="process",
@@ -389,6 +396,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         args="[--idea ID] [--family FAMILY] [--since DATE] [--verdict VERDICT]",
         scope="both",
         locality="local",
+        supports_json=True,
         purpose="list local project ledger runs, trial counts, and verdicts",
         body=(
             "Reads `.alphaengine/ledger/runs.jsonl` and prints recorded runs newest "
@@ -399,14 +407,15 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "alphaengine log",
             "alphaengine log --family momentum --verdict likely_noise",
         ),
-        flags=("idea", "family", "since", "verdict", "limit"),
+        flags=("idea", "family", "since", "verdict", "limit", "json"),
     ),
     Command(
         verb="show",
         group="start",
-        args="<run>",
+        args="<run> [--json]",
         scope="both",
         locality="local",
+        supports_json=True,
         purpose="inspect one recorded project run, its hashes, trials, and figures",
         body=(
             "Prints the full ledger record for `<run>` (exact run id, prefix, or "
@@ -414,13 +423,15 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "single-run and cumulative trial counts, figures, and verdict."
         ),
         examples=("alphaengine show HEAD",),
+        flags=("json",),
     ),
     Command(
         verb="diff",
         group="start",
-        args="<run-a> <run-b>",
+        args="<run-a> <run-b> [--json]",
         scope="both",
         locality="local",
+        supports_json=True,
         purpose="compare data, parameter, trial, and figure changes between two runs",
         body=(
             "Compares two runs from the project ledger side by side: dataset hash "
@@ -428,6 +439,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "deltas."
         ),
         examples=("alphaengine diff run_a run_b",),
+        flags=("json",),
     ),
     Command(
         verb="gaps",
@@ -611,7 +623,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="verify",
         group="run",
-        args="<study.json> [--data FILE] [--json]",
+        args="<study.json> [--data FILE] [--allow-code] [--json]",
         scope="both",
         locality="local",
         supports_json=True,
@@ -626,7 +638,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "alphaengine verify study.json",
             "alphaengine verify study.json --data prices.csv",
         ),
-        flags=("data", "json"),
+        flags=("data", "allow_code", "json"),
     ),
     Command(
         verb="report",
@@ -845,6 +857,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
         args="add <file> [--name NAME] [--asof-col COL] | list | show <name> | lineage <run>",
         scope="both",
         locality="local",
+        supports_json=True,
         purpose="register, inspect, and trace local CSV/Parquet datasets",
         body=(
             "Manages the local `.alphaengine/data/` dataset registry, storing the "
@@ -856,7 +869,7 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
             "alphaengine data show equities",
             "alphaengine data lineage HEAD",
         ),
-        flags=("name", "asof_col"),
+        flags=("name", "asof_col", "json"),
     ),
     Command(
         verb="project",
@@ -875,16 +888,18 @@ COMMANDS: tuple[Command, ...] = _question_commands() + (
     Command(
         verb="remote",
         group="session",
-        args="add <name> [url] | list",
+        args="add <name> [url] | remove <name> | list",
         scope="both",
         locality="local",
-        purpose="configure or list remote sync endpoints in .alphaengine/project.toml",
+        purpose="configure, remove, or list remote sync endpoints in .alphaengine/project.toml",
         body=(
-            "Registers a clean named remote in `.alphaengine/project.toml` (`remote add quantos [url]`). "
+            "Registers or removes a clean named remote in `.alphaengine/project.toml` "
+            "(`remote add quantos [url]`, `remote remove quantos`). "
             "Rejects URLs containing embedded credentials or query secrets."
         ),
         examples=(
             "alphaengine remote add quantos",
+            "alphaengine remote remove quantos",
             "alphaengine remote list",
         ),
         flags=("url",),
@@ -1094,7 +1109,7 @@ def slash_entries() -> tuple[tuple[str, str, str], ...]:
     """Rows for the session `/` picker: verb, access word, one-line purpose."""
     pool: dict[str, tuple[str, str, str]] = {}
     for command in COMMANDS:
-        if command.scope == "cli":
+        if command.scope == "cli" or command.verb == "<anything else>":
             continue
         pool[command.verb] = (command.verb, access_word(command.locality), command.purpose)
     ordered: list[tuple[str, str, str]] = []
@@ -1103,7 +1118,7 @@ def slash_entries() -> tuple[tuple[str, str, str], ...]:
         if row is not None:
             ordered.append(row)
     ordered.extend(pool.values())
-    ordered.append(("view", "free", "the books on this account"))
+    ordered.append(("view", "firm", "the books on this account"))
     ordered.append(("details", "free", "version and what stays on this machine"))
     return tuple(ordered)
 

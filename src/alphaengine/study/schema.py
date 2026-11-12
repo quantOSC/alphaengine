@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import numbers
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -53,18 +54,46 @@ __all__ = [
 ]
 
 
+def _unwrap_scalar_or_array(node: Any) -> Any:
+    """Unwrap NumPy scalars and arrays to native Python primitives without importing numpy."""
+    if hasattr(node, "dtype") and hasattr(node, "tolist") and callable(node.tolist):
+        return node.tolist()
+    return node
+
+
+def _sanitize_study_json(node: Any) -> Any:
+    """Convert non-finite floats to None and unwrap NumPy scalars/arrays for RFC 8259 JSON."""
+    node = _unwrap_scalar_or_array(node)
+    if isinstance(node, Mapping):
+        return {str(k): _sanitize_study_json(node[k]) for k in node}
+    if isinstance(node, (list, tuple)):
+        return [_sanitize_study_json(v) for v in node]
+    if isinstance(node, bool) or node is None or isinstance(node, (int, str)):
+        return node
+    if isinstance(node, numbers.Integral):
+        return int(node)
+    if isinstance(node, (float, numbers.Real)):
+        fval = float(node)
+        return fval if math.isfinite(fval) else None
+    return node
+
+
 def _normalize_canonical(node: Any) -> Any:
     """Normalize nested values with sorted keys and fixed 8-decimal float formatting for hashing."""
-    if isinstance(node, dict):
+    node = _unwrap_scalar_or_array(node)
+    if isinstance(node, Mapping):
         return {str(k): _normalize_canonical(node[k]) for k in sorted(node.keys(), key=str)}
     if isinstance(node, (list, tuple)):
         return [_normalize_canonical(v) for v in node]
     if isinstance(node, bool) or node is None or isinstance(node, (int, str)):
         return node
-    if isinstance(node, float):
-        if not math.isfinite(node):
+    if isinstance(node, numbers.Integral):
+        return int(node)
+    if isinstance(node, (float, numbers.Real)):
+        fval = float(node)
+        if not math.isfinite(fval):
             return None
-        val = 0.0 if node == 0.0 else node
+        val = 0.0 if fval == 0.0 else fval
         return f"{val:.8f}"
     return str(node)
 
@@ -105,11 +134,7 @@ def sealed_study_projection(study: Study | Mapping[str, Any]) -> dict[str, Any]:
     """
     src: Mapping[str, Any] = study.to_dict() if isinstance(study, Study) else study
     raw_ledger = src.get("trial_ledger")
-    bounded_ledger = (
-        list(raw_ledger)[:_MAX_TRIAL_LEDGER]
-        if isinstance(raw_ledger, list) and len(raw_ledger) <= _MAX_TRIAL_LEDGER
-        else None
-    )
+    bounded_ledger = list(raw_ledger)[:_MAX_TRIAL_LEDGER] if isinstance(raw_ledger, list) else None
     dsr_prob = src.get("dsr_probability")
     def_sr = src.get("deflated_sharpe")
     if dsr_prob is None and isinstance(def_sr, (int, float)) and not isinstance(def_sr, bool):
@@ -117,9 +142,9 @@ def sealed_study_projection(study: Study | Mapping[str, Any]) -> dict[str, Any]:
     if def_sr is None and isinstance(dsr_prob, (int, float)) and not isinstance(dsr_prob, bool):
         def_sr = float(dsr_prob)
 
-    return {
+    proj = {
         "schema_version": str(src.get("schema_version") or SCHEMA_VERSION),
-        "seal_version": int(src.get("seal_version") or SEAL_VERSION),
+        "seal_version": SEAL_VERSION,
         "engine_version": str(src.get("engine_version") or current_engine_version()),
         "created_at": str(src.get("created_at") or ""),
         "label": str(src.get("label") or ""),
@@ -131,8 +156,8 @@ def sealed_study_projection(study: Study | Mapping[str, Any]) -> dict[str, Any]:
         "data_description": str(src.get("data_description") or ""),
         "verdict": src.get("verdict"),
         "dsr_probability": dsr_prob,
-        "deflated_sharpe": def_sr,
         "deflation_applied": src.get("deflation_applied"),
+        "deflated_sharpe": def_sr,
         "psr_vs_zero": src.get("psr_vs_zero"),
         "sr0_expected_max": src.get("sr0_expected_max"),
         "min_track_record_length": src.get("min_track_record_length"),
@@ -147,6 +172,8 @@ def sealed_study_projection(study: Study | Mapping[str, Any]) -> dict[str, Any]:
         "assignment_id": src.get("assignment_id"),
         "thesis_id": src.get("thesis_id"),
     }
+    res: dict[str, Any] = _sanitize_study_json(proj)
+    return res
 
 
 def canonical_json(study: Study | dict[str, Any] | Any) -> str:
@@ -177,9 +204,12 @@ def _legacy_v1_dict(study: Study | Mapping[str, Any]) -> dict[str, Any]:
     raw.pop("content_sha256", None)
     if "seal_version" not in study.__dict__ if isinstance(study, Study) else "seal_version" not in study:
         raw.pop("seal_version", None)
-    # Strip 2.0-only optional fields when absent in a 1.x file
+    # Strip 2.0-only optional fields when absent in a 1.x file or Study(seal_version=1)
+    is_legacy_study = isinstance(study, Study) and int(getattr(study, "seal_version", SEAL_VERSION) or 1) < 2
     for v2_key in ("seal_version", "dsr_probability", "deflation_applied", "manifest"):
-        if isinstance(study, Mapping) and v2_key not in study:
+        if (isinstance(study, Mapping) and v2_key not in study) or (
+            is_legacy_study and (v2_key == "seal_version" or raw.get(v2_key) is None)
+        ):
             raw.pop(v2_key, None)
     return raw
 
@@ -358,7 +388,11 @@ class Study:
     ) -> Study:
         """Build and seal a Study from a `SweepResult`."""
         v = result.verdict(risk_free_rate=risk_free_rate)
-        ledger = result.ledger() if (include_ledger and hasattr(result, "ledger")) else None
+        ledger = (
+            list(result.ledger())[:_MAX_TRIAL_LEDGER]
+            if (include_ledger and hasattr(result, "ledger"))
+            else None
+        )
         study = cls(
             label=label,
             n_trials=v["n_trials"],
@@ -393,7 +427,11 @@ def save(study: Study, path: str | Path) -> Path:
         study.seal()
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(study.to_dict(), indent=2, default=str), encoding="utf8")
+    sanitized = _sanitize_study_json(study.to_dict())
+    p.write_text(
+        json.dumps(sanitized, indent=2, default=str, allow_nan=False),
+        encoding="utf8",
+    )
     return p
 
 

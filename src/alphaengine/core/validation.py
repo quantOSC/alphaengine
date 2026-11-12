@@ -92,15 +92,24 @@ def trials_for_deflated_sharpe(
         if ledger_runs >= 1:
             ledger_floor = int(ledger_runs)
     elif isinstance(ledger_runs, Sequence):
+        # Project ledger rows carry BOTH `run_n_trials` (this run's attempts) and
+        # `n_trials` (the cumulative count at the time). Summing the cumulative
+        # field across rows counted early attempts once per later run.
         counted = 0
+        seen_ids: set[str] = set()
         for row in ledger_runs:
             if not isinstance(row, Mapping):
                 counted += 1
                 continue
+            rid = str(row.get("run_id") or "").strip()
+            if rid:
+                if rid in seen_ids:
+                    continue
+                seen_ids.add(rid)
             src = str(row.get("n_trials_source") or "")
-            if src == "monte_carlo":
+            if src in ("monte_carlo", "derived_from_universe"):
                 continue
-            raw_nt = row.get("n_trials")
+            raw_nt = row.get("run_n_trials") if row.get("run_n_trials") is not None else row.get("n_trials")
             if isinstance(raw_nt, (int, float)) and not isinstance(raw_nt, bool) and int(raw_nt) >= 1:
                 counted += int(raw_nt)
             else:

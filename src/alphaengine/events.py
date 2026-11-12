@@ -18,6 +18,7 @@ A 404 MUST NOT FAIL A RUN
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -121,6 +122,33 @@ def _is_int(value: Any) -> bool:
     return True
 
 
+def _safe_log_name(run_id: Any) -> str:
+    """A run id as a file stem that cannot leave `runs/` (a server-chosen id is untrusted)."""
+    import re
+
+    text = str(run_id or "").strip()
+    if not text:
+        return "session"
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._\-]{0,127}", text) and ".." not in text:
+        return text
+    slug = re.sub(r"[^A-Za-z0-9._\-]+", "_", text).strip("._-")[:96]
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{slug or 'run'}_{digest}"
+
+
+def _finite(value: Any) -> Any:
+    """NaN/Inf have no JSON spelling; write them as null rather than a non-standard token."""
+    import math
+
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
+
+
 def make_event(
     kind: str,
     *,
@@ -130,8 +158,9 @@ def make_event(
     **fields: Any,
 ) -> dict[str, Any]:
     if kind not in _KINDS:
+        bad_kind = str(kind)[:64]
         kind = "error"
-        fields = {**fields, "error": f"unknown event kind was coerced: {kind}"}
+        fields = {**fields, "error": f"unknown event kind was coerced: {bad_kind}"}
     raw: dict[str, Any] = {
         "event_id": uuid.uuid4().hex,
         "t": time.time(),
@@ -155,11 +184,11 @@ class EventSink:
         self.session = session
         self.run_id = run_id
         self._portal_ok = True
-        self.path = data_dir() / "runs" / f"{run_id or 'session'}.jsonl"
+        self.path = data_dir() / "runs" / f"{_safe_log_name(run_id)}.jsonl"
 
     def bind(self, run_id: str) -> None:
         self.run_id = run_id
-        self.path = data_dir() / "runs" / f"{run_id}.jsonl"
+        self.path = data_dir() / "runs" / f"{_safe_log_name(run_id)}.jsonl"
 
     def emit(self, event: dict[str, Any]) -> dict[str, Any]:
         payload = allowlist({**event, "run_id": event.get("run_id") or self.run_id})
@@ -171,9 +200,10 @@ class EventSink:
     def _write(self, payload: dict[str, Any]) -> None:
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            line = json.dumps(_finite(payload), default=str, allow_nan=False)
             with self.path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(payload, default=str) + "\n")
-        except OSError as exc:  # pragma: no cover - disk full / perms
+                fh.write(line + "\n")
+        except (OSError, ValueError) as exc:  # pragma: no cover - disk full / perms
             logger.debug("could not write event log: %s", exc)
 
     def _post(self, payload: dict[str, Any]) -> None:

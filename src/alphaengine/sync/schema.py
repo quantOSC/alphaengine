@@ -42,12 +42,14 @@ STRUCTURED CLI EXIT CODES (`QOS-167`)
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from .._version import SYNC_CONTRACT_VERSION, current_engine_version
 from ..core.conventions import normalize_verdict
+from ..project import validate_safe_id
 from ..study.report import MAX_FIGURE_LIST, ReportError
 from ..study.schema import SEAL_VERSION, Study, sealed_study_projection, verify_study_mode
 
@@ -104,6 +106,10 @@ _FORBIDDEN_WIRE_KEYS = frozenset(
         "raw_rows",
         "dataset_rows",
         "prices",
+        "closes",
+        "equity_curve",
+        "weights_path",
+        "best_params",
         "matrix",
         "repro_spec",
         "cumulative_trials",
@@ -111,6 +117,7 @@ _FORBIDDEN_WIRE_KEYS = frozenset(
         "kill_if",
     }
 )
+_HEX64_RE_WIRE = re.compile(r"^[0-9a-fA-F]{64}$")
 
 _VALID_ITEM_TYPES = frozenset({"study", "run", "idea", "trial_event"})
 _VALID_ACK_STATUSES = frozenset({"accepted", "duplicate", "rejected"})
@@ -215,7 +222,7 @@ def _check_no_unshared_series(node: Any, *, share_series: bool, path: str) -> No
     if isinstance(node, Mapping):
         for k, v in node.items():
             key_str = str(k)
-            if key_str in _FORBIDDEN_WIRE_KEYS:
+            if key_str.lower() in _FORBIDDEN_WIRE_KEYS:
                 raise SyncValidationError(f"Forbidden field {path}.{key_str} is not permitted in sync v2.")
             _check_no_unshared_series(v, share_series=share_series, path=f"{path}.{key_str}")
     elif isinstance(node, (list, tuple)):
@@ -262,10 +269,11 @@ class SealedStudyWire:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> SealedStudyWire:
         sha = str(raw.get("content_sha256") or "").strip()
-        if len(sha) != 64:
+        if not _HEX64_RE_WIRE.fullmatch(sha):
             raise SyncValidationError("SealedStudyWire requires a 64-hex content_sha256.")
+        sha = sha.lower()
         sv = int(raw.get("seal_version") or SEAL_VERSION)
-        st = Study.from_dict(dict(raw))
+        st = Study.from_dict({**dict(raw), "content_sha256": sha})
         mode = verify_study_mode(st)
         if mode is None:
             raise SyncValidationError("SealedStudyWire failed content_sha256 verification.")
@@ -299,6 +307,12 @@ class SyncRunPayload:
     def validate(self) -> SyncRunPayload:
         if not self.run_id or not str(self.run_id).strip():
             raise SyncValidationError("SyncRunPayload.run_id must be non-empty.")
+        try:
+            self.run_id = validate_safe_id(str(self.run_id), "run_id")
+            if self.idea_id is not None and str(self.idea_id).strip():
+                self.idea_id = validate_safe_id(str(self.idea_id), "idea_id")
+        except ValueError as exc:
+            raise SyncValidationError(str(exc)) from exc
         if not self.command or not str(self.command).strip():
             raise SyncValidationError(f"SyncRunPayload({self.run_id}).command must be non-empty.")
         if not isinstance(self.share_series, bool):
@@ -423,6 +437,10 @@ class SyncIdeaPayload:
     def validate(self) -> SyncIdeaPayload:
         if not self.idea_id or not str(self.idea_id).strip():
             raise SyncValidationError("SyncIdeaPayload.idea_id must be non-empty.")
+        try:
+            self.idea_id = validate_safe_id(str(self.idea_id), "idea_id")
+        except ValueError as exc:
+            raise SyncValidationError(str(exc)) from exc
         if not self.thesis or not str(self.thesis).strip():
             raise SyncValidationError(f"SyncIdeaPayload({self.idea_id}).thesis must be non-empty.")
         return self
@@ -489,6 +507,13 @@ class SyncTrialEventPayload:
             raise SyncValidationError("SyncTrialEventPayload.attempt_id must be non-empty.")
         if not self.run_id or not str(self.run_id).strip():
             raise SyncValidationError(f"SyncTrialEventPayload({self.attempt_id}).run_id must be non-empty.")
+        try:
+            self.attempt_id = validate_safe_id(str(self.attempt_id), "attempt_id")
+            self.run_id = validate_safe_id(str(self.run_id), "run_id")
+            if self.idea_id is not None and str(self.idea_id).strip():
+                self.idea_id = validate_safe_id(str(self.idea_id), "idea_id")
+        except ValueError as exc:
+            raise SyncValidationError(str(exc)) from exc
         if not self.family or not str(self.family).strip():
             raise SyncValidationError(f"SyncTrialEventPayload({self.attempt_id}).family must be non-empty.")
         if self.status not in _VALID_TRIAL_STATUSES:
@@ -634,11 +659,23 @@ class PushItemAck:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> PushItemAck:
+        local_id = str(raw.get("local_id") or raw.get("id") or "").strip()
+        raw_reason = raw.get("reason")
+        code = str(raw["code"]).strip() if raw.get("code") else ""
+        detail = str(raw["detail"]).strip() if raw.get("detail") else ""
+        if raw_reason:
+            reason: str | None = str(raw_reason).strip()
+        elif code and detail:
+            reason = f"{code}: {detail}"
+        elif detail or code:
+            reason = detail or code
+        else:
+            reason = None
         return cls(
             type=str(raw.get("type") or "").strip(),
-            local_id=str(raw.get("local_id") or "").strip(),
+            local_id=local_id,
             status=str(raw.get("status") or "").strip(),
-            reason=str(raw["reason"]) if raw.get("reason") else None,
+            reason=reason,
             server_id=str(raw["server_id"]) if raw.get("server_id") else None,
         ).validate()
 

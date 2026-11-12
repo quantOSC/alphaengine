@@ -37,20 +37,29 @@ import os
 import re
 import stat
 import threading
+import urllib.error
 import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
+_STDLIB_URLOPEN = urllib.request.urlopen
+MAX_HTTP_RESPONSE_BYTES = 16 * 1024 * 1024
+
 __all__ = [
     "FIRM_KEY_ERROR_MESSAGE",
+    "MAX_HTTP_RESPONSE_BYTES",
     "PLAINTEXT_FILE_DISCLOSURE",
     "KEY_FLAG_WARNING",
     "FirmKeyError",
     "MANAGED",
     "config_path",
+    "is_loopback_host",
     "keyring_available",
     "has_legacy_file_credentials",
     "migrate_file_to_keyring",
+    "read_bounded_bytes",
+    "safe_urlopen",
     "validate_clean_url",
     "mask_secret_prefix",
     "credential_status",
@@ -83,7 +92,30 @@ _KEYRING_SERVICE = "alphaengine"
 _ALLOW_KEYRING_IN_TEST = False
 
 #: Pattern matching `ae_live_*` and common provider keys so they never leak in logs/errors/JSON.
-_SECRET_RE = re.compile(r"\b(ae_live_[A-Za-z0-9_\-]{3,}|sk-ant-[A-Za-z0-9_\-]{6,}|sk-[A-Za-z0-9_\-]{12,})")
+_SECRET_RE = re.compile(
+    r"\b("
+    r"ae_(?:live|test)_[A-Za-z0-9_\-]{3,}"
+    r"|sk-ant-[A-Za-z0-9_\-]{6,}"
+    r"|sk-[A-Za-z0-9_\-]{12,}"
+    r"|AIza[A-Za-z0-9_\-]{20,}"
+    r"|gsk_[A-Za-z0-9_\-]{16,}"
+    r")"
+)
+_BEARER_RE = re.compile(r"(?i)\bBearer\s+([A-Za-z0-9._\-+/=]{8,})")
+
+_SECRET_ENV_NAMES = frozenset(
+    {
+        "QUANTOS_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "OPENROUTER_API_KEY",
+        "AZURE_OPENAI_API_KEY",
+        "ALPHAENGINE_API_KEY",
+    }
+)
 
 _SECRET_QUERY_PARAMS = frozenset(
     {
@@ -130,7 +162,7 @@ _APPLIED_ENV_SOURCES: dict[str, tuple[str, str]] = {}
 
 
 def redact_secrets(text: str) -> str:
-    """Redact any `ae_live_*` or provider API key from `text`."""
+    """Redact any `ae_live_*`, `Bearer`, or provider API key from `text`."""
     if not text:
         return text
 
@@ -138,9 +170,18 @@ def redact_secrets(text: str) -> str:
         tok = match.group(1)
         if tok.startswith("ae_live_"):
             return "ae_live_[REDACTED]"
+        if tok.startswith("ae_test_"):
+            return "ae_test_[REDACTED]"
         return "[REDACTED_KEY]"
 
-    return _SECRET_RE.sub(_mask, text)
+    out = _SECRET_RE.sub(_mask, text)
+    out = _BEARER_RE.sub("Bearer [REDACTED_KEY]", out)
+    for env_key in _SECRET_ENV_NAMES:
+        secret_val = (os.environ.get(env_key) or "").strip()
+        if len(secret_val) >= 8 and secret_val in out:
+            replacement = "ae_live_[REDACTED]" if secret_val.startswith("ae_live_") else "[REDACTED_KEY]"
+            out = out.replace(secret_val, replacement)
+    return out
 
 
 def mask_secret_prefix(value: str | None) -> str | None:
@@ -148,46 +189,135 @@ def mask_secret_prefix(value: str | None) -> str | None:
     cleaned = (value or "").strip()
     if not cleaned:
         return None
-    if cleaned.startswith("ae_live_"):
-        tail = cleaned[len("ae_live_") :]
-        hint = tail[:2] if len(tail) >= 4 else ""
-        return f"ae_live_{hint}…****" if hint else "ae_live_****"
-    if cleaned.startswith("sk-ant-"):
-        tail = cleaned[len("sk-ant-") :]
-        hint = tail[:2] if len(tail) >= 4 else ""
-        return f"sk-ant-{hint}…****" if hint else "sk-ant-****"
-    if cleaned.startswith("sk-"):
-        tail = cleaned[len("sk-") :]
-        hint = tail[:2] if len(tail) >= 4 else ""
-        return f"sk-{hint}…****" if hint else "sk-****"
+    for prefix in ("ae_live_", "ae_test_", "sk-ant-", "sk-", "gsk_", "AIza"):
+        if cleaned.startswith(prefix):
+            tail = cleaned[len(prefix) :]
+            hint = tail[:2] if len(tail) >= 4 else ""
+            return f"{prefix}{hint}…****" if hint else f"{prefix}****"
     return "****"
 
 
-def validate_clean_url(url: str) -> str:
-    """Reject remote/API URLs carrying embedded userinfo or secret query/path tokens (`QOS-155`)."""
+def is_loopback_host(hostname: str | None) -> bool:
+    """True when `hostname` refers to the local loopback interface."""
+    clean = (hostname or "").strip().lower().strip("[]")
+    return clean in ("localhost", "127.0.0.1", "::1")
+
+
+def validate_clean_url(url: str, *, require_https_remote: bool = False) -> str:
+    """Reject remote/API URLs carrying control chars, embedded userinfo, or secret tokens (`QOS-155`)."""
     raw = (url or "").strip()
     if not raw:
         raise ValueError("Remote URL must be non-empty.")
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in raw):
+        raise ValueError("Invalid URL: whitespace and control characters are not permitted.")
     parsed = urllib.parse.urlsplit(raw)
-    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc or not parsed.hostname:
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https") or not parsed.netloc or not parsed.hostname:
         raise ValueError(f"Invalid URL {redact_secrets(raw)!r}: expected http:// or https:// host.")
+    if require_https_remote and scheme != "https" and not is_loopback_host(parsed.hostname):
+        raise ValueError(
+            f"Refusing insecure cleartext URL {redact_secrets(raw)!r}: "
+            "non-loopback remote endpoints must use https://."
+        )
     if parsed.username or parsed.password or "@" in parsed.netloc:
         raise ValueError(
             "Refusing URL with embedded credentials (user:pass@host). "
             "Store API keys via `alphaengine login` or `QUANTOS_API_KEY`."
         )
-    if _SECRET_RE.search(raw):
+    if _SECRET_RE.search(raw) or _BEARER_RE.search(raw):
         raise ValueError(
             "Refusing URL containing an inline API key token. "
             "Never embed `ae_live_*` or provider keys in URLs."
         )
-    for k, v in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-        if k.strip().lower() in _SECRET_QUERY_PARAMS or _SECRET_RE.search(v):
-            raise ValueError(
-                f"Refusing URL with credential query parameter {k!r}. "
-                "Pass credentials via Authorization header (`alphaengine login` or `QUANTOS_API_KEY`)."
-            )
+    for query_part in (parsed.query, parsed.fragment):
+        for k, v in urllib.parse.parse_qsl(query_part, keep_blank_values=True):
+            if k.strip().lower() in _SECRET_QUERY_PARAMS or _SECRET_RE.search(v):
+                raise ValueError(
+                    f"Refusing URL with credential parameter {k!r}. "
+                    "Pass credentials via Authorization header (`alphaengine login` or `QUANTOS_API_KEY`)."
+                )
     return raw
+
+
+class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Prevent credential leakage across origins or HTTPS->HTTP downgrades on HTTP redirects."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        old_u = urllib.parse.urlsplit(req.full_url)
+        new_u = urllib.parse.urlsplit(urllib.parse.urljoin(req.full_url, newurl))
+        old_scheme = old_u.scheme.lower()
+        new_scheme = new_u.scheme.lower()
+        if new_scheme not in ("http", "https") or not new_u.hostname:
+            raise urllib.error.URLError(f"Refusing redirect to unsupported scheme: {new_scheme or 'unknown'}")
+        if old_scheme == "https" and new_scheme != "https":
+            raise urllib.error.URLError("Refusing insecure HTTPS to HTTP redirect.")
+        if new_scheme == "http" and not is_loopback_host(new_u.hostname):
+            raise urllib.error.URLError("Refusing cleartext HTTP redirect to non-loopback host.")
+
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is None:
+            return None
+
+        old_origin = (
+            old_scheme,
+            (old_u.hostname or "").lower(),
+            old_u.port or (443 if old_scheme == "https" else 80),
+        )
+        new_origin = (
+            new_scheme,
+            (new_u.hostname or "").lower(),
+            new_u.port or (443 if new_scheme == "https" else 80),
+        )
+        if new_origin != old_origin:
+            for hdr_dict in (new_req.headers, new_req.unredirected_hdrs):
+                drop = [
+                    hk
+                    for hk in list(hdr_dict.keys())
+                    if hk.lower() in ("authorization", "proxy-authorization", "cookie")
+                ]
+                for hk in drop:
+                    hdr_dict.pop(hk, None)
+        return new_req
+
+
+_SAFE_OPENER: urllib.request.OpenerDirector | None = None
+
+
+def _is_stdlib_urlopen(fn: Any) -> bool:
+    return (
+        getattr(fn, "__module__", None) == "urllib.request" and getattr(fn, "__qualname__", None) == "urlopen"
+    )
+
+
+def safe_urlopen(req: urllib.request.Request | str, *, timeout: float | int = 30) -> Any:
+    """Open `req` with cross-origin Authorization stripping unless `urllib.request.urlopen` is mocked."""
+    global _SAFE_OPENER
+    current = urllib.request.urlopen
+    if not _is_stdlib_urlopen(current):
+        return current(req, timeout=timeout)
+    if _SAFE_OPENER is None:
+        _SAFE_OPENER = urllib.request.build_opener(_SafeRedirectHandler())
+    return _SAFE_OPENER.open(req, timeout=timeout)
+
+
+def read_bounded_bytes(resp: Any, *, max_bytes: int = MAX_HTTP_RESPONSE_BYTES) -> bytes:
+    """Read at most `max_bytes` from an HTTP response stream, refusing oversized bodies."""
+    try:
+        raw = resp.read(max_bytes + 1)
+    except TypeError:
+        raw = resp.read()
+    data = bytes(raw) if not isinstance(raw, bytes) else raw
+    if len(data) > max_bytes:
+        raise ValueError(f"HTTP response body exceeded {max_bytes} byte safety limit.")
+    return data
 
 
 _KEYRING: Any = None
@@ -276,11 +406,19 @@ def _keyring_set(name: str, value: str) -> bool:
     kr = _keyring_module()
     if kr is None:
         return False
-    try:
-        kr.set_password(_KEYRING_SERVICE, name, value)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
+    box: dict[str, Any] = {}
+
+    def _write() -> None:
+        try:
+            kr.set_password(_KEYRING_SERVICE, name, value)
+            box["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            box["err"] = exc
+
+    worker = threading.Thread(target=_write, name="ae-keyring-set", daemon=True)
+    worker.start()
+    worker.join(_KEYRING_WAIT_S)
+    return bool(not worker.is_alive() and box.get("ok") is True)
 
 
 def _keyring_delete(name: str) -> bool:
@@ -290,11 +428,21 @@ def _keyring_delete(name: str) -> bool:
     if kr is None:
         return False
     had_existing = _keyring_get(name) is not None
-    try:
-        kr.delete_password(_KEYRING_SERVICE, name)
-        return had_existing
-    except Exception:  # noqa: BLE001
+    box: dict[str, Any] = {}
+
+    def _delete() -> None:
+        try:
+            kr.delete_password(_KEYRING_SERVICE, name)
+            box["ok"] = True
+        except Exception as exc:  # noqa: BLE001
+            box["err"] = exc
+
+    worker = threading.Thread(target=_delete, name="ae-keyring-del", daemon=True)
+    worker.start()
+    worker.join(_KEYRING_WAIT_S)
+    if worker.is_alive() or "err" in box:
         return False
+    return had_existing
 
 
 def config_path() -> Path:
@@ -318,7 +466,10 @@ def _load_file_stored() -> dict[str, str]:
 
 
 def _write_mode_0600_json(path: Path, data: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name != "nt":
+        with contextlib.suppress(OSError):
+            os.chmod(path.parent, 0o700)
     tmp = path.with_suffix(".tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
     try:
@@ -328,6 +479,9 @@ def _write_mode_0600_json(path: Path, data: dict[str, str]) -> None:
         tmp.unlink(missing_ok=True)
         raise
     os.replace(tmp, path)
+    if os.name != "nt":
+        with contextlib.suppress(OSError):
+            os.chmod(path, 0o600)
 
 
 def has_legacy_file_credentials() -> bool:

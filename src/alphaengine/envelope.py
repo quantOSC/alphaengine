@@ -95,11 +95,37 @@ def read_stdin_envelope(stream: Any = None) -> dict[str, Any]:
     return parsed
 
 
+def _json_safe(value: Any) -> Any:
+    """NumPy scalars/arrays to plain JSON values; NaN/Inf to null (strict JSON consumers choke on them)."""
+    import math
+
+    try:
+        import numpy as np
+    except ImportError:  # pragma: no cover - numpy is a hard dependency
+        np = None  # type: ignore[assignment]
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    if np is not None:
+        if isinstance(value, np.ndarray):
+            return _json_safe(value.tolist())
+        if isinstance(value, np.bool_):
+            return bool(value)
+        if isinstance(value, np.integer):
+            return int(value)
+        if isinstance(value, np.floating):
+            value = float(value)
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 def emit_json(envelope: dict[str, Any]) -> None:
     """Print the JSON result envelope to stdout, redacting any secret tokens."""
     from .auth import redact_secrets
 
-    text = json.dumps(envelope, indent=2, sort_keys=True, default=str)
+    text = json.dumps(_json_safe(envelope), indent=2, sort_keys=True, default=str, allow_nan=False)
     sys.stdout.write(redact_secrets(text) + "\n")
     sys.stdout.flush()
 

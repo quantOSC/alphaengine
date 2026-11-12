@@ -112,7 +112,7 @@ def test_sync_v2_payload_schema_share_series_and_json_schema_export(
     # Default `share_series=False`: series (>512) stripped, forbidden v1 keys absent!
     payload_no_series = build_sync_payload(proj, share_series=False)
     assert payload_no_series["sync_contract"] == SYNC_CONTRACT_VERSION == 2
-    assert payload_no_series["engine_version"] == "2.0.3"
+    assert payload_no_series["engine_version"] == "2.0.4"
     assert len(payload_no_series["studies"]) == 1
     assert len(payload_no_series["runs"]) == 1
     assert len(payload_no_series["ideas"]) == 1
@@ -390,3 +390,139 @@ def test_remote_add_without_url_replaces_a_portal_host(
     custom = remote_add(proj, "quantos", "https://api.quantos.example")
     assert custom == "https://api.quantos.example"
     assert resolve_remote_url(proj, "quantos") == custom
+
+
+def test_push_workspace_multi_batch_chunking_html_500_and_redirect_safety(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from alphaengine.auth import _SafeRedirectHandler
+    from alphaengine.sync import _split_push_batches, remote_remove
+
+    monkeypatch.chdir(tmp_path)
+    proj = init_project(tmp_path, name="batch-push-test")
+    create_idea(proj, thesis="Batching prevents 30s proxy timeout", kill_rule="sharpe < 0.5")
+
+    for i in range(21):
+        proj.append_jsonl(
+            "ledger/runs.jsonl",
+            {
+                "run_id": f"run_batch_{i:02d}",
+                "timestamp": "2026-11-11T10:00:00Z",
+                "command": "sweep",
+                "family": "mom",
+                "n_trials": 2,
+                "n_trials_source": "derived_from_grid",
+                "verdict": "marginal",
+                "metrics": {"sharpe_annualized": 0.8, "dsr_probability": 0.6},
+            },
+        )
+    for j in range(50):
+        proj.append_jsonl(
+            "ledger/trials.jsonl",
+            {
+                "attempt_id": f"att_batch_{j:03d}",
+                "run_id": f"run_batch_{j % 21:02d}",
+                "family": "mom",
+                "trial_index": j,
+                "status": "ok",
+                "sharpe": 0.75,
+                "timestamp": "2026-11-11T10:00:00Z",
+            },
+        )
+
+    wire = build_sync_payload(proj)
+    batches = _split_push_batches(wire)
+    # 1 idea (w=4) + 21 runs (w=210) + 50 trial_events (w=100) = 314 weight -> 6 batches
+    assert len(batches) >= 5
+    # Ideas and runs always precede trial_events so FK references exist on the server
+    assert len(batches[0]["ideas"]) == 1
+    assert len(batches[0]["runs"]) > 0
+    assert len(batches[0]["trial_events"]) == 0
+
+    sent_batches: list[dict[str, Any]] = []
+
+    def fake_urlopen_ok(req: Any, timeout: int = 30) -> _FakeHTTPResponse:
+        _ = timeout
+        body = json.loads(req.data.decode("utf-8"))
+        sent_batches.append(body)
+        items: list[dict[str, Any]] = []
+        for st in body.get("studies") or []:
+            items.append({"type": "study", "id": st["study_id"], "status": "accepted"})
+        for r in body.get("runs") or []:
+            items.append({"type": "run", "id": r["run_id"], "status": "accepted"})
+        for idea in body.get("ideas") or []:
+            items.append({"type": "idea", "id": idea["idea_id"], "status": "accepted"})
+        for ev in body.get("trial_events") or []:
+            items.append({"type": "trial_event", "id": ev["attempt_id"], "status": "accepted"})
+        return _FakeHTTPResponse(
+            {
+                "sync_contract": 2,
+                "engine_version": "2.0.4",
+                "counts": {"accepted": len(items), "duplicate": 0, "rejected": 0},
+                "items": items,
+            }
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen_ok)
+    res = push_workspace(proj, api_key="ae_live_test_key_123456")
+    assert res["exit_code"] == EXIT_OK
+    assert res["batches"] == len(batches)
+    assert res["n_ideas"] == 1
+    assert res["n_runs"] == 21
+    assert res["n_trial_events"] == 50
+    assert res["counts"]["accepted"] == 72
+
+    # Verify mid-batch HTML 500 error reports partial progress and scrubs HTML + host
+    call_idx = 0
+
+    def fake_urlopen_fail_midway(req: Any, timeout: int = 30) -> _FakeHTTPResponse:
+        nonlocal call_idx
+        call_idx += 1
+        if call_idx == 1:
+            return fake_urlopen_ok(req, timeout=timeout)
+        html_500 = b"<!DOCTYPE html><html><body><h1>500 Internal Server Error</h1></body></html>"
+        raise urllib.error.HTTPError(
+            req.full_url,
+            500,
+            "Internal Server Error",
+            hdrs=None,
+            fp=io.BytesIO(html_500),  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen_fail_midway)
+    with pytest.raises(SyncServerError) as exc_info:
+        push_workspace(proj, api_key="ae_live_test_key_123456")
+    err_msg = str(exc_info.value)
+    assert "1 of " in err_msg and "batches were sent before this failure" in err_msg
+    assert "<!DOCTYPE" not in err_msg
+    assert "qosai.app" not in err_msg
+
+    # PushItemAck accepts `id` + `code` + `detail` from backend
+    ack = PushItemAck.from_dict(
+        {
+            "type": "run",
+            "id": "run_batch_00",
+            "status": "rejected",
+            "code": "invalid_schema",
+            "detail": "missing field",
+        }
+    )
+    assert ack.local_id == "run_batch_00"
+    assert ack.reason == "invalid_schema: missing field"
+
+    # remote_remove removes configured remote and rejects path traversal names
+    remote_add(proj, "staging", "https://staging.quantos.example")
+    assert remote_remove(proj, "staging") is True
+    assert remote_remove(proj, "staging") is False
+
+    # _SafeRedirectHandler strips Authorization on cross-origin redirect and blocks HTTPS -> HTTP
+    handler = _SafeRedirectHandler()
+    orig_req = urllib.request.Request(
+        "https://quantos.example/api/workspace/sync",
+        headers={"Authorization": "Bearer ae_live_secret1234567890"},
+    )
+    redirected = handler.redirect_request(orig_req, None, 302, "Found", {}, "https://other.example/login")
+    assert redirected is not None
+    assert not redirected.has_header("Authorization")
+    with pytest.raises(urllib.error.URLError, match="HTTPS to HTTP"):
+        handler.redirect_request(orig_req, None, 302, "Found", {}, "http://quantos.example/insecure")

@@ -113,11 +113,17 @@ def enable(*, verbs: list[str], symbols: list[str] | None = None, proj: Any = No
         rl.parse_and_bind("bind ^I rl_complete")
 
     import atexit
+    import contextlib
+    import os
 
     def _save() -> None:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(OSError):
+                os.chmod(path.parent, 0o700)
             rl.write_history_file(str(path))
+            with contextlib.suppress(OSError):
+                os.chmod(path, 0o600)
         except OSError:
             pass
 

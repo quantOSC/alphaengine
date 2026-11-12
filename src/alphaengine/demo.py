@@ -161,21 +161,23 @@ def backtest_fn(*, data: dict[str, list[float]], fast: int = 10, slow: int = 50)
     return out
 
 
-def run() -> int:
+def run(*, result: object = None) -> int:
     """The offline half, end to end. No server, no account, no network.
 
     Printed rather than returned because the point is to SEE it — this is the
     first thing a new install runs, and `alphaengine demo` should answer "does
     any of this work" in one command.
     """
+    from typing import Any
+
     from alphaengine import sweep
 
-    result = sweep(backtest_fn, GRID, data=data)
-    verdict = result.verdict()
-    surface = result.surface()
+    res: Any = sweep(backtest_fn, GRID, data=data) if result is None else result
+    verdict = res.verdict()
+    surface = res.surface()
 
     dsr = verdict.get("deflated_sharpe")
-    print(f"trials     {result.n_trials}  ({verdict.get('n_trials_source')})")
+    print(f"trials     {res.n_trials}  ({verdict.get('n_trials_source')})")
     print(f"verdict    {verdict.get('verdict')}")
     print(f"surface    {surface.get('shape')}")
     print(f"dsr        {dsr if dsr is not None else 'not recorded'}")
@@ -186,13 +188,13 @@ def run() -> int:
     from alphaengine import cli as ui
 
     if ui._tty():
-        sharpes = [t.sharpe for t in result.trials if t.failed is None]
+        sharpes = [t.sharpe for t in res.trials if t.failed is None]
         ui.say("")
         for ln in ui.ridge_lines(sharpes or [0.0], rows=6, cols=40):
             ui.say("  " + ln)
         ui.say(
             f"  {ui._accent(ui.ON)}  {verdict.get('verdict')}  "
-            + ui.dim(f"{result.n_trials} trials {ui.DOT} {surface.get('shape')}")
+            + ui.dim(f"{res.n_trials} trials {ui.DOT} {surface.get('shape')}")
         )
         ui.say("     " + ui.dim("trial Sharpes across the grid"))
     return 0
