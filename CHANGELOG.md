@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to Semantic Versioning (with computed golden values
 treated as part of the public contract).
 
+## [2.0.5] - 2026-11-16
+
+### Fixed
+- **PyPI release provenance (`.github/workflows/publish.yml`):** Restored PEP 740 digital provenance attestations (`pypi-attestations` signing under ambient GitHub OIDC identity and `twine upload --attestations`) while retaining GitHub-owned actions only, resolving the PyPI "Loss of provenance" warning from `2.0.4`.
+
 ## [2.0.4] - 2026-11-11
 
 ### Fixed

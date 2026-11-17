@@ -61,8 +61,10 @@ jobs:
       id-token: write        # the OIDC token. the only credential involved.
     # The repository allows GitHub-owned actions only, so the third-party
     # pypa/gh-action-pypi-publish action cannot run here (startup_failure).
-    # This is PyPI's documented manual Trusted Publishing flow: exchange the
-    # job's OIDC token for a short-lived upload token, then upload with twine.
+    # This is PyPI's documented manual Trusted Publishing flow: sign PEP 740
+    # provenance attestations via pypi-attestations using the ambient OIDC
+    # identity, exchange the OIDC token for a short-lived upload token, then
+    # upload distributions and attestations together with twine.
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -71,8 +73,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install --upgrade twine
+      - run: python -m pip install --upgrade "twine>=5.1" pypi-attestations
       - run: python -m twine check dist/*
+      - name: Sign PEP 740 provenance attestations
+        run: python -m pypi_attestations sign dist/*.whl dist/*.tar.gz
       - name: Mint a short-lived PyPI token via OIDC
         shell: python
         run: |
@@ -98,4 +102,4 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as fh:
               fh.write("TWINE_USERNAME=__token__\n")
               fh.write(f"TWINE_PASSWORD={token}\n")
-      - run: python -m twine upload --non-interactive dist/*
+      - run: python -m twine upload --non-interactive --attestations dist/*

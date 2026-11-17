@@ -112,7 +112,7 @@ def test_sync_v2_payload_schema_share_series_and_json_schema_export(
     # Default `share_series=False`: series (>512) stripped, forbidden v1 keys absent!
     payload_no_series = build_sync_payload(proj, share_series=False)
     assert payload_no_series["sync_contract"] == SYNC_CONTRACT_VERSION == 2
-    assert payload_no_series["engine_version"] == "2.0.4"
+    assert payload_no_series["engine_version"] == "2.0.5"
     assert len(payload_no_series["studies"]) == 1
     assert len(payload_no_series["runs"]) == 1
     assert len(payload_no_series["ideas"]) == 1
@@ -457,7 +457,7 @@ def test_push_workspace_multi_batch_chunking_html_500_and_redirect_safety(
         return _FakeHTTPResponse(
             {
                 "sync_contract": 2,
-                "engine_version": "2.0.4",
+                "engine_version": "2.0.5",
                 "counts": {"accepted": len(items), "duplicate": 0, "rejected": 0},
                 "items": items,
             }
