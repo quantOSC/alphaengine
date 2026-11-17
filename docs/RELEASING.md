@@ -69,9 +69,9 @@ python -m twine check dist/*
 ### Canonical 2.0.5 Built Artifact Digests (`QOS-173`, `QOS-175`)
 
 - **Wheel (`dist/alphaengine-2.0.5-py3-none-any.whl`):**
-  `sha256:fa129ec25d9c71b0c2ff0ad8b21f196496ca5269bf0e0ea53adf670859d4f7df`
+  `sha256:dd9a58a91212ccd38980e02340f242416a5cfba21add1451637002f40d5efa33`
 - **Source Distribution (`dist/alphaengine-2.0.5.tar.gz`):**
-  `sha256:3eba0604b39431111b953c2ff2f49d352a4844ce17cc50e7b4bcb3b2473d7a5f`
+  `sha256:ef9c3a87685d22afab0da680b5671e3954f63c8442060c837f8c1acaab163b45`
 
 ### Canonical 2.0.4 Built Artifact Digests (`QOS-173`, `QOS-175`)
 
